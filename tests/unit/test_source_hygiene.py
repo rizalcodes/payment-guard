@@ -51,14 +51,44 @@ def _literal_parts(node: ast.JoinedStr) -> str:
 # --------------------------------------------------------------------------- #
 
 
+def _isinstance_guard_names(tree: ast.AST) -> set[int]:
+    """Identitas node ``ast.Name`` yang menjadi argumen ``isinstance(...)``.
+
+    Menyebut ``float`` di dalam ``isinstance`` adalah **penolakan** float,
+    kebalikan dari memakainya. ``canonical.py`` dan ``money.py`` harus bisa
+    menolak float, dan untuk itu mereka harus menyebut nama tipenya.
+
+    Hanya pola itu yang dikecualikan. ``float(x)``, ``1.5``, dan anotasi
+    ``: float`` tetap ditandai; ada tes yang membuktikannya.
+    """
+    allowed: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not (isinstance(node.func, ast.Name) and node.func.id == "isinstance"):
+            continue
+        for argument in node.args[1:]:
+            # isinstance(x, float) dan isinstance(x, int | float)
+            for inner in ast.walk(argument):
+                if isinstance(inner, ast.Name):
+                    allowed.add(id(inner))
+    return allowed
+
+
 def find_float_usage(tree: ast.AST) -> list[tuple[int, str]]:
-    """Cari literal float dan pemakaian nama ``float``."""
+    """Cari literal float dan pemakaian nama ``float``.
+
+    Pengecualian tunggal: ``float`` sebagai argumen ``isinstance`` (lihat
+    :func:`_isinstance_guard_names`).
+    """
     findings: list[tuple[int, str]] = []
+    guards = _isinstance_guard_names(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, float):
             findings.append((node.lineno, f"literal float {node.value!r}"))
         elif isinstance(node, ast.Name) and node.id == "float":
-            findings.append((node.lineno, "nama 'float'"))
+            if id(node) not in guards:
+                findings.append((node.lineno, "nama 'float'"))
         elif isinstance(node, ast.Attribute) and node.attr == "float":
             findings.append((node.lineno, "atribut '.float'"))
     return findings
@@ -89,6 +119,34 @@ def test_float_checker_catches_planted_violations(code: str) -> None:
 @pytest.mark.parametrize("code", ["x = 1", "x = 10 ** 6", "x = int('3')", "x = 2**63 - 1"])
 def test_float_checker_allows_integers(code: str) -> None:
     assert find_float_usage(ast.parse(code)) == []
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # Menolak float adalah kebalikan dari memakainya.
+        "if isinstance(x, float): raise ValueError",
+        "if isinstance(x, int | float): raise ValueError",
+        "assert not isinstance(x, float)",
+    ],
+)
+def test_float_checker_allows_isinstance_guards(code: str) -> None:
+    assert find_float_usage(ast.parse(code)) == []
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # Pengecualian isinstance tidak boleh membuka lubang.
+        "x = float('1')",
+        "x = 1.5",
+        "def f(a: float) -> None: ...",
+        "x = isinstance(y, int) and float(z)",
+        "x = numpy.float",
+    ],
+)
+def test_isinstance_exception_does_not_open_a_hole(code: str) -> None:
+    assert find_float_usage(ast.parse(code)), code
 
 
 # --------------------------------------------------------------------------- #
@@ -251,3 +309,153 @@ def test_psycopg_sql_composable_is_confined_to_bootstrap() -> None:
                 users.append(path.name)
                 break
     assert sorted(users) == ["bootstrap.py"], users
+
+
+# --------------------------------------------------------------------------- #
+# Pemeriksa 4: modul murni M1
+# --------------------------------------------------------------------------- #
+
+#: Modul yang WAJIB murni: tanpa database, jaringan, atau jam.
+#: Arsitektur v1.1 bagian 12: "rules.py, money.py, addresses.py, mandate.py
+#: tidak mengimpor db, jaringan, atau jam."
+PURE_MODULES = (
+    "money.py",
+    "addresses.py",
+    "canonical.py",
+    "mandate.py",
+    "rules.py",
+    "reasons.py",
+)
+
+#: Paket pihak ketiga dan stdlib yang membawa dunia luar masuk.
+FORBIDDEN_IMPORTS = frozenset(
+    {
+        # database
+        "psycopg",
+        "sqlite3",
+        "sqlalchemy",
+        # jaringan
+        "socket",
+        "requests",
+        "http",
+        "urllib",
+        "ssl",
+        "asyncio",
+        # jam dan sumber non-determinisme
+        "time",
+        "datetime",
+        "random",
+        "secrets",
+        "uuid",
+        # proses dan berkas
+        "os",
+        "sys",
+        "subprocess",
+        "pathlib",
+        "io",
+        "shutil",
+        "tempfile",
+        "logging",
+    }
+)
+
+#: Modul internal yang boleh diimpor modul murni. ``db`` dan ``config`` tidak
+#: ada di sini dengan sengaja.
+ALLOWED_INTERNAL = frozenset(
+    {"money", "addresses", "canonical", "mandate", "rules", "reasons", "hashing"}
+)
+
+#: Pemanggilan jam yang tidak boleh ada, walau modulnya entah bagaimana masuk.
+FORBIDDEN_CLOCK_ATTRIBUTES = frozenset(
+    {"now", "utcnow", "today", "time", "monotonic", "perf_counter", "time_ns"}
+)
+
+
+def _module_path(name: str) -> Path:
+    return SRC / "payment_guard" / name
+
+
+def _imports_of(tree: ast.AST) -> set[str]:
+    """Nama paket tingkat atas yang diimpor."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names.add(node.module.split(".")[0])
+    return names
+
+
+def _internal_imports_of(tree: ast.AST) -> set[str]:
+    """Submodul ``payment_guard`` yang diimpor."""
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            parts = node.module.split(".")
+            if parts[0] == "payment_guard" and len(parts) > 1:
+                names.add(parts[1])
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                parts = alias.name.split(".")
+                if parts[0] == "payment_guard" and len(parts) > 1:
+                    names.add(parts[1])
+    return names
+
+
+@pytest.mark.parametrize("name", PURE_MODULES)
+def test_pure_module_imports_nothing_impure(name: str) -> None:
+    tree = ast.parse(_module_path(name).read_text(encoding="utf-8"))
+    offending = _imports_of(tree) & FORBIDDEN_IMPORTS
+    assert not offending, f"{name} mengimpor {sorted(offending)}"
+
+
+@pytest.mark.parametrize("name", PURE_MODULES)
+def test_pure_module_does_not_import_db_or_config(name: str) -> None:
+    """Modul murni tidak boleh tahu soal koneksi atau file env."""
+    tree = ast.parse(_module_path(name).read_text(encoding="utf-8"))
+    internal = _internal_imports_of(tree)
+    offending = internal - ALLOWED_INTERNAL
+    assert not offending, f"{name} mengimpor payment_guard.{sorted(offending)}"
+    assert "db" not in internal
+    assert "config" not in internal
+
+
+@pytest.mark.parametrize("name", PURE_MODULES)
+def test_pure_module_never_reads_a_clock(name: str) -> None:
+    """Waktu selalu disuntikkan sebagai parameter, tidak pernah dibaca sendiri."""
+    tree = ast.parse(_module_path(name).read_text(encoding="utf-8"))
+    offending = [
+        f"baris {node.lineno}: .{node.attr}()"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in FORBIDDEN_CLOCK_ATTRIBUTES
+    ]
+    assert not offending, f"{name}: {offending}"
+
+
+def test_the_purity_checkers_would_catch_a_regression() -> None:
+    """Penjaga: pemeriksa di atas bukan tes kosong."""
+    planted = ast.parse(
+        "import time\n"
+        "import psycopg\n"
+        "from payment_guard.db import connect\n"
+        "from datetime import datetime\n"
+        "x = datetime.now()\n"
+    )
+    assert _imports_of(planted) & FORBIDDEN_IMPORTS == {"time", "psycopg", "datetime"}
+    assert _internal_imports_of(planted) == {"db"}
+    clock_calls = [
+        node
+        for node in ast.walk(planted)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in FORBIDDEN_CLOCK_ATTRIBUTES
+    ]
+    assert len(clock_calls) == 1
+
+
+def test_m1_modules_all_exist() -> None:
+    """Kalau satu modul hilang, tes murni di atas akan lolos tanpa memeriksa apa pun."""
+    for name in PURE_MODULES:
+        assert _module_path(name).is_file(), name
