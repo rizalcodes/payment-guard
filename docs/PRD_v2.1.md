@@ -25,6 +25,7 @@
 | 13 | Reason & event | Enum di kode + CHECK database untuk reason_code. Event di `events.py` + `docs/events.md`. |
 | 14 | Tampilan approval | `reason` di blok kutipan tidak tepercaya, sanitasi daftar-izin, token konfirmasi anti-refleks. |
 | 15 | Estimasi | M0 +0,5 hari. Total 10–12 hari tetap (hari 12 buffer). |
+| 16 | Nama field snapshot | `latest_triggering_denial` menggantikan `latest_denial_at` (PRD v2 §14) karena penyaringan pemicu cooldown dilakukan pemanggil. |
 
 ---
 

@@ -12,24 +12,28 @@ Karena itu dua hal harus benar sekaligus:
 * **Makna beda -> hash beda.** Satu batas yang berubah, satu alamat yang
   berubah, satu detik TTL yang berubah: hash baru.
 
-Bentuk file mandate (ditulis operator)::
+Bentuk file mandate, sebelas field, persis PRD v2 bagian 6.1::
 
     {
-      "mandate_id": "demo-2026-11",
+      "mandate_id": "m-001",
       "agent_id": "demo-agent",
-      "allowlist": ["0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"],
-      "max_per_tx": "25",
-      "max_per_day": "100",
+      "chain": "base-sepolia",
+      "max_per_tx": "50",
+      "max_per_day": "200",
       "human_approval_above": "25",
-      "retry_cooldown_seconds": 3600,
-      "human_wait_ttl_seconds": 900,
-      "decision_ttl_seconds": 900
+      "allowed_recipients": ["0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"],
+      "retry_cooldown_seconds": 600,
+      "aggregation_window_seconds": 3600,
+      "decision_ttl_seconds": 900,
+      "human_wait_ttl_seconds": 3600
     }
 
 Bentuk ternormalisasi (yang di-hash) memakai string base units untuk uang dan
-alamat lowercase terurut. Skema ini diturunkan dari field yang disebut di PRD
-6.4, PRD 6.5, Arsitektur 5.1, dan ``0001_init.sql``; PRD v2 yang dirujuk PRD
-6.1 tidak ada di ``docs/``. Dikonfirmasi operator, 2 Nov 2026.
+alamat lowercase terurut.
+
+Catatan penamaan: ``latest_triggering_denial`` di
+:class:`payment_guard.rules.Snapshot` menggantikan ``latest_denial_at``
+(PRD v2 bagian 14) karena penyaringan pemicu cooldown dilakukan pemanggil.
 
 Modul ini murni: tidak menyentuh database, jaringan, atau jam.
 """
@@ -44,6 +48,7 @@ from typing import Final
 
 from payment_guard.addresses import AddressError, normalize_allowlist
 from payment_guard.canonical import canonical_bytes
+from payment_guard.chains import is_supported_chain, supported_chains
 from payment_guard.money import MoneyError, format_base_units, parse_amount
 
 #: ``agent_id`` yang sah (PRD 6.1, ST-32).
@@ -74,13 +79,21 @@ MONEY_FIELDS: Final[tuple[str, ...]] = (
 #: Field detik, wajib int > 0.
 SECONDS_FIELDS: Final[tuple[str, ...]] = (
     "retry_cooldown_seconds",
-    "human_wait_ttl_seconds",
+    "aggregation_window_seconds",
     "decision_ttl_seconds",
+    "human_wait_ttl_seconds",
 )
 
-#: Semua field yang wajib ada. Tidak ada field opsional.
+#: Sebelas field PRD v2 bagian 6.1, tidak lebih dan tidak kurang.
 REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
-    {"mandate_id", "agent_id", "allowlist", *MONEY_FIELDS, *SECONDS_FIELDS}
+    {
+        "mandate_id",
+        "agent_id",
+        "chain",
+        "allowed_recipients",
+        *MONEY_FIELDS,
+        *SECONDS_FIELDS,
+    }
 )
 
 #: Batas panjang nilai di pesan error, supaya log tetap terbaca.
@@ -95,23 +108,27 @@ class MandateError(ValueError):
 class Mandate:
     """Mandate yang sudah divalidasi dan dinormalisasi.
 
-    Jumlah uang adalah ``int`` base units. Allowlist lowercase, terurut, tanpa
-    duplikat. Dibuat hanya lewat :func:`load_mandate`.
+    Jumlah uang adalah ``int`` base units. ``allowed_recipients`` lowercase,
+    terurut, tanpa duplikat. ``chain`` disimpan sebagai string PRD v2; nilai
+    ``chain_id`` integer diturunkan lewat :mod:`payment_guard.chains` oleh
+    pemakai yang membutuhkannya. Dibuat hanya lewat :func:`load_mandate`.
     """
 
     mandate_id: str
     agent_id: str
-    allowlist: tuple[str, ...]
+    chain: str
+    allowed_recipients: tuple[str, ...]
     max_per_tx: int
     max_per_day: int
     human_approval_above: int
     retry_cooldown_seconds: int
-    human_wait_ttl_seconds: int
+    aggregation_window_seconds: int
     decision_ttl_seconds: int
+    human_wait_ttl_seconds: int
 
     def allows_recipient(self, recipient: str) -> bool:
-        """True bila ``recipient`` (lowercase) ada di allowlist."""
-        return recipient in self.allowlist
+        """True bila ``recipient`` (lowercase) ada di ``allowed_recipients``."""
+        return recipient in self.allowed_recipients
 
 
 def load_mandate(data: Mapping[str, object]) -> Mandate:
@@ -140,7 +157,8 @@ def load_mandate(data: Mapping[str, object]) -> Mandate:
 
     mandate_id = _require_mandate_id(data["mandate_id"])
     agent_id = _require_agent_id(data["agent_id"])
-    allowlist = _require_allowlist(data["allowlist"])
+    chain = _require_chain(data["chain"])
+    allowed_recipients = _require_allowed_recipients(data["allowed_recipients"])
     amounts = {field: _require_money(field, data[field]) for field in MONEY_FIELDS}
     seconds = {field: _require_seconds(field, data[field]) for field in SECONDS_FIELDS}
 
@@ -149,13 +167,15 @@ def load_mandate(data: Mapping[str, object]) -> Mandate:
     return Mandate(
         mandate_id=mandate_id,
         agent_id=agent_id,
-        allowlist=allowlist,
+        chain=chain,
+        allowed_recipients=allowed_recipients,
         max_per_tx=amounts["max_per_tx"],
         max_per_day=amounts["max_per_day"],
         human_approval_above=amounts["human_approval_above"],
         retry_cooldown_seconds=seconds["retry_cooldown_seconds"],
-        human_wait_ttl_seconds=seconds["human_wait_ttl_seconds"],
+        aggregation_window_seconds=seconds["aggregation_window_seconds"],
         decision_ttl_seconds=seconds["decision_ttl_seconds"],
+        human_wait_ttl_seconds=seconds["human_wait_ttl_seconds"],
     )
 
 
@@ -164,17 +184,23 @@ def normalized_form(mandate: Mandate) -> dict[str, object]:
 
     Hanya ``str``, ``int``, dan ``list[str]`` yang muncul, supaya
     :func:`payment_guard.canonical.canonical_bytes` menerimanya.
+
+    Urutan kunci di sini tidak berarti apa-apa: ``canonical_bytes`` yang
+    mengurutkannya. Jangan menulis urutan secara manual, karena urutan manual
+    akan menyimpang begitu ada field baru.
     """
     return {
         "mandate_id": mandate.mandate_id,
         "agent_id": mandate.agent_id,
-        "allowlist": list(mandate.allowlist),
+        "chain": mandate.chain,
+        "allowed_recipients": list(mandate.allowed_recipients),
         "max_per_tx": format_base_units(mandate.max_per_tx),
         "max_per_day": format_base_units(mandate.max_per_day),
         "human_approval_above": format_base_units(mandate.human_approval_above),
         "retry_cooldown_seconds": mandate.retry_cooldown_seconds,
-        "human_wait_ttl_seconds": mandate.human_wait_ttl_seconds,
+        "aggregation_window_seconds": mandate.aggregation_window_seconds,
         "decision_ttl_seconds": mandate.decision_ttl_seconds,
+        "human_wait_ttl_seconds": mandate.human_wait_ttl_seconds,
     }
 
 
@@ -242,13 +268,29 @@ def _require_agent_id(value: object) -> str:
     return text
 
 
-def _require_allowlist(value: object) -> tuple[str, ...]:
+def _require_chain(value: object) -> str:
+    """PRD v2 bagian 6.2: ``chain`` hanya ``base-sepolia``.
+
+    Mandate menyimpan string ini apa adanya. Pemetaan ke ``chain_id`` EIP-155
+    ada di :mod:`payment_guard.chains`, bukan di mandate.
+    """
+    text = _require_text("chain", value)
+    if not is_supported_chain(text):
+        raise MandateError(
+            f"chain {_quote(text)} tidak didukung; yang didukung: {', '.join(supported_chains())}"
+        )
+    return text
+
+
+def _require_allowed_recipients(value: object) -> tuple[str, ...]:
     if isinstance(value, str) or not isinstance(value, list):
-        raise MandateError(f"allowlist harus berupa list alamat, bukan {type(value).__name__}")
+        raise MandateError(
+            f"allowed_recipients harus berupa list alamat, bukan {type(value).__name__}"
+        )
     try:
         return tuple(normalize_allowlist(value))
     except AddressError as exc:
-        raise MandateError(f"allowlist: {exc}") from None
+        raise MandateError(f"allowed_recipients: {exc}") from None
 
 
 def _require_money(field: str, value: object) -> int:

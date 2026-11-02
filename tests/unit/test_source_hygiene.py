@@ -322,6 +322,7 @@ PURE_MODULES = (
     "money.py",
     "addresses.py",
     "canonical.py",
+    "chains.py",
     "mandate.py",
     "rules.py",
     "reasons.py",
@@ -362,7 +363,7 @@ FORBIDDEN_IMPORTS = frozenset(
 #: Modul internal yang boleh diimpor modul murni. ``db`` dan ``config`` tidak
 #: ada di sini dengan sengaja.
 ALLOWED_INTERNAL = frozenset(
-    {"money", "addresses", "canonical", "mandate", "rules", "reasons", "hashing"}
+    {"money", "addresses", "canonical", "chains", "mandate", "rules", "reasons", "hashing"}
 )
 
 #: Pemanggilan jam yang tidak boleh ada, walau modulnya entah bagaimana masuk.

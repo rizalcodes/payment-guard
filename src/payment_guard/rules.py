@@ -17,6 +17,11 @@ Dua hal yang sengaja TIDAK ada di :class:`Request`:
 ``agent_id``
     Identitas datang dari mandate, bukan dari permintaan (Security v1.1 S1).
 
+Nama parameter ``state_snapshot`` mengikuti PRD v2 bagian 14. Nama field
+``latest_triggering_denial`` di dalamnya **tidak** mengikuti ``latest_denial_at``
+dari bagian yang sama, karena penyaringan pemicu cooldown dilakukan pemanggil
+dan nama lama menyiratkan "waktu saja"; lihat :class:`Snapshot`.
+
 Urutan evaluasi mengikuti PRD v2.1 bagian 6.4 persis, dan urutannya bermakna:
 cooldown diperiksa lebih dulu supaya agent yang baru ditolak tidak bisa
 memetakan batas dengan mencoba berulang kali.
@@ -142,7 +147,7 @@ class Decision:
 def evaluate(
     request: Request,
     mandate: Mandate,
-    snapshot: Snapshot,
+    state_snapshot: Snapshot,
     now: int,
 ) -> Decision:
     """Terapkan aturan mandate. Murni: hasil hanya bergantung pada argumen.
@@ -153,7 +158,7 @@ def evaluate(
     Args:
         request: permintaan yang sudah divalidasi.
         mandate: mandate aktif, sudah ternormalisasi.
-        snapshot: jatah terpakai dan penolakan pemicu terakhir.
+        state_snapshot: jatah terpakai dan penolakan pemicu terakhir.
         now: detik UTC dari **jam database**, disuntikkan pemanggil.
 
     Returns:
@@ -162,10 +167,10 @@ def evaluate(
     Raises:
         RuleInputError: bila argumennya tidak sesuai kontrak.
     """
-    _require_inputs(request, mandate, snapshot, now)
+    _require_inputs(request, mandate, state_snapshot, now)
 
     # 1. Cooldown setelah penolakan sebelumnya.
-    denial = snapshot.latest_triggering_denial
+    denial = state_snapshot.latest_triggering_denial
     if denial is not None and triggers_cooldown(denial.status, denial.reason_code):
         cooldown_ends = denial.decided_at + mandate.retry_cooldown_seconds
         if now < cooldown_ends:
@@ -184,11 +189,11 @@ def evaluate(
         return Decision(Status.DENIED, ReasonCode.OVER_PER_TX_LIMIT)
 
     # 4. Batas harian, termasuk yang sudah terpakai hari ini.
-    if snapshot.committed_day + request.amount_base > mandate.max_per_day:
+    if state_snapshot.committed_day + request.amount_base > mandate.max_per_day:
         return Decision(Status.DENIED, ReasonCode.OVER_DAILY_LIMIT)
 
     # 5. Ambang persetujuan manusia, diagregasi per recipient (ST-12).
-    if snapshot.committed_recipient + request.amount_base > mandate.human_approval_above:
+    if state_snapshot.committed_recipient + request.amount_base > mandate.human_approval_above:
         return Decision(Status.NEEDS_HUMAN, ReasonCode.HUMAN_APPROVAL_REQUIRED)
 
     # 6. Lolos semua batas.
@@ -204,13 +209,15 @@ def cooldown_ends_at(denial: Denial, mandate: Mandate) -> int:
     return denial.decided_at + mandate.retry_cooldown_seconds
 
 
-def _require_inputs(request: Request, mandate: Mandate, snapshot: Snapshot, now: int) -> None:
+def _require_inputs(request: Request, mandate: Mandate, state_snapshot: Snapshot, now: int) -> None:
     if not isinstance(request, Request):
         raise RuleInputError(f"request harus Request, bukan {type(request).__name__}")
     if not isinstance(mandate, Mandate):
         raise RuleInputError(f"mandate harus Mandate, bukan {type(mandate).__name__}")
-    if not isinstance(snapshot, Snapshot):
-        raise RuleInputError(f"snapshot harus Snapshot, bukan {type(snapshot).__name__}")
+    if not isinstance(state_snapshot, Snapshot):
+        raise RuleInputError(
+            f"state_snapshot harus Snapshot, bukan {type(state_snapshot).__name__}"
+        )
 
     _require_non_negative_int("now", now)
     if now < _MIN_NOW:
@@ -233,10 +240,10 @@ def _require_inputs(request: Request, mandate: Mandate, snapshot: Snapshot, now:
             f"recipient harus sudah ternormalisasi lowercase, dapat {request.recipient!r}"
         )
 
-    _require_non_negative_int("committed_day", snapshot.committed_day)
-    _require_non_negative_int("committed_recipient", snapshot.committed_recipient)
+    _require_non_negative_int("committed_day", state_snapshot.committed_day)
+    _require_non_negative_int("committed_recipient", state_snapshot.committed_recipient)
 
-    denial = snapshot.latest_triggering_denial
+    denial = state_snapshot.latest_triggering_denial
     if denial is not None:
         if not isinstance(denial, Denial):
             raise RuleInputError(

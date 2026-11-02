@@ -41,13 +41,15 @@ def mandate(**overrides: Any) -> Mandate:
     data: dict[str, Any] = {
         "mandate_id": "demo-2026-11",
         "agent_id": "demo-agent",
-        "allowlist": [ALLOWED_A, ALLOWED_B],
+        "chain": "base-sepolia",
+        "allowed_recipients": [ALLOWED_A, ALLOWED_B],
         "max_per_tx": "25",
         "max_per_day": "100",
         "human_approval_above": "25",
         "retry_cooldown_seconds": COOLDOWN,
-        "human_wait_ttl_seconds": 900,
+        "aggregation_window_seconds": 3600,
         "decision_ttl_seconds": 900,
+        "human_wait_ttl_seconds": 900,
     }
     data.update(overrides)
     return load_mandate(data)
@@ -379,7 +381,7 @@ class TestPurity:
         Dijamin oleh bentuk, bukan oleh disiplin: tidak ada parameternya.
         """
         parameters = set(inspect.signature(evaluate).parameters)
-        assert parameters == {"request", "mandate", "snapshot", "now"}
+        assert parameters == {"request", "mandate", "state_snapshot", "now"}
         assert "reason" not in parameters
 
     def test_request_has_no_reason_field(self) -> None:
@@ -545,7 +547,7 @@ class TestInputValidation:
             evaluate({"recipient": ALLOWED_A}, mandate(), snapshot(), NOW)  # type: ignore[arg-type]
         with pytest.raises(RuleInputError, match="mandate harus Mandate"):
             evaluate(request(), {"max_per_tx": 1}, snapshot(), NOW)  # type: ignore[arg-type]
-        with pytest.raises(RuleInputError, match="snapshot harus Snapshot"):
+        with pytest.raises(RuleInputError, match="state_snapshot harus Snapshot"):
             evaluate(request(), mandate(), {"committed_day": 0}, NOW)  # type: ignore[arg-type]
 
     def test_negative_denial_timestamp_rejected(self) -> None:
