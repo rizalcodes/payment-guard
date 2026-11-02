@@ -1,14 +1,19 @@
 """Entry point ``guard``.
 
-Hanya sub-perintah ``db`` yang ada di M0:
+Perintah yang tersedia sampai M2:
 
     guard db migrate          terapkan migrasi yang belum terapan (role migrator)
     guard db status           laporkan migrasi terapan dan tertunda
     guard db bootstrap-roles  buat role database (admin, sekali)
+    guard keygen              buat pasangan kunci Ed25519 (sekali)
+    guard verify              periksa envelope dengan kunci publik saja
 
 ``migrate`` dan ``status`` hanya membaca ``.env.migrator``; keduanya tidak
 pernah membuka ``.env``. ``bootstrap-roles`` menulis kedua file. Lihat
 :mod:`payment_guard.config`.
+
+``verify`` tidak menyentuh database, jaringan, maupun chain, dan tidak punya
+jalur untuk membaca bahan kunci rahasia (:mod:`payment_guard.verify_cli`).
 
 Perintah runtime (``serve``, ``execute``, ``approvals``, ``watch``,
 ``reconcile``) menyusul di milestone berikutnya.
@@ -28,7 +33,14 @@ from payment_guard.config import (
     require_migrator_url,
 )
 from payment_guard.db import MigrationError
+from payment_guard.keygen import (
+    PUBLIC_KEYS_RELATIVE_PATH,
+    SIGNING_KEY_RELATIVE_PATH,
+    KeygenError,
+    run_keygen,
+)
 from payment_guard.migrate import migrations_dir, run_migrate, run_status
+from payment_guard.verify_cli import describe, verify_envelope_file
 
 
 def _repo_root() -> Path:
@@ -73,6 +85,23 @@ def _cmd_bootstrap_roles(args: argparse.Namespace) -> int:
         print(line)
     print("\nPassword role tidak ditampilkan dengan sengaja. Lanjutkan dengan `guard db migrate`.")
     return 0
+
+
+def _cmd_keygen(args: argparse.Namespace) -> int:
+    result = run_keygen(args.signing_key_file, args.public_keys_file)
+    for line in result.summary_lines():
+        print(line)
+    return 0
+
+
+def _cmd_verify(args: argparse.Namespace) -> int:
+    outcome = verify_envelope_file(args.envelope, args.pubkey, args.mandate)
+    print(outcome.render())
+    if outcome.valid and outcome.payload is not None:
+        for line in describe(outcome.payload):
+            print(line)
+        return 0
+    return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -137,6 +166,54 @@ def build_parser() -> argparse.ArgumentParser:
             help=(f"file berisi MIGRATOR_DB_URL (default: {MIGRATOR_ENV_FILENAME} di akar repo)"),
         )
 
+    # --- keygen: menulis bahan kunci, jadi bukan bagian dari `db` ---
+    keygen_parser = sub.add_parser(
+        "keygen",
+        help="buat pasangan kunci Ed25519 (sekali). Tidak pernah menimpa yang sudah ada.",
+    )
+    keygen_parser.add_argument(
+        "--signing-key-file",
+        type=Path,
+        default=None,
+        help=(
+            f"tujuan bahan kunci rahasia (default: {SIGNING_KEY_RELATIVE_PATH} "
+            "di akar repo). Di-gitignore; jangan di-commit."
+        ),
+    )
+    keygen_parser.add_argument(
+        "--public-keys-file",
+        type=Path,
+        default=None,
+        help=(
+            f"registri kunci publik (default: {PUBLIC_KEYS_RELATIVE_PATH} di akar "
+            "repo). Boleh di-commit."
+        ),
+    )
+    keygen_parser.set_defaults(handler=_cmd_keygen)
+
+    # --- verify: hanya kunci publik, tanpa database dan tanpa jaringan ---
+    verify_parser = sub.add_parser(
+        "verify",
+        help="periksa envelope dengan kunci publik saja; tanpa database atau jaringan",
+    )
+    verify_parser.add_argument("envelope", type=Path, help="berkas envelope JSON")
+    verify_parser.add_argument(
+        "--pubkey",
+        type=Path,
+        default=None,
+        help=f"registri kunci publik (default: {PUBLIC_KEYS_RELATIVE_PATH} di akar repo)",
+    )
+    verify_parser.add_argument(
+        "--mandate",
+        type=Path,
+        default=None,
+        help=(
+            "opsional: cocokkan mandate_hash di payload dengan hash berkas mandate ini, "
+            "supaya envelope yang sah atas aturan yang salah tidak lolos"
+        ),
+    )
+    verify_parser.set_defaults(handler=_cmd_verify)
+
     return parser
 
 
@@ -145,20 +222,26 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     root = _repo_root()
-    if getattr(args, "migrations_dir", None) is None:
-        args.migrations_dir = migrations_dir(root)
-    # `env_file` hanya diisi untuk perintah yang memang mendeklarasikannya.
-    # migrate dan status tidak punya atribut itu sama sekali, jadi tidak ada
-    # path `.env` yang bisa mereka baca walau tidak sengaja.
-    if hasattr(args, "env_file") and args.env_file is None:
-        args.env_file = root / RUNTIME_ENV_FILENAME
-    if getattr(args, "migrator_env_file", None) is None:
-        args.migrator_env_file = root / MIGRATOR_ENV_FILENAME
+    # Setiap default hanya diisi untuk perintah yang memang mendeklarasikan
+    # argumennya. Perintah yang tidak mendeklarasikannya tidak punya
+    # atributnya sama sekali, jadi tidak ada path yang bisa dibacanya tanpa
+    # sengaja: `verify` tidak punya path `.env`, dan `db` tidak punya path
+    # bahan kunci.
+    for name, default in (
+        ("migrations_dir", migrations_dir(root)),
+        ("env_file", root / RUNTIME_ENV_FILENAME),
+        ("migrator_env_file", root / MIGRATOR_ENV_FILENAME),
+        ("signing_key_file", root / SIGNING_KEY_RELATIVE_PATH),
+        ("public_keys_file", root / PUBLIC_KEYS_RELATIVE_PATH),
+        ("pubkey", root / PUBLIC_KEYS_RELATIVE_PATH),
+    ):
+        if hasattr(args, name) and getattr(args, name) is None:
+            setattr(args, name, default)
 
     try:
         return int(args.handler(args))
-    except MigrationError as exc:
-        # Pesan MigrationError sudah bebas rahasia; dicetak apa adanya.
+    except (MigrationError, KeygenError) as exc:
+        # Pesan keduanya sudah bebas rahasia; dicetak apa adanya.
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

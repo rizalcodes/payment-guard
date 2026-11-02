@@ -326,6 +326,7 @@ PURE_MODULES = (
     "mandate.py",
     "rules.py",
     "reasons.py",
+    "signing.py",
 )
 
 #: Paket pihak ketiga dan stdlib yang membawa dunia luar masuk.
@@ -363,7 +364,17 @@ FORBIDDEN_IMPORTS = frozenset(
 #: Modul internal yang boleh diimpor modul murni. ``db`` dan ``config`` tidak
 #: ada di sini dengan sengaja.
 ALLOWED_INTERNAL = frozenset(
-    {"money", "addresses", "canonical", "chains", "mandate", "rules", "reasons", "hashing"}
+    {
+        "money",
+        "addresses",
+        "canonical",
+        "chains",
+        "mandate",
+        "rules",
+        "reasons",
+        "hashing",
+        "signing",
+    }
 )
 
 #: Pemanggilan jam yang tidak boleh ada, walau modulnya entah bagaimana masuk.
