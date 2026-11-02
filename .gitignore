@@ -1,0 +1,42 @@
+# --- Rahasia: jangan pernah di-commit ---
+# .env          -> lima URL runtime
+# .env.migrator -> MIGRATOR_DB_URL (role pemilik objek), sengaja terpisah
+.env
+.env.*
+!.env.example
+!.env.migrator.example
+
+# File kunci (tanda tangan Guard, wallet Executor)
+*.key
+*.pem
+*.p8
+*.pk8
+*.jwk
+*.keystore
+secrets/
+keys/
+*_private.json
+guard_signing*.json
+executor_wallet*.json
+
+# --- Hasil eval (bisa memuat transkrip mentah) ---
+evals/results/
+
+# --- Python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

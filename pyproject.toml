@@ -1,0 +1,67 @@
+[project]
+name = "payment-guard"
+version = "0.1.0"
+description = "Testnet-only reference implementation: deterministic mandate enforcement for agent payments."
+readme = "README.md"
+requires-python = "==3.12.*"
+dependencies = [
+    "psycopg[binary]>=3.2,<4",
+    # Dipakai mulai M2 (signing Ed25519). Dipin sekarang supaya lockfile stabil.
+    "cryptography>=43,<47",
+    # Keccak-256 untuk Ethereum (M1, M5). hashlib hanya punya SHA3-256 yang
+    # distandarkan NIST, yang padding-nya berbeda. Lihat payment_guard.hashing.
+    "pycryptodome>=3.21,<4",
+]
+
+[project.scripts]
+guard = "payment_guard.cli:main"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.7.0",
+    "pytest>=8.3,<9",
+    "ruff>=0.8,<1",
+]
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "payment_guard"
+module-root = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: butuh Postgres dari docker compose project payment-guard (port 5434)",
+]
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "UP",       # pyupgrade
+    "B",        # bugbear
+    "S",        # bandit (termasuk S608: SQL dirakit string)
+    "RUF",
+]
+ignore = [
+    "S101",  # assert diizinkan di tes
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Pelonggaran ini HANYA untuk tes, tidak pernah untuk src/:
+#   S105/S106  password palsu sebagai data uji (canary kebocoran)
+#   S608       tes hak akses menyusun DDL/GRANT dari nama objek yang sudah
+#              divalidasi daftar-izin; ditinjau manual
+#   S104/S108  "0.0.0.0" dan "/tmp" muncul sebagai nama host yang justru
+#              sedang diuji penolakannya, bukan sebagai bind atau path nyata
+"tests/**" = ["S104", "S105", "S106", "S108", "S608"]

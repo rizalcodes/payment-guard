@@ -1,0 +1,11 @@
+# Checksum migrasi dihitung dari isi file setelah normalisasi CRLF -> LF.
+# Baris di bawah menjaga agar file SQL tidak pernah di-checkout sebagai CRLF di
+# Windows, supaya isi di disk sama dengan isi di repo.
+migrations/*.sql text eol=lf
+
+# Default: seluruh repo dipegang LF, di semua OS. Tanpa `eol=lf`, checkout di
+# Windows menghasilkan CRLF dan isi di disk berbeda dari isi di repo.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.pdf binary
