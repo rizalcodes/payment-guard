@@ -88,6 +88,24 @@ Contoh tanpa nilai: `.env.example` dan `.env.migrator.example`. Keduanya boleh d
 - `0002_roles.sql` (migrator): hanya hak tabel dan sequence. Memastikan role grup ada; bila belum, `RAISE EXCEPTION 'jalankan guard db bootstrap-roles dulu'`.
 - Runner migrasi memasang notice handler dan menggagalkan migrasi bila ada `WARNING` berpola "no privileges".
 
+**Guard tidak bisa memverifikasi versi migrasi (keputusan M3, opsi A).**
+`guard_app` tidak punya hak apa pun ke `schema_migrations` (lihat matriks di
+3.3), dan hak itu **tidak** ditambahkan: tabel itu milik owner saja. Akibatnya
+`require_tables` saat start hanya memastikan tabel yang dibutuhkan **ada**,
+bukan bahwa skemanya versi terakhir.
+
+- **Operator wajib** menjalankan `guard db status` (role migrator) dan
+  memastikan **tidak ada migrasi yang tertunda** sebelum `guard serve`.
+- Database yang dimigrasi setengah jalan **lolos** start Guard. Ini batas yang
+  diterima, bukan bug: menutupnya butuh hak baru atau tabel baru, dan keduanya
+  lebih mahal daripada satu langkah operator.
+- Opsi B — tabel atau view versi khusus yang boleh dibaca `guard_app`, lewat
+  migrasi `0003` — **ditinjau di M9**, bersama perubahan CHECK nama event di
+  `audit_log`, supaya dua perubahan skema jadi satu.
+
+Tercatat sebagai RR-12 di Security v1.1 bagian 10. Langkah operatornya ada di
+README, bagian "Menjalankan Guard".
+
 ### 3.3 Matriks hak minimum
 
 | Tabel | guard | approver | executor | watcher | reconciler |
@@ -177,6 +195,8 @@ Tes paralel: pergantian mandate versus pembuatan execution, kedua urutan diuji. 
 6. Commit. Lalu ambil session lock `guard:<agent_id>` di koneksi dedikasi. Bila sudah dipegang, gagal dengan pesan jelas.
 
 Urutan langkah 2 dan 6 penting: session lock diambil setelah transaksi commit, jadi Guard kedua gagal sebelum mengubah `active_mandates`.
+
+Sebelum langkah 1, Guard memastikan tabel yang dibutuhkan ada. Yang **tidak** ia periksa adalah versi migrasinya; lihat 3.2 dan RR-12.
 
 ### 5.4 Mandate aktif tidak sama dengan file di disk
 - Sumber kebenaran "mandate aktif" = `active_mandates` (apa yang Guard muat).

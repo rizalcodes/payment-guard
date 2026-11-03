@@ -290,6 +290,7 @@ Tambahan atas bagian 13 PRD v2.1. Semua otomatis kecuali ditandai *review*.
 | RR-9 | Operator tertipu isi kutipan `reason` meski layar sudah dirancang (anti-injeksi tampilan, bukan jaminan) | **Diterima**. Token konfirmasi anti-refleks, bukan kontrol keamanan. Ditulis di README |
 | RR-10 | Envelope yang sudah beredar tidak bisa dibatalkan sampai `valid_until` | **Diterima**. `decision_ttl` pendek |
 | RR-11 | Execution `signed`/`broadcast` tidak dibatalkan saat mandate berganti | **Diterima** (by design, komitmen) |
+| RR-12 | Versi migrasi tidak bisa diverifikasi oleh Guard (`guard_app` tanpa hak ke `schema_migrations`). Database yang dimigrasi setengah jalan lolos start | **Diterima v1**. Mitigasi: langkah operator di README (`guard db status` harus "0 tertunda" sebelum `guard serve`). Perbaikan opsi B — tabel versi khusus lewat migrasi `0003` — ditinjau di M9 |
 
 ---
 

@@ -78,6 +78,34 @@ disengaja, tambahkan `--allow-remote-admin`.
 Dijalankan dua kali, langkah 3 tidak mengubah apa pun: URL yang sudah tercatat
 dipakai ulang, bukan dirotasi.
 
+## Menjalankan Guard
+
+**Periksa dulu bahwa skemanya mutakhir:**
+
+```bash
+uv run guard db status      # harus menampilkan "0 tertunda"
+uv run guard db migrate     # hanya bila ada yang tertunda
+uv run guard serve
+```
+
+Langkah pertama bukan formalitas. Guard berjalan sebagai `guard_app`, yang
+**tidak punya hak ke `schema_migrations`** dan karena itu tidak bisa memeriksa
+versi skema sendiri. Saat start ia hanya memastikan tabel yang dibutuhkan ada,
+jadi **database yang dimigrasi setengah jalan akan lolos start** dan baru gagal
+nanti, di tengah keputusan. Memeriksanya di sini memindahkan kegagalan itu ke
+tempat yang benar.
+
+Kalau `status` menampilkan baris `tertunda`, jalankan `guard db migrate` lebih
+dulu, lalu `status` sekali lagi untuk memastikan.
+
+Batas ini diterima dengan sengaja: lihat RR-12 di
+[docs/Security_v1.1.md](docs/Security_v1.1.md) dan bagian 3.2 di
+[docs/Architecture_v1.1.md](docs/Architecture_v1.1.md).
+
+`guard serve` membaca `.env` saja, tidak pernah `.env.migrator`.
+`GUARD_SIGNING_KEY_PATH` **harus** menunjuk ke luar akar repo; Guard menolak
+start kalau tidak. Lihat `.env.example`.
+
 ## Perintah yang tersedia di M0
 
 | Perintah | Dijalankan sebagai | Membaca | Guna |
