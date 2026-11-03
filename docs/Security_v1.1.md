@@ -196,7 +196,7 @@ Hentikan Executor. Periksa transaksi di block explorer. Bandingkan dengan `execu
 
 **8.5 Password role DB bocor**
 
-> **Rotasi otomatis belum diimplementasi.** Rencana: `guard db bootstrap-roles --rotate-passwords`, tenggat sebelum M3. Sampai perintah itu ada, pakai prosedur manual di bawah. Jangan menjalankan perintah yang belum ada.
+> **Rotasi otomatis belum diimplementasi.** Rencana: `guard db bootstrap-roles --rotate-passwords`, ditinjau di M9 bersama perubahan skema lain. Sampai perintah itu ada, pakai prosedur manual di bawah. Jangan menjalankan perintah yang belum ada.
 
 Prosedur manual:
 1. Hentikan proses yang memakai role itu.
