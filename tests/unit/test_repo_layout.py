@@ -97,7 +97,16 @@ class TestDependencies:
         assert "psycopg[binary]" in names
         assert "cryptography" in names, "disiapkan untuk M2 (signing)"
         assert "pycryptodome" in names, "Keccak-256 untuk M1 dan M5"
-        assert len(names) == 3, f"dependensi runtime harus minimal, ada: {names}"
+        assert "mcp" in names, "SDK MCP resmi untuk server Guard (M3)"
+        assert len(names) == 4, f"dependensi runtime harus minimal, ada: {names}"
+
+    def test_mcp_is_the_official_sdk_and_pinned(self, pyproject: dict) -> None:
+        """PRD v2 bagian 5: SDK resmi Python, bukan implementasi protokol sendiri."""
+        spec = next(d for d in pyproject["project"]["dependencies"] if d.startswith("mcp"))
+        assert ">=" in spec and "<" in spec, f"mcp harus dibatasi versinya: {spec}"
+
+    def test_lockfile_pins_mcp(self) -> None:
+        assert 'name = "mcp"' in (ROOT / "uv.lock").read_text(encoding="utf-8")
 
     def test_psycopg_is_version_3(self, pyproject: dict) -> None:
         spec = next(d for d in pyproject["project"]["dependencies"] if d.startswith("psycopg"))

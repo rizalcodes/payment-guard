@@ -1,0 +1,215 @@
+"""Nama kejadian dan satu-satunya jalur tulis ke ``audit_log``.
+
+Arsitektur v1.1 bagian 12: "Hanya ``events.py`` menulis ``audit_log``. Tidak
+ada string event di luar enum." Ada tes AST yang menegakkan keduanya.
+
+Alasannya bukan kerapian. ``audit_log`` adalah bukti (Security v1.1 A4), dan
+bukti yang nama kejadiannya diketik ulang di sepuluh tempat akan punya sebelas
+ejaan. Satu enum berarti ``docs/events.md`` di M9 bisa dibuat dari kode, dan
+CHECK ``event`` di database bisa ditambahkan tanpa menemukan kejutan.
+
+Hanya kejadian M3 yang ada di sini. Kejadian milestone lain
+(``decision_expired``, ``approval_*``, ``execution_*``, ``settlement_*``,
+``reconciliation_*``, ``alarm_*``) sengaja **belum** dibuat: enum yang memuat
+nama yang belum pernah ditulis tidak bisa dibedakan dari enum yang memuat nama
+yang salah.
+"""
+
+from __future__ import annotations
+
+import re
+from enum import StrEnum
+from typing import Final
+
+import psycopg
+from psycopg.types.json import Jsonb
+
+from payment_guard.canonical import CanonicalError, validate
+
+#: SQL statik; nilai selalu lewat parameter.
+INSERT_AUDIT: Final = "INSERT INTO audit_log (actor, event, payload) VALUES (%s, %s, %s)"
+
+
+class Actor(StrEnum):
+    """Pelaku kejadian. Sama dengan CHECK ``audit_log.actor``."""
+
+    GUARD = "guard"
+    APPROVER = "approver"
+    EXECUTOR = "executor"
+    WATCHER = "watcher"
+    RECONCILER = "reconciler"
+    HUMAN = "human"
+    MIGRATOR = "migrator"
+
+
+class Event(StrEnum):
+    """Kejadian yang sudah dipakai. Daftar tertutup."""
+
+    #: Guard start memuat mandate dan memperbarui ``active_mandates``.
+    MANDATE_LOADED = "mandate_loaded"
+    #: Satu keputusan ``check_payment`` tercatat.
+    DECISION_MADE = "decision_made"
+    #: Lebih dari lima ``retry_blocked`` dalam satu jendela cooldown
+    #: (PRD v2 bagian 6.4). Sinyal agent yang mencoba memetakan batas.
+    REPEATED_RETRY = "repeated_retry"
+    #: Heartbeat gagal: koneksi lock hilang, Guard berhenti menjawab.
+    GUARD_LOCK_LOST = "guard_lock_lost"
+    #: Pemeriksaan saat start gagal, mis. Guard kedua untuk agent yang sama.
+    STARTUP_CHECK_FAILED = "startup_check_failed"
+
+
+#: Actor yang sah untuk tiap kejadian. Semua kejadian M3 ditulis Guard.
+EVENT_ACTORS: Final[dict[Event, frozenset[Actor]]] = {
+    Event.MANDATE_LOADED: frozenset({Actor.GUARD}),
+    Event.DECISION_MADE: frozenset({Actor.GUARD}),
+    Event.REPEATED_RETRY: frozenset({Actor.GUARD}),
+    Event.GUARD_LOCK_LOST: frozenset({Actor.GUARD}),
+    Event.STARTUP_CHECK_FAILED: frozenset({Actor.GUARD}),
+}
+
+#: Kunci payload yang ditolak, apa pun isinya.
+#:
+#: ``reason`` dan ``reason_text`` ada di sini karena field ``reason`` dari agent
+#: tidak boleh mengalir ke mana pun selain kolom ``decisions.reason_text``
+#: (PRD v2.1 bagian 3 nomor 10, Security v1.1 T-8, I3). ``envelope`` dan
+#: ``signature`` ada di sini karena envelope adalah kredensial sekali pakai
+#: (Security v1.1 I5), bukan karena ia rahasia abadi.
+#:
+#: ``reason_code`` **boleh**: ia enum tertutup milik Guard, bukan teks agent.
+FORBIDDEN_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "reason",
+        "reason_text",
+        "envelope",
+        "signature",
+        "signed_decision",
+        "password",
+        "secret",
+        "private_key",
+        "signing_key",
+        "token",
+        "api_key",
+        "db_url",
+    }
+)
+
+#: Potongan nama kunci yang menandakan rahasia, diperiksa sebagai substring.
+FORBIDDEN_KEY_FRAGMENTS: Final[tuple[str, ...]] = ("password", "secret", "private", "_url")
+
+#: Pola nilai yang tidak boleh masuk audit: URL koneksi dan blok kunci PEM.
+FORBIDDEN_VALUE_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
+    re.compile(r"postgres(?:ql)?://", re.IGNORECASE),
+    re.compile(r"-----BEGIN"),
+)
+
+
+class AuditError(ValueError):
+    """Kejadian, actor, atau payload tidak sah. Tidak ada baris yang ditulis."""
+
+
+def allowed_actors(event: Event) -> frozenset[Actor]:
+    """Actor yang sah untuk ``event``."""
+    if not isinstance(event, Event):
+        raise AuditError(f"event tidak dikenal: {event!r}")
+    return EVENT_ACTORS[event]
+
+
+def require_valid_event(event: Event, actor: Actor) -> None:
+    """Pastikan ``event`` ada di enum dan ``actor`` sah untuk kejadian itu.
+
+    Raises:
+        AuditError: bila salah satu tidak sah.
+    """
+    allowed = allowed_actors(event)
+    if not isinstance(actor, Actor):
+        raise AuditError(f"actor tidak dikenal: {actor!r}")
+    if actor not in allowed:
+        raise AuditError(
+            f"actor {actor.value!r} tidak sah untuk event {event.value!r}; "
+            f"yang sah: {', '.join(sorted(a.value for a in allowed))}"
+        )
+
+
+def require_safe_payload(payload: object, path: str = "$") -> None:
+    """Pastikan payload tidak memuat rahasia dan tipenya bisa diserialisasi.
+
+    Pemeriksaan tipe dipakai ulang dari :mod:`payment_guard.canonical`, jadi
+    larangan ``float`` dan ``bool`` berlaku di sini juga tanpa definisi kedua.
+
+    Raises:
+        AuditError: bila ada kunci terlarang, nilai berpola rahasia, atau tipe
+            yang tidak bisa diserialisasi.
+    """
+    try:
+        validate(payload, path)
+    except CanonicalError as exc:
+        raise AuditError(f"payload audit tidak bisa diserialisasi: {exc}") from None
+    _scan(payload, path)
+
+
+def _scan(value: object, path: str) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            lowered = key.lower()
+            if lowered in FORBIDDEN_PAYLOAD_KEYS:
+                raise AuditError(
+                    f"{path}.{key}: kunci itu tidak boleh masuk audit_log. "
+                    "Teks dari agent dan bahan kredensial tidak pernah dicatat."
+                )
+            for fragment in FORBIDDEN_KEY_FRAGMENTS:
+                if fragment in lowered:
+                    raise AuditError(
+                        f"{path}.{key}: nama kunci mengandung {fragment!r}, yang menandakan rahasia"
+                    )
+            _scan(item, f"{path}.{key}")
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _scan(item, f"{path}[{index}]")
+        return
+    if isinstance(value, str):
+        for pattern in FORBIDDEN_VALUE_PATTERNS:
+            if pattern.search(value):
+                raise AuditError(f"{path}: nilainya menyerupai rahasia (pola {pattern.pattern!r})")
+
+
+def audit(
+    cur: psycopg.Cursor,
+    event: Event,
+    payload: dict[str, object],
+    *,
+    actor: Actor | None = None,
+) -> None:
+    """Tulis satu baris ``audit_log``. Satu-satunya jalur tulis ke tabel itu.
+
+    Dijalankan pada kursor pemanggil, jadi ia berada di transaksi yang sama
+    dengan kejadian yang dicatatnya: keputusan dan catatannya commit bersama
+    atau tidak sama sekali.
+
+    Args:
+        cur: kursor di dalam transaksi pemanggil.
+        event: kejadian dari :class:`Event`.
+        payload: hanya ``str``, ``int``, ``dict``, dan ``list``.
+        actor: boleh dikosongkan bila kejadian itu hanya punya satu actor sah.
+
+    Raises:
+        AuditError: bila kejadian, actor, atau payload tidak sah. Tidak ada
+            baris yang ditulis.
+    """
+    allowed = allowed_actors(event)
+    if actor is None:
+        if len(allowed) != 1:  # pragma: no cover - belum ada kejadian multi-actor
+            raise AuditError(f"event {event.value!r} punya beberapa actor sah; sebutkan actor-nya")
+        actor = next(iter(allowed))
+    require_valid_event(event, actor)
+
+    if not isinstance(payload, dict):
+        raise AuditError(f"payload audit harus dict, bukan {type(payload).__name__}")
+    require_safe_payload(payload)
+
+    cur.execute(INSERT_AUDIT, (actor.value, event.value, Jsonb(payload)))
+
+
+def known_events() -> frozenset[str]:
+    """Nilai string semua kejadian. Dipakai tes dan, nanti, ``docs/events.md``."""
+    return frozenset(event.value for event in Event)

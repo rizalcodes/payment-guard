@@ -204,3 +204,170 @@ def require_migrator_url(migrator_env_file: Path) -> str:
 def runtime_config_attributes() -> tuple[str, ...]:
     """Nama atribut :class:`RuntimeConfig`. Dipakai tes untuk cek dua arah."""
     return tuple(f.name for f in fields(RuntimeConfig))
+
+
+# --------------------------------------------------------------------------- #
+# Konfigurasi proses Guard
+# --------------------------------------------------------------------------- #
+
+#: Variabel environment yang dibaca Guard (Arsitektur v1.1 bagian 2.1).
+GUARD_ENV_VARS: Final[dict[str, str]] = {
+    "db_url": "GUARD_DB_URL",
+    "mandate_path": "GUARD_MANDATE_PATH",
+    "signing_key_path": "GUARD_SIGNING_KEY_PATH",
+    "public_keys_path": "GUARD_PUBLIC_KEYS_PATH",
+    "heartbeat_seconds": "GUARD_HEARTBEAT_SECONDS",
+    "lock_timeout_ms": "GUARD_LOCK_TIMEOUT_MS",
+}
+
+#: Heartbeat 5 detik, timeout 2 detik (Arsitektur v1.1 bagian 9). Batasnya
+#: dijaga: di bawah 1 detik heartbeat membanjiri database, di atas 60 detik
+#: Guard bisa menjawab bermenit-menit setelah lock-nya hilang.
+DEFAULT_HEARTBEAT_SECONDS: Final = 5
+HEARTBEAT_SECONDS_MIN: Final = 1
+HEARTBEAT_SECONDS_MAX: Final = 60
+
+#: ``lock_timeout`` dan ``statement_timeout`` untuk transaksi keputusan
+#: (Arsitektur v1.1 bagian 4, Security v1.1 D2).
+DEFAULT_LOCK_TIMEOUT_MS: Final = 5000
+LOCK_TIMEOUT_MS_MIN: Final = 100
+LOCK_TIMEOUT_MS_MAX: Final = 600_000
+
+
+class GuardConfigError(ValueError):
+    """Konfigurasi Guard tidak sah. Guard menolak start.
+
+    Pesannya ditampilkan ke operator, jadi ia tidak pernah memuat nilai
+    rahasia: URL diredaksi, dan isi berkas kunci tidak pernah dibaca di sini.
+    """
+
+
+@dataclass(frozen=True)
+class GuardConfig:
+    """Konfigurasi satu proses Guard, sudah divalidasi.
+
+    Tidak punya atribut untuk URL migrator maupun URL proses lain: Guard hanya
+    boleh tahu URL-nya sendiri (Arsitektur v1.1 bagian 2).
+    """
+
+    db_url: str
+    mandate_path: Path
+    signing_key_path: Path
+    public_keys_path: Path
+    heartbeat_seconds: int
+    lock_timeout_ms: int
+
+
+def load_guard_config(env_file: Path, *, repo_root: Path) -> GuardConfig:
+    """Muat dan validasi konfigurasi Guard dari environment lalu ``env_file``.
+
+    Environment menang atas berkas, seperti pemuat runtime lain.
+    ``.env.migrator`` tidak pernah dibuka: Guard tidak punya urusan dengan URL
+    pemilik objek (aturan M0.1).
+
+    Args:
+        env_file: berkas ``.env`` runtime.
+        repo_root: akar repo, dipakai untuk menolak path kunci di dalamnya.
+
+    Raises:
+        GuardConfigError: pada pelanggaran pertama yang ditemukan.
+    """
+    from_file = read_env_file(env_file)
+
+    def value_of(field: str) -> str:
+        var = GUARD_ENV_VARS[field]
+        return (os.environ.get(var) or from_file.get(var) or "").strip()
+
+    db_url = value_of("db_url")
+    if not db_url:
+        raise GuardConfigError(
+            f"{GUARD_ENV_VARS['db_url']} belum diisi. Jalankan "
+            "`guard db bootstrap-roles` lebih dulu, atau isi di "
+            f"{env_file.name}."
+        )
+
+    mandate_path = _require_existing_file("mandate_path", value_of("mandate_path"), env_file)
+    signing_key_path = _require_existing_file(
+        "signing_key_path", value_of("signing_key_path"), env_file
+    )
+    _require_outside_repo(signing_key_path, repo_root)
+    public_keys_path = _require_existing_file(
+        "public_keys_path", value_of("public_keys_path"), env_file
+    )
+
+    heartbeat_seconds = _require_bounded_int(
+        "heartbeat_seconds",
+        value_of("heartbeat_seconds"),
+        default=DEFAULT_HEARTBEAT_SECONDS,
+        minimum=HEARTBEAT_SECONDS_MIN,
+        maximum=HEARTBEAT_SECONDS_MAX,
+    )
+    lock_timeout_ms = _require_bounded_int(
+        "lock_timeout_ms",
+        value_of("lock_timeout_ms"),
+        default=DEFAULT_LOCK_TIMEOUT_MS,
+        minimum=LOCK_TIMEOUT_MS_MIN,
+        maximum=LOCK_TIMEOUT_MS_MAX,
+    )
+
+    return GuardConfig(
+        db_url=db_url,
+        mandate_path=mandate_path,
+        signing_key_path=signing_key_path,
+        public_keys_path=public_keys_path,
+        heartbeat_seconds=heartbeat_seconds,
+        lock_timeout_ms=lock_timeout_ms,
+    )
+
+
+def _require_existing_file(field: str, raw: str, env_file: Path) -> Path:
+    var = GUARD_ENV_VARS[field]
+    if not raw:
+        raise GuardConfigError(f"{var} belum diisi (environment atau {env_file.name})")
+    path = Path(raw).expanduser()
+    try:
+        resolved = path.resolve()
+    except OSError as exc:
+        raise GuardConfigError(f"{var} bukan path yang bisa dibaca: {exc.strerror}") from None
+    if not resolved.exists():
+        raise GuardConfigError(f"{var} menunjuk berkas yang tidak ada: {resolved}")
+    if not resolved.is_file():
+        raise GuardConfigError(f"{var} harus menunjuk berkas, bukan direktori: {resolved}")
+    try:
+        with resolved.open("rb"):
+            pass
+    except OSError as exc:
+        raise GuardConfigError(f"{var} tidak bisa dibaca ({resolved}): {exc.strerror}") from None
+    return resolved
+
+
+def _require_outside_repo(path: Path, repo_root: Path) -> None:
+    """Tolak bahan kunci yang berada di dalam akar repo.
+
+    Berkas di dalam repo bisa ikut ter-commit karena satu ``git add -f``, satu
+    aturan ``.gitignore`` yang berubah, atau satu salinan direktori. Menaruhnya
+    di luar repo menghapus seluruh kelas kesalahan itu, bukan menguranginya.
+    Security v1.1 I1 dan asumsi 2 di bagian 4.
+    """
+    root = repo_root.resolve()
+    if path == root or root in path.parents:
+        raise GuardConfigError(
+            f"{GUARD_ENV_VARS['signing_key_path']} berada di dalam akar repo: {path}\n"
+            f"Akar repo: {root}\n"
+            "Bahan kunci harus di luar repo supaya tidak bisa ter-commit karena "
+            "kecelakaan. Pindahkan berkasnya, mis. ke direktori sendiri di luar "
+            "pohon repo, lalu arahkan variabelnya ke sana."
+        )
+
+
+def _require_bounded_int(field: str, raw: str, *, default: int, minimum: int, maximum: int) -> int:
+    var = GUARD_ENV_VARS[field]
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise GuardConfigError(f"{var} harus bilangan bulat, dapat {raw!r}") from None
+    if not minimum <= value <= maximum:
+        raise GuardConfigError(f"{var} harus {minimum}..{maximum}, dapat {value}")
+    return value

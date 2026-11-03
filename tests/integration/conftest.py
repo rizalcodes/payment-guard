@@ -184,3 +184,9 @@ def migrated(bootstrapped: dict[str, str]) -> dict[str, str]:
     applied = run_migrate(bootstrapped[MIGRATOR_ENV_KEY], migrations_dir())
     assert [f.label for f in applied] == ["0001_init.sql", "0002_roles.sql"]
     return bootstrapped
+
+
+# Fixture khusus Guard (M3) hidup di berkas sendiri supaya conftest ini tetap
+# terbaca. Impor bintang dipakai dengan sengaja: pytest hanya menemukan
+# fixture yang ada di namespace conftest.
+from conftest_guard import *  # noqa: E402, F403

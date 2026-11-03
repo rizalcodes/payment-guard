@@ -1,21 +1,22 @@
 """Entry point ``guard``.
 
-Perintah yang tersedia sampai M2:
+Perintah yang tersedia sampai M3:
 
     guard db migrate          terapkan migrasi yang belum terapan (role migrator)
     guard db status           laporkan migrasi terapan dan tertunda
     guard db bootstrap-roles  buat role database (admin, sekali)
     guard keygen              buat pasangan kunci Ed25519 (sekali)
+    guard serve               jalankan server MCP stdio (dua tool)
     guard verify              periksa envelope dengan kunci publik saja
 
 ``migrate`` dan ``status`` hanya membaca ``.env.migrator``; keduanya tidak
-pernah membuka ``.env``. ``bootstrap-roles`` menulis kedua file. Lihat
-:mod:`payment_guard.config`.
+pernah membuka ``.env``. ``bootstrap-roles`` menulis kedua file. ``serve``
+hanya membaca ``.env``. Lihat :mod:`payment_guard.config`.
 
 ``verify`` tidak menyentuh database, jaringan, maupun chain, dan tidak punya
 jalur untuk membaca bahan kunci rahasia (:mod:`payment_guard.verify_cli`).
 
-Perintah runtime (``serve``, ``execute``, ``approvals``, ``watch``,
+Perintah runtime lainnya (``execute``, ``approvals``, ``watch``,
 ``reconcile``) menyusul di milestone berikutnya.
 """
 
@@ -92,6 +93,17 @@ def _cmd_keygen(args: argparse.Namespace) -> int:
     for line in result.summary_lines():
         print(line)
     return 0
+
+
+def _cmd_serve(args: argparse.Namespace) -> int:
+    # Diimpor di dalam handler, bukan di atas: modul ini menarik FastMCP dan
+    # seluruh jalur keputusan, dan `guard verify` tidak boleh ikut memuatnya.
+    # Verify dirancang bekerja tanpa database dan tanpa jaringan; impor di
+    # tingkat modul akan menghapus sifat itu tanpa mengubah satu baris pun
+    # di verify.
+    from payment_guard.mcp_server import serve
+
+    return serve(args.env_file, repo_root=_repo_root())
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
@@ -190,6 +202,22 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     keygen_parser.set_defaults(handler=_cmd_keygen)
+
+    # --- serve: server MCP stdio, satu proses satu agent ---
+    serve_parser = sub.add_parser(
+        "serve",
+        help="jalankan Guard sebagai server MCP stdio (dua tool, transport stdio)",
+    )
+    serve_parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help=(
+            f"file konfigurasi runtime Guard (default: {RUNTIME_ENV_FILENAME} di akar "
+            "repo). Tidak pernah membaca .env.migrator."
+        ),
+    )
+    serve_parser.set_defaults(handler=_cmd_serve)
 
     # --- verify: hanya kunci publik, tanpa database dan tanpa jaringan ---
     verify_parser = sub.add_parser(

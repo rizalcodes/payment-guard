@@ -11,6 +11,8 @@ dependencies = [
     # Keccak-256 untuk Ethereum (M1, M5). hashlib hanya punya SHA3-256 yang
     # distandarkan NIST, yang padding-nya berbeda. Lihat payment_guard.hashing.
     "pycryptodome>=3.21,<4",
+    # MCP server resmi (FastMCP, transport stdio) untuk Guard di M3.
+    "mcp>=1.2,<2",
 ]
 
 [project.scripts]

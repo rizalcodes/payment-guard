@@ -471,3 +471,89 @@ def test_m1_modules_all_exist() -> None:
     """Kalau satu modul hilang, tes murni di atas akan lolos tanpa memeriksa apa pun."""
     for name in PURE_MODULES:
         assert _module_path(name).is_file(), name
+
+
+# --------------------------------------------------------------------------- #
+# Pemeriksa 5: modul M3 boleh menyentuh database, tapi tidak boleh melanggar M1
+# --------------------------------------------------------------------------- #
+
+#: Modul M3 yang memang membuka transaksi dan berkas. Mereka BUKAN murni, tapi
+#: tetap terikat aturan lain: tanpa float, tanpa SQL dirakit string, dan tanpa
+#: membuat modul murni jadi tidak murni.
+IMPURE_M3_MODULES = (
+    "db.py",
+    "config.py",
+    "events.py",
+    "guard_service.py",
+    "decision_service.py",
+    "mcp_server.py",
+)
+
+
+@pytest.mark.parametrize("name", IMPURE_M3_MODULES)
+def test_m3_module_exists(name: str) -> None:
+    """Kalau modulnya hilang, tes di bawah lulus tanpa memeriksa apa pun."""
+    assert (SRC / "payment_guard" / name).is_file(), name
+
+
+@pytest.mark.parametrize("name", IMPURE_M3_MODULES)
+def test_m3_module_has_no_float(name: str) -> None:
+    tree = ast.parse((SRC / "payment_guard" / name).read_text(encoding="utf-8"))
+    findings = find_float_usage(tree)
+    assert not findings, f"{name}: " + "; ".join(f"baris {ln}: {w}" for ln, w in findings)
+
+
+@pytest.mark.parametrize("name", IMPURE_M3_MODULES)
+def test_m3_module_assembles_no_sql(name: str) -> None:
+    tree = ast.parse((SRC / "payment_guard" / name).read_text(encoding="utf-8"))
+    findings = find_sql_assembly(tree)
+    assert not findings, f"{name}: " + "; ".join(f"baris {ln}: {w}" for ln, w in findings)
+
+
+def test_pure_modules_do_not_import_the_m3_modules() -> None:
+    """Arah ketergantungan hanya satu: M3 memakai M1, bukan sebaliknya.
+
+    Kalau ``rules.py`` sampai mengimpor ``decision_service``, aturan berhenti
+    jadi fungsi murni dan tes paralel kehilangan artinya.
+    """
+    impure_names = {name.removesuffix(".py") for name in IMPURE_M3_MODULES}
+    offenders = []
+    for name in PURE_MODULES:
+        tree = ast.parse((SRC / "payment_guard" / name).read_text(encoding="utf-8"))
+        leaked = _internal_imports_of(tree) & impure_names
+        if leaked:
+            offenders.append(f"{name} -> {sorted(leaked)}")
+    assert offenders == [], offenders
+
+
+def test_only_decision_service_writes_decisions() -> None:
+    """Satu tempat yang menulis ``decisions``, supaya lock-nya tidak bisa dilewati."""
+    offenders = []
+    for path in sorted((SRC / "payment_guard").rglob("*.py")):
+        if path.name == "decision_service.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        if "INSERT INTO decisions" in text or "UPDATE decisions" in text:
+            offenders.append(path.name)
+    assert offenders == [], offenders
+
+
+def test_decision_service_takes_the_agent_lock() -> None:
+    """Penjaga bentuk: transaksi keputusan harus mengambil lock ``agent:``."""
+    source = (SRC / "payment_guard" / "decision_service.py").read_text(encoding="utf-8")
+    assert "take_xact_lock" in source
+    assert '"agent"' in source
+
+
+def test_no_module_reads_the_process_clock_for_decisions() -> None:
+    """Jam keputusan selalu jam database (Arsitektur v1.1 prinsip 5).
+
+    ``guard_service`` boleh memakai ``threading.Event.wait`` untuk interval
+    heartbeat, yang bukan penilaian waktu; yang dilarang adalah membaca jam
+    proses lalu memakainya sebagai waktu keputusan.
+    """
+    for name in ("decision_service.py", "events.py"):
+        tree = ast.parse((SRC / "payment_guard" / name).read_text(encoding="utf-8"))
+        imported = _imports_of(tree)
+        assert "time" not in imported, name
+        assert "datetime" not in imported, name
