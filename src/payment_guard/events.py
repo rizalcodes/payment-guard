@@ -8,11 +8,10 @@ bukti yang nama kejadiannya diketik ulang di sepuluh tempat akan punya sebelas
 ejaan. Satu enum berarti ``docs/events.md`` di M9 bisa dibuat dari kode, dan
 CHECK ``event`` di database bisa ditambahkan tanpa menemukan kejutan.
 
-Hanya kejadian M3 yang ada di sini. Kejadian milestone lain
-(``decision_expired``, ``approval_*``, ``execution_*``, ``settlement_*``,
-``reconciliation_*``, ``alarm_*``) sengaja **belum** dibuat: enum yang memuat
-nama yang belum pernah ditulis tidak bisa dibedakan dari enum yang memuat nama
-yang salah.
+Hanya kejadian yang sudah dipakai yang ada di sini. Kejadian milestone lain
+(``execution_*``, ``settlement_*``, ``reconciliation_*``, ``alarm_*``) sengaja
+**belum** dibuat: enum yang memuat nama yang belum pernah ditulis tidak bisa
+dibedakan dari enum yang memuat nama yang salah.
 """
 
 from __future__ import annotations
@@ -57,14 +56,36 @@ class Event(StrEnum):
     #: Pemeriksaan saat start gagal, mis. Guard kedua untuk agent yang sama.
     STARTUP_CHECK_FAILED = "startup_check_failed"
 
+    # --- M4: persetujuan manusia (Arsitektur v1.1 bagian 7) ---
+    #: Operator menyetujui satu ``needs_human``; envelope ditandatangani.
+    APPROVAL_APPROVED = "approval_approved"
+    #: Operator menolak, atau cek ulang per_tx/daily gagal saat approve.
+    APPROVAL_REJECTED = "approval_rejected"
+    #: ``needs_human`` melewati ``expires_at`` dan menjadi ``expired``.
+    DECISION_EXPIRED = "decision_expired"
 
-#: Actor yang sah untuk tiap kejadian. Semua kejadian M3 ditulis Guard.
+
+#: Actor yang sah untuk tiap kejadian.
+#:
+#: Kejadian M3 semuanya ditulis Guard. Kejadian M4 ditulis ``human``: yang
+#: menekan tombol adalah operator, dan Approvals CLI hanyalah alatnya. Memakai
+#: ``approver`` di sini akan menyamarkan itu menjadi tindakan proses, padahal
+#: nilai bukti terbesarnya justru "ada manusia yang memutuskan" (Security v1.1
+#: R-a: sangkalan operator).
+#:
+#: ``decision_expired`` menerima ``guard`` **dan** ``human``. Kedaluwarsa itu
+#: lazy (Arsitektur v1.1 bagian 7): siapa pun yang pertama menyentuh baris itu
+#: yang menuliskannya, dan dua role itulah yang punya hak UPDATE kolom status
+#: di ``0002_roles.sql``. Di M4 hanya jalur ``human`` yang dipakai.
 EVENT_ACTORS: Final[dict[Event, frozenset[Actor]]] = {
     Event.MANDATE_LOADED: frozenset({Actor.GUARD}),
     Event.DECISION_MADE: frozenset({Actor.GUARD}),
     Event.REPEATED_RETRY: frozenset({Actor.GUARD}),
     Event.GUARD_LOCK_LOST: frozenset({Actor.GUARD}),
     Event.STARTUP_CHECK_FAILED: frozenset({Actor.GUARD}),
+    Event.APPROVAL_APPROVED: frozenset({Actor.HUMAN}),
+    Event.APPROVAL_REJECTED: frozenset({Actor.HUMAN}),
+    Event.DECISION_EXPIRED: frozenset({Actor.GUARD, Actor.HUMAN}),
 }
 
 #: Kunci payload yang ditolak, apa pun isinya.
@@ -198,7 +219,7 @@ def audit(
     """
     allowed = allowed_actors(event)
     if actor is None:
-        if len(allowed) != 1:  # pragma: no cover - belum ada kejadian multi-actor
+        if len(allowed) != 1:
             raise AuditError(f"event {event.value!r} punya beberapa actor sah; sebutkan actor-nya")
         actor = next(iter(allowed))
     require_valid_event(event, actor)

@@ -16,6 +16,7 @@ from payment_guard.mandate import (
     MandateError,
     compute_mandate_hash,
     load_mandate,
+    load_normalized,
     normalized_bytes,
     normalized_form,
 )
@@ -671,3 +672,62 @@ class TestGoldenHash:
 
     def test_domain_prefix_is_unchanged(self) -> None:
         assert MANDATE_HASH_PREFIX == b"payment-guard/mandate/v1\n"
+
+
+class TestNormalizedRoundTrip:
+    """``load_normalized`` adalah kebalikan ``normalized_form``, dan harus tetap begitu.
+
+    Keduanya memakai string angka, tapi satuannya berbeda: ``normalized_form``
+    menulis base units, ``load_mandate`` membaca desimal USDC. Membaca yang
+    satu dengan pembaca yang lain **tidak gagal** — ia diam-diam mengalikan
+    setiap batas dengan sejuta, dan setiap cek ulang batas jadi lolos. Bug itu
+    pernah terjadi di Approvals CLI; tes ini yang menguncinya.
+    """
+
+    def test_round_trip_returns_the_same_mandate(self) -> None:
+        mandate = load_mandate(VALID)
+        assert load_normalized(normalized_form(mandate)) == mandate
+
+    def test_round_trip_keeps_the_hash(self) -> None:
+        mandate = load_mandate(VALID)
+        kembali = load_normalized(normalized_form(mandate))
+        assert compute_mandate_hash(kembali) == compute_mandate_hash(mandate)
+
+    @pytest.mark.parametrize("field", ["max_per_tx", "max_per_day", "human_approval_above"])
+    def test_amounts_keep_their_unit(self, field: str) -> None:
+        mandate = load_mandate(VALID)
+        kembali = load_normalized(normalized_form(mandate))
+        assert getattr(kembali, field) == getattr(mandate, field)
+
+    def test_reading_the_normalized_form_with_load_mandate_is_wrong(self) -> None:
+        """Penjaga: justru inilah kekeliruan yang mudah dilakukan.
+
+        Kalau suatu saat ``load_mandate`` mulai menerima base units juga, tes
+        ini gagal dan memaksa keputusan sadar, bukan perubahan diam-diam.
+        """
+        mandate = load_mandate(VALID)
+        keliru = load_mandate(normalized_form(mandate))
+        assert keliru.max_per_day == mandate.max_per_day * 1_000_000
+
+    def test_non_digit_amount_is_refused(self) -> None:
+        bentuk = normalized_form(load_mandate(VALID))
+        bentuk["max_per_tx"] = "50.000000"
+        with pytest.raises(MandateError, match="base units"):
+            load_normalized(bentuk)
+
+    def test_non_string_amount_is_refused(self) -> None:
+        bentuk = normalized_form(load_mandate(VALID))
+        bentuk["max_per_day"] = 50_000_000
+        with pytest.raises(MandateError, match="base units"):
+            load_normalized(bentuk)
+
+    def test_non_mapping_is_refused(self) -> None:
+        with pytest.raises(MandateError, match="harus objek"):
+            load_normalized([])  # type: ignore[arg-type]
+
+    def test_the_rest_of_the_validation_still_applies(self) -> None:
+        """Konversi satuan tidak boleh jadi pintu belakang untuk field asing."""
+        bentuk = normalized_form(load_mandate(VALID))
+        bentuk["field_asing"] = "x"
+        with pytest.raises(MandateError):
+            load_normalized(bentuk)

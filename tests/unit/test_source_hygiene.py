@@ -327,6 +327,9 @@ PURE_MODULES = (
     "rules.py",
     "reasons.py",
     "signing.py",
+    # M4: penyajian teks tidak tepercaya. Murni dengan sengaja — ia dipanggil
+    # dari CLI, tapi tidak boleh punya alasan apa pun menyentuh dunia luar.
+    "untrusted.py",
 )
 
 #: Paket pihak ketiga dan stdlib yang membawa dunia luar masuk.
@@ -487,6 +490,9 @@ IMPURE_M3_MODULES = (
     "guard_service.py",
     "decision_service.py",
     "mcp_server.py",
+    # M4
+    "approvals_cli.py",
+    "demo_agent.py",
 )
 
 
@@ -526,23 +532,44 @@ def test_pure_modules_do_not_import_the_m3_modules() -> None:
     assert offenders == [], offenders
 
 
-def test_only_decision_service_writes_decisions() -> None:
-    """Satu tempat yang menulis ``decisions``, supaya lock-nya tidak bisa dilewati."""
+#: Modul yang boleh menulis ``decisions``, dan alasannya.
+#:
+#: ``decision_service`` menulis baris baru dari ``check_payment``.
+#: ``approvals_cli`` (M4) memperbarui baris ``needs_human`` menjadi disetujui,
+#: ditolak, atau kedaluwarsa — itu hak role approver di ``0002_roles.sql``,
+#: bukan hak Guard. Keduanya wajib memegang lock ``agent:``; tes di bawah
+#: memeriksanya satu per satu.
+DECISION_WRITERS = ("decision_service.py", "approvals_cli.py")
+
+
+def test_only_decision_service_inserts_decisions() -> None:
+    """Baris ``decisions`` baru hanya lahir di satu tempat."""
     offenders = []
     for path in sorted((SRC / "payment_guard").rglob("*.py")):
         if path.name == "decision_service.py":
             continue
-        text = path.read_text(encoding="utf-8")
-        if "INSERT INTO decisions" in text or "UPDATE decisions" in text:
+        if "INSERT INTO decisions" in path.read_text(encoding="utf-8"):
             offenders.append(path.name)
     assert offenders == [], offenders
 
 
-def test_decision_service_takes_the_agent_lock() -> None:
-    """Penjaga bentuk: transaksi keputusan harus mengambil lock ``agent:``."""
-    source = (SRC / "payment_guard" / "decision_service.py").read_text(encoding="utf-8")
-    assert "take_xact_lock" in source
-    assert '"agent"' in source
+def test_only_known_modules_update_decisions() -> None:
+    """Daftar penulis ``decisions`` tertutup, supaya lock-nya tidak bisa dilewati."""
+    offenders = []
+    for path in sorted((SRC / "payment_guard").rglob("*.py")):
+        if path.name in DECISION_WRITERS:
+            continue
+        if "UPDATE decisions" in path.read_text(encoding="utf-8"):
+            offenders.append(path.name)
+    assert offenders == [], offenders
+
+
+@pytest.mark.parametrize("name", DECISION_WRITERS)
+def test_decision_writers_take_the_agent_lock(name: str) -> None:
+    """Penjaga bentuk: setiap penulis ``decisions`` mengambil lock ``agent:``."""
+    source = (SRC / "payment_guard" / name).read_text(encoding="utf-8")
+    assert "take_xact_lock" in source, name
+    assert '"agent"' in source, name
 
 
 def test_no_module_reads_the_process_clock_for_decisions() -> None:

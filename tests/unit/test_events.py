@@ -53,14 +53,19 @@ class FakeCursor:
 
 
 class TestEnum:
-    def test_m3_events_only(self) -> None:
-        """Hanya kejadian yang sudah dipakai M3 yang ada."""
+    def test_events_in_use_only(self) -> None:
+        """Hanya kejadian yang sudah benar-benar ditulis yang ada."""
         assert known_events() == {
+            # M3
             "mandate_loaded",
             "decision_made",
             "repeated_retry",
             "guard_lock_lost",
             "startup_check_failed",
+            # M4
+            "approval_approved",
+            "approval_rejected",
+            "decision_expired",
         }
 
     def test_later_milestone_events_are_absent(self) -> None:
@@ -70,8 +75,6 @@ class TestEnum:
         enum yang memuat nama yang salah ejaannya.
         """
         for later in (
-            "decision_expired",
-            "approval_approved",
             "execution_broadcast",
             "settlement_finalized",
             "reconciliation_state_changed",
@@ -92,9 +95,25 @@ class TestEnum:
         for event, actors in EVENT_ACTORS.items():
             assert actors, event
 
-    def test_all_m3_events_belong_to_guard(self) -> None:
-        for event in Event:
+    def test_m3_events_belong_to_guard(self) -> None:
+        for event in (
+            Event.MANDATE_LOADED,
+            Event.DECISION_MADE,
+            Event.REPEATED_RETRY,
+            Event.GUARD_LOCK_LOST,
+            Event.STARTUP_CHECK_FAILED,
+        ):
             assert EVENT_ACTORS[event] == {Actor.GUARD}
+
+    def test_approval_events_belong_to_the_human(self) -> None:
+        """Yang memutuskan adalah operator; CLI cuma alatnya (Security v1.1 R-a)."""
+        assert EVENT_ACTORS[Event.APPROVAL_APPROVED] == {Actor.HUMAN}
+        assert EVENT_ACTORS[Event.APPROVAL_REJECTED] == {Actor.HUMAN}
+        assert Actor.APPROVER not in EVENT_ACTORS[Event.APPROVAL_APPROVED]
+
+    def test_expiry_can_be_written_by_guard_or_human(self) -> None:
+        """Kedaluwarsa lazy: siapa pun yang menyentuh baris itu lebih dulu."""
+        assert EVENT_ACTORS[Event.DECISION_EXPIRED] == {Actor.GUARD, Actor.HUMAN}
 
     def test_event_name_fits_the_database_check(self) -> None:
         """0001_init.sql: char_length(event) BETWEEN 1 AND 64."""

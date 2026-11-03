@@ -242,12 +242,12 @@ class TestIdempotence:
         assert sorted(result.login_roles_reused) == sorted([*LOGIN_ROLES.values(), OWNER_ROLE])
 
     def test_second_run_reports_roles_as_existing(
-        self, pristine_db: str, env_file: Path, migrator_env_file: Path
+        self, pristine_roles: str, env_file: Path, migrator_env_file: Path
     ) -> None:
-        first = run_bootstrap_roles(pristine_db, env_file, migrator_env_file)
+        first = run_bootstrap_roles(pristine_roles, env_file, migrator_env_file)
         assert sorted(first.group_roles_created) == sorted(GROUP_ROLES.values())
 
-        second = run_bootstrap_roles(pristine_db, env_file, migrator_env_file)
+        second = run_bootstrap_roles(pristine_roles, env_file, migrator_env_file)
         assert second.group_roles_created == []
         assert sorted(second.group_roles_existing) == sorted(GROUP_ROLES.values())
 
@@ -399,12 +399,16 @@ class TestCreateRoleRequirement:
         assert name in message
 
     def test_nothing_is_created_on_rejection(
-        self, weak: tuple[str, str], env_file: Path, migrator_env_file: Path, pristine_db: str
+        self,
+        weak: tuple[str, str],
+        env_file: Path,
+        migrator_env_file: Path,
+        pristine_roles: str,
     ) -> None:
         url, _ = weak
         with pytest.raises(MigrationError):
             run_bootstrap_roles(url, env_file, migrator_env_file)
-        assert role_attributes(pristine_db) == {}
+        assert role_attributes(pristine_roles) == {}
         assert not env_file.exists()
         assert not migrator_env_file.exists()
 
@@ -474,18 +478,18 @@ class TestRemoteAdminRefusal:
     """
 
     def test_loopback_url_is_accepted(
-        self, pristine_db: str, env_file: Path, migrator_env_file: Path
+        self, pristine_roles: str, env_file: Path, migrator_env_file: Path
     ) -> None:
-        assert "127.0.0.1" in pristine_db
-        result = run_bootstrap_roles(pristine_db, env_file, migrator_env_file)
+        assert "127.0.0.1" in pristine_roles
+        result = run_bootstrap_roles(pristine_roles, env_file, migrator_env_file)
         assert sorted(result.group_roles_created) == sorted(GROUP_ROLES.values())
 
     def test_allow_remote_admin_also_works_for_a_loopback_url(
-        self, pristine_db: str, env_file: Path, migrator_env_file: Path
+        self, pristine_roles: str, env_file: Path, migrator_env_file: Path
     ) -> None:
         """Flag melonggarkan pemeriksaan, bukan mengubah perilaku lainnya."""
         result = run_bootstrap_roles(
-            pristine_db, env_file, migrator_env_file, allow_remote_admin=True
+            pristine_roles, env_file, migrator_env_file, allow_remote_admin=True
         )
         assert sorted(result.group_roles_created) == sorted(GROUP_ROLES.values())
         assert set(read_env(env_file)) == set(ENV_KEY_FOR_PROCESS.values())

@@ -49,7 +49,7 @@ from typing import Final
 from payment_guard.addresses import AddressError, normalize_allowlist
 from payment_guard.canonical import canonical_bytes
 from payment_guard.chains import is_supported_chain, supported_chains
-from payment_guard.money import MoneyError, format_base_units, parse_amount
+from payment_guard.money import MoneyError, format_amount, format_base_units, parse_amount
 
 #: ``agent_id`` yang sah (PRD 6.1, ST-32).
 #:
@@ -202,6 +202,44 @@ def normalized_form(mandate: Mandate) -> dict[str, object]:
         "decision_ttl_seconds": mandate.decision_ttl_seconds,
         "human_wait_ttl_seconds": mandate.human_wait_ttl_seconds,
     }
+
+
+def load_normalized(document: Mapping[str, object]) -> Mandate:
+    """Kebalikan dari :func:`normalized_form`.
+
+    Dipakai pembaca yang mengambil mandate dari kolom ``mandates.content``,
+    bukan dari berkas: Approvals CLI (M4) dan, nanti, Reconciler. Keduanya
+    tidak punya berkas mandate, dan yang mengikat memang mandate yang sudah
+    dimuat Guard, bukan yang ada di disk (Arsitektur v1.1 bagian 5.4).
+
+    Perbedaannya hanya pada satuan uang, dan perbedaan itu halus justru karena
+    kedua bentuk sama-sama string angka. ``normalized_form`` menulis **base
+    units** (``"60000000"``), sedangkan :func:`load_mandate` membaca **desimal
+    USDC** (``"60"``). Membaca yang satu dengan pembaca yang lain tidak gagal;
+    ia diam-diam mengalikan setiap batas dengan sejuta. Karena itu konversinya
+    ada di satu tempat, dengan tes bolak-balik yang mengunci keduanya.
+
+    Raises:
+        MandateError: bila bentuknya tidak sah.
+    """
+    if not isinstance(document, Mapping):
+        raise MandateError(f"mandate harus objek, bukan {type(document).__name__}")
+
+    data = dict(document)
+    for field in MONEY_FIELDS:
+        if field not in data:
+            continue
+        data[field] = _decimal_from_base_units(field, data[field])
+    return load_mandate(data)
+
+
+def _decimal_from_base_units(field: str, value: object) -> str:
+    """Ubah ``"60000000"`` menjadi ``"60.000000"`` agar bisa dibaca ulang."""
+    if not isinstance(value, str):
+        raise MandateError(f"{field} harus string base units, bukan {type(value).__name__}")
+    if not value.isascii() or not value.isdigit():
+        raise MandateError(f"{field} harus angka bulat base units, dapat {_quote(value)}")
+    return format_amount(int(value))
 
 
 def normalized_bytes(mandate: Mandate) -> bytes:

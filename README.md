@@ -106,7 +106,7 @@ Batas ini diterima dengan sengaja: lihat RR-12 di
 `GUARD_SIGNING_KEY_PATH` **harus** menunjuk ke luar akar repo; Guard menolak
 start kalau tidak. Lihat `.env.example`.
 
-## Perintah yang tersedia sampai M3
+## Perintah yang tersedia sampai M4
 
 | Perintah | Dijalankan sebagai | Membaca | Guna |
 |---|---|---|---|
@@ -115,7 +115,15 @@ start kalau tidak. Lihat `.env.example`.
 | `guard db status` | migrator | `.env.migrator` | Laporkan migrasi terapan dan tertunda |
 | `guard keygen` | operator, sekali | — | Pasangan kunci Ed25519. Tidak pernah menimpa yang sudah ada |
 | `guard serve` | host agent | `.env` | Guard sebagai server MCP stdio, dua tool |
+| `guard approvals list` | operator | `.env` | Keputusan yang menunggu persetujuan manusia |
+| `guard approvals approve` | operator, interaktif | `.env` | Setujui satu keputusan; batas dicek ulang |
+| `guard approvals reject` | operator, interaktif | `.env` | Tolak satu keputusan; memicu cooldown |
 | `guard verify` | operator | — | Periksa envelope dengan kunci publik saja |
+
+`approvals` memakai `APPROVER_DB_URL` dari `.env`, bukan URL Guard: hanya role
+approver yang boleh menulis `approved_at`, `valid_until`, dan `envelope`.
+`approve` dan `reject` **menolak jalan di luar terminal interaktif** dan tidak
+punya flag untuk melewatinya (Security v1.1 E3, ST-23).
 
 `keygen` dan `verify` tidak membaca file env sama sekali: keduanya bekerja atas
 file yang diberikan di baris perintah. `verify` memang dirancang jalan **tanpa
@@ -131,10 +139,13 @@ Flag per perintah:
 | `db status` | `--migrations-dir`, `--migrator-env-file` |
 | `keygen` | `--signing-key-file`, `--public-keys-file` |
 | `serve` | `--env-file` |
+| `approvals list` | `--env-file` |
+| `approvals approve` | `<decision_id>` (posisional), `--env-file` |
+| `approvals reject` | `<decision_id>` (posisional), `--env-file` |
 | `verify` | `<envelope>` (posisional), `--pubkey`, `--mandate` |
 
 `guard --version` ada di tingkat atas. Perintah runtime lainnya (`execute`,
-`approvals`, `watch`, `reconcile`) menyusul di milestone berikutnya.
+`watch`, `reconcile`) menyusul di milestone berikutnya.
 
 Rotasi password otomatis **belum diimplementasi**. Rencananya
 `guard db bootstrap-roles --rotate-passwords`, ditinjau di M9 bersama perubahan

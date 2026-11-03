@@ -320,6 +320,83 @@ def load_guard_config(env_file: Path, *, repo_root: Path) -> GuardConfig:
     )
 
 
+#: Variabel yang dibaca Approvals CLI (M4).
+#:
+#: URL-nya ``APPROVER_DB_URL``, bukan ``GUARD_DB_URL``: approve, reject, dan
+#: kedaluwarsa adalah hak role approver di ``0002_roles.sql``, dan hanya role
+#: itu yang boleh menulis ``approved_at``, ``valid_until``, serta ``envelope``.
+#:
+#: Path kuncinya variabel yang sama dengan milik Guard. Itu disengaja: yang
+#: menandatangani tetap kunci Guard, dan Approvals CLI meminjamnya untuk satu
+#: keputusan (Arsitektur v1.1 bagian 7). Tidak ada kunci kedua yang harus
+#: dirotasi, dicabut, dan dilacak sendiri.
+APPROVALS_ENV_VARS: Final[dict[str, str]] = {
+    "db_url": RUNTIME_URL_ENV_VARS["approver"],
+    "signing_key_path": GUARD_ENV_VARS["signing_key_path"],
+    "lock_timeout_ms": GUARD_ENV_VARS["lock_timeout_ms"],
+}
+
+
+@dataclass(frozen=True)
+class ApprovalsConfig:
+    """Konfigurasi Approvals CLI, sudah divalidasi.
+
+    Tidak punya atribut untuk URL proses lain maupun untuk mandate: agent yang
+    relevan dibaca dari ``active_mandates``, bukan dari berkas di disk, karena
+    yang mengikat keputusan adalah mandate yang benar-benar dimuat Guard
+    (Arsitektur v1.1 bagian 5.4).
+    """
+
+    db_url: str
+    signing_key_path: Path
+    lock_timeout_ms: int
+
+
+def load_approvals_config(env_file: Path, *, repo_root: Path) -> ApprovalsConfig:
+    """Muat konfigurasi Approvals CLI dari environment lalu ``env_file``.
+
+    ``.env.migrator`` tidak pernah dibuka, sama seperti pemuat runtime lain.
+
+    Args:
+        env_file: berkas ``.env`` runtime.
+        repo_root: akar repo, dipakai untuk menolak path kunci di dalamnya.
+
+    Raises:
+        GuardConfigError: pada pelanggaran pertama yang ditemukan.
+    """
+    from_file = read_env_file(env_file)
+
+    def value_of(field: str) -> str:
+        var = APPROVALS_ENV_VARS[field]
+        return (os.environ.get(var) or from_file.get(var) or "").strip()
+
+    db_url = value_of("db_url")
+    if not db_url:
+        raise GuardConfigError(
+            f"{APPROVALS_ENV_VARS['db_url']} belum diisi. Jalankan "
+            f"`guard db bootstrap-roles` lebih dulu, atau isi di {env_file.name}."
+        )
+
+    signing_key_path = _require_existing_file(
+        "signing_key_path", value_of("signing_key_path"), env_file
+    )
+    _require_outside_repo(signing_key_path, repo_root)
+
+    lock_timeout_ms = _require_bounded_int(
+        "lock_timeout_ms",
+        value_of("lock_timeout_ms"),
+        default=DEFAULT_LOCK_TIMEOUT_MS,
+        minimum=LOCK_TIMEOUT_MS_MIN,
+        maximum=LOCK_TIMEOUT_MS_MAX,
+    )
+
+    return ApprovalsConfig(
+        db_url=db_url,
+        signing_key_path=signing_key_path,
+        lock_timeout_ms=lock_timeout_ms,
+    )
+
+
 def _require_existing_file(field: str, raw: str, env_file: Path) -> Path:
     var = GUARD_ENV_VARS[field]
     if not raw:

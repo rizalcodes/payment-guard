@@ -66,13 +66,13 @@ def migrate_argv(command: str, migrator_env_file: Path) -> tuple[str, ...]:
 class TestFullFlow:
     def test_bootstrap_then_migrate_then_status(
         self,
-        pristine_db: str,
+        pristine_roles: str,
         env_file: Path,
         migrator_env_file: Path,
         monkeypatch: pytest.MonkeyPatch,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
-        monkeypatch.setenv(ADMIN_URL_ENV_VAR, pristine_db)
+        monkeypatch.setenv(ADMIN_URL_ENV_VAR, pristine_roles)
         assert run(*bootstrap_argv(env_file, migrator_env_file)) == 0
         out = capsys.readouterr().out
         assert "role grup dibuat" in out

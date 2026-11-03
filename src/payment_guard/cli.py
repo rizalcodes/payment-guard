@@ -1,12 +1,13 @@
 """Entry point ``guard``.
 
-Perintah yang tersedia sampai M3:
+Perintah yang tersedia sampai M4:
 
     guard db migrate          terapkan migrasi yang belum terapan (role migrator)
     guard db status           laporkan migrasi terapan dan tertunda
     guard db bootstrap-roles  buat role database (admin, sekali)
     guard keygen              buat pasangan kunci Ed25519 (sekali)
     guard serve               jalankan server MCP stdio (dua tool)
+    guard approvals ...       setujui atau tolak keputusan needs_human
     guard verify              periksa envelope dengan kunci publik saja
 
 ``migrate`` dan ``status`` hanya membaca ``.env.migrator``; keduanya tidak
@@ -16,7 +17,8 @@ hanya membaca ``.env``. Lihat :mod:`payment_guard.config`.
 ``verify`` tidak menyentuh database, jaringan, maupun chain, dan tidak punya
 jalur untuk membaca bahan kunci rahasia (:mod:`payment_guard.verify_cli`).
 
-Perintah runtime lainnya (``execute``, ``approvals``, ``watch``,
+``approvals`` berjalan sebagai role approver dan hanya di terminal interaktif
+(Security v1.1 E3, ST-23). Perintah runtime lainnya (``execute``, ``watch``,
 ``reconcile``) menyusul di milestone berikutnya.
 """
 
@@ -31,6 +33,7 @@ from payment_guard.bootstrap import read_admin_url, run_bootstrap_roles
 from payment_guard.config import (
     MIGRATOR_ENV_FILENAME,
     RUNTIME_ENV_FILENAME,
+    GuardConfigError,
     require_migrator_url,
 )
 from payment_guard.db import MigrationError
@@ -104,6 +107,35 @@ def _cmd_serve(args: argparse.Namespace) -> int:
     from payment_guard.mcp_server import serve
 
     return serve(args.env_file, repo_root=_repo_root())
+
+
+def _cmd_approvals(args: argparse.Namespace) -> int:
+    # Lazy seperti `serve`, dan karena alasan yang sama: modul ini menarik
+    # psycopg, jalur keputusan, dan bahan tanda tangan. `guard verify` harus
+    # tetap jalan tanpa database dan tanpa jaringan.
+    from payment_guard.approvals_cli import (
+        ApprovalError,
+        approve,
+        list_pending,
+        reject,
+    )
+    from payment_guard.config import load_approvals_config
+
+    try:
+        config = load_approvals_config(args.env_file, repo_root=_repo_root())
+    except GuardConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        if args.command == "list":
+            return list_pending(config)
+        action = approve if args.command == "approve" else reject
+        action(config, args.decision_id)
+    except ApprovalError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
@@ -218,6 +250,30 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     serve_parser.set_defaults(handler=_cmd_serve)
+
+    # --- approvals: hanya operator, hanya interaktif (ST-23) ---
+    approvals_parser = sub.add_parser(
+        "approvals",
+        help="daftar, setujui, atau tolak keputusan yang menunggu manusia",
+    )
+    approvals_parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help=(
+            f"file konfigurasi runtime (default: {RUNTIME_ENV_FILENAME} di akar repo). "
+            "Memakai APPROVER_DB_URL, bukan URL Guard."
+        ),
+    )
+    approvals_sub = approvals_parser.add_subparsers(dest="command", required=True)
+    approvals_sub.add_parser("list", help="tampilkan keputusan yang menunggu persetujuan")
+    for name, bantuan in (
+        ("approve", "setujui satu keputusan; batas dicek ulang dengan data terbaru"),
+        ("reject", "tolak satu keputusan; memicu cooldown untuk penerima itu"),
+    ):
+        item = approvals_sub.add_parser(name, help=bantuan)
+        item.add_argument("decision_id", help="UUID dari jawaban check_payment")
+    approvals_parser.set_defaults(handler=_cmd_approvals)
 
     # --- verify: hanya kunci publik, tanpa database dan tanpa jaringan ---
     verify_parser = sub.add_parser(

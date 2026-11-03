@@ -397,19 +397,19 @@ class TestPrivilegeNotices:
 class TestRolesMigrationGuard:
     """ST-41: 0002_roles.sql harus gagal keras bila role grup belum ada."""
 
-    def test_0002_fails_hard_without_group_roles(self, pristine_db: str) -> None:
+    def test_0002_fails_hard_without_group_roles(self, pristine_roles: str) -> None:
         # Dijalankan sebagai admin, bukan migrator: pada titik ini bootstrap
         # belum jalan, jadi role migrator pun belum ada. Yang diuji di sini
         # adalah penjaga di dalam file SQL, bukan identitas pemanggilnya.
         with pytest.raises(MigrationError) as exc:
-            run_migrate(pristine_db, REAL_MIGRATIONS)
+            run_migrate(pristine_roles, REAL_MIGRATIONS)
         message = str(exc.value)
         assert "jalankan guard db bootstrap-roles dulu" in message
         assert "guard_rw" in message
 
         # 0001 tetap terapan; 0002 dibatalkan penuh.
-        assert scalar(pristine_db, "SELECT count(*) FROM schema_migrations") == 1
-        assert "audit_log" in table_names(pristine_db)
+        assert scalar(pristine_roles, "SELECT count(*) FROM schema_migrations") == 1
+        assert "audit_log" in table_names(pristine_roles)
 
     def test_0002_succeeds_after_bootstrap(self, bootstrapped: dict[str, str]) -> None:
         applied = run_migrate(bootstrapped[MIGRATOR_ENV_KEY], REAL_MIGRATIONS)

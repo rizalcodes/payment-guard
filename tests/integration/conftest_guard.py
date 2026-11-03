@@ -22,7 +22,7 @@ from typing import Any
 import psycopg
 import pytest
 
-from payment_guard.config import GuardConfig
+from payment_guard.config import ApprovalsConfig, GuardConfig
 from payment_guard.guard_service import GuardSession, start_guard
 from payment_guard.keygen import run_keygen
 
@@ -109,6 +109,31 @@ def guard(
     from payment_guard.config import RUNTIME_URL_ENV_VARS
 
     return guard_session_factory(migrated[RUNTIME_URL_ENV_VARS["guard"]])
+
+
+@pytest.fixture
+def approvals_config(migrated: dict[str, str], guard_keys: dict[str, Path]) -> ApprovalsConfig:
+    """Konfigurasi Approvals CLI untuk database tes.
+
+    URL-nya milik role **approver**, bukan Guard: hanya role itu yang boleh
+    menulis ``approved_at``, ``valid_until``, dan ``envelope``. Kuncinya kunci
+    yang sama dengan yang dipakai Guard, karena yang menandatangani memang
+    tetap Guard (Arsitektur v1.1 bagian 7).
+    """
+    from payment_guard.config import RUNTIME_URL_ENV_VARS
+
+    return ApprovalsConfig(
+        db_url=migrated[RUNTIME_URL_ENV_VARS["approver"]],
+        signing_key_path=guard_keys["signing"],
+        lock_timeout_ms=5000,
+    )
+
+
+def approver_url(migrated: dict[str, str]) -> str:
+    """URL ``approver_app`` dari hasil bootstrap."""
+    from payment_guard.config import RUNTIME_URL_ENV_VARS
+
+    return migrated[RUNTIME_URL_ENV_VARS["approver"]]
 
 
 def guard_url(migrated: dict[str, str]) -> str:

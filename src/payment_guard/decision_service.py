@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Protocol
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -52,6 +52,7 @@ from payment_guard.chains import ChainError, chain_id_for
 from payment_guard.db import connect, db_now, take_xact_lock, to_int
 from payment_guard.events import Event, audit
 from payment_guard.guard_service import GuardSession
+from payment_guard.mandate import Mandate
 from payment_guard.money import MoneyError, format_amount, format_base_units, parse_amount
 from payment_guard.reasons import ReasonCode, Status, cooldown_triggering_pairs
 from payment_guard.rules import Decision, Denial, Request, RuleInputError, Snapshot, evaluate
@@ -296,8 +297,25 @@ def validate_input(raw: CheckPaymentInput, session: GuardSession) -> ValidatedRe
 # --------------------------------------------------------------------------- #
 
 
+class MandateHolder(Protocol):
+    """Yang dibutuhkan :func:`build_snapshot`: identitas agent dan mandate-nya.
+
+    Sengaja Protocol, bukan :class:`GuardSession`. Approvals CLI (M4) harus
+    menghitung jatah terpakai dengan definisi yang **persis sama** saat cek
+    ulang, tapi ia bukan sesi Guard: ia tidak memegang lock sesi dan tidak
+    memuat mandate dari disk. Menyalin kuerinya ke sana akan melahirkan
+    definisi "jatah terpakai" yang kedua, dan dua definisi akan menyimpang.
+    """
+
+    @property
+    def agent_id(self) -> str: ...
+
+    @property
+    def mandate(self) -> Mandate: ...
+
+
 def build_snapshot(
-    cur: psycopg.Cursor, session: GuardSession, request: ValidatedRequest, now: int
+    cur: psycopg.Cursor, session: MandateHolder, request: ValidatedRequest, now: int
 ) -> Snapshot:
     """Baca jatah terpakai dan penolakan pemicu terakhir, di dalam lock."""
     mandate = session.mandate

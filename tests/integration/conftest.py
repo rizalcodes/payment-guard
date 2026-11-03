@@ -106,17 +106,40 @@ def _drop_leftover_test_databases(conn: psycopg.Connection) -> None:
 
 
 def _drop_managed_roles(conn: psycopg.Connection) -> None:
-    """Hapus role Payment Guard bila ada.
+    """Hapus role Payment Guard bila ada, sejauh bisa dihapus.
 
     Harus dipanggil setelah semua database tes dihapus: Postgres menolak DROP
     ROLE selama role masih punya hak di database mana pun.
+
+    Role yang **tidak bisa** dihapus dilewati, bukan menggagalkan tes. Kasus
+    nyatanya: operator mengikuti README (``guard db bootstrap-roles`` lalu
+    ``guard db migrate``) sehingga database ``payment_guard`` berisi skema yang
+    dimiliki ``migrator_owner``. Role itu cluster-wide, jadi dari sini ia tidak
+    bisa dihapus, dan memaksanya berarti menghapus objek di database milik
+    operator. Yang penting untuk tes bukan role-nya absen, melainkan database
+    tesnya baru dan bootstrap-nya idempoten; keduanya tetap terpenuhi.
     """
     with conn.cursor() as cur:
         for role in ALL_MANAGED_ROLES:
             cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
             if cur.fetchone() is None:
                 continue
-            cur.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+            try:
+                cur.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+            except psycopg.errors.DependentObjectsStillExist:
+                # Koneksi ini autocommit, jadi tidak ada transaksi yang perlu
+                # dibatalkan dan role berikutnya tetap bisa dicoba.
+                continue
+
+
+def _surviving_managed_roles(conn: psycopg.Connection) -> list[str]:
+    """Role terkelola yang masih ada setelah pembersihan."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT rolname FROM pg_roles WHERE rolname = ANY(%s) ORDER BY rolname",
+            (list(ALL_MANAGED_ROLES),),
+        )
+        return [row[0] for row in cur.fetchall()]
 
 
 @pytest.fixture
@@ -140,6 +163,35 @@ def pristine_db(maintenance: psycopg.Connection, admin_url: str) -> Iterator[str
                 sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(dbname))
             )
         _drop_managed_roles(maintenance)
+
+
+@pytest.fixture
+def pristine_roles(pristine_db: str, maintenance: psycopg.Connection) -> str:
+    """``pristine_db`` yang juga menuntut tidak ada role terkelola tersisa.
+
+    Sebagian kecil tes memeriksa jalur "role belum ada": bootstrap pertama,
+    penolakan yang tidak boleh meninggalkan jejak, dan penjaga di
+    ``0002_roles.sql`` yang harus gagal keras tanpa role grup. Tes itu hanya
+    bermakna di cluster yang benar-benar bersih.
+
+    Cluster pengembangan sering tidak bersih, dan bukan karena kesalahan:
+    begitu operator mengikuti README (``bootstrap-roles`` lalu ``migrate``),
+    database ``payment_guard`` berisi skema beserta hak untuk role yang sama.
+    Role Postgres cluster-wide, jadi dari sini role itu tidak bisa dihapus
+    tanpa ikut menghapus objek milik operator. Dalam keadaan itu tes dilewati
+    dengan alasan yang menyebutkan penyebabnya, bukan gagal dan bukan diam-diam
+    lolos.
+    """
+    leftovers = _surviving_managed_roles(maintenance)
+    if leftovers:
+        pytest.skip(
+            "cluster ini memakai role terkelola di luar database tes: "
+            f"{', '.join(leftovers)}. Penyebab lazimnya database `payment_guard` "
+            "sudah dimigrasi mengikuti README, sehingga role-nya tidak bisa "
+            "dihapus dari sini. Jalankan tes ini di cluster bersih (CI), atau "
+            "pakai database lain untuk demo lokal."
+        )
+    return pristine_db
 
 
 @pytest.fixture
