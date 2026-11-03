@@ -329,3 +329,37 @@ class TestShape:
         """Pemeriksaan path kunci hanya berarti kalau akar repo-nya benar."""
         assert (REPO_ROOT / "pyproject.toml").is_file()
         assert (REPO_ROOT / "src" / "payment_guard").is_dir()
+
+
+class TestEnvExampleStaysInStep:
+    """``.env.example`` adalah satu-satunya petunjuk yang dibaca operator.
+
+    Variabel yang dibaca loader tapi tidak muncul di contoh akan membuat
+    operator menebak, dan menebak path kunci berakhir dengan kunci di dalam
+    repo dan Guard yang menolak start tanpa alasan yang jelas.
+    """
+
+    @pytest.fixture(scope="class")
+    def example(self) -> str:
+        return (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("var", sorted(GUARD_ENV_VARS.values()))
+    def test_every_variable_is_documented(self, example: str, var: str) -> None:
+        assert f"{var}=" in example, f"{var} tidak ada di .env.example"
+
+    def test_the_key_path_rule_is_spelled_out(self, example: str) -> None:
+        """Aturan "di luar akar repo" ditegakkan kode; di sini ia dijelaskan."""
+        assert "luar akar repo" in example
+
+    def test_no_secret_value_is_filled_in(self, example: str) -> None:
+        """Security v1.1: contoh ini tidak pernah memuat nilai rahasia."""
+        assert "postgresql://" not in example
+        for line in example.splitlines():
+            if line.startswith(("GUARD_DB_URL", "GUARD_SIGNING_KEY_PATH")):
+                assert line.split("=", 1)[1] == "", line
+
+    def test_the_optional_bounds_match_the_loader(self, example: str) -> None:
+        """Batas yang ditulis di contoh harus angka yang sama dengan di kode."""
+        assert f"{HEARTBEAT_SECONDS_MIN}..{HEARTBEAT_SECONDS_MAX} detik" in example
+        assert f"Default {DEFAULT_HEARTBEAT_SECONDS}." in example
+        assert f"Default {DEFAULT_LOCK_TIMEOUT_MS}." in example
