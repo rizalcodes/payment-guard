@@ -106,17 +106,35 @@ Batas ini diterima dengan sengaja: lihat RR-12 di
 `GUARD_SIGNING_KEY_PATH` **harus** menunjuk ke luar akar repo; Guard menolak
 start kalau tidak. Lihat `.env.example`.
 
-## Perintah yang tersedia di M0
+## Perintah yang tersedia sampai M3
 
 | Perintah | Dijalankan sebagai | Membaca | Guna |
 |---|---|---|---|
 | `guard db bootstrap-roles` | admin, sekali | env sementara / prompt | Role, keanggotaan grup, hak tingkat schema. Menulis `.env` dan `.env.migrator` |
 | `guard db migrate` | migrator | `.env.migrator` | Terapkan migrasi yang belum terapan |
 | `guard db status` | migrator | `.env.migrator` | Laporkan migrasi terapan dan tertunda |
+| `guard keygen` | operator, sekali | — | Pasangan kunci Ed25519. Tidak pernah menimpa yang sudah ada |
+| `guard serve` | host agent | `.env` | Guard sebagai server MCP stdio, dua tool |
+| `guard verify` | operator | — | Periksa envelope dengan kunci publik saja |
 
-Flag yang ada: `--allow-remote-admin` dan `--no-prompt` (bootstrap),
-`--env-file` (bootstrap), `--migrator-env-file` (ketiganya),
-`--migrations-dir` (migrate, status).
+`keygen` dan `verify` tidak membaca file env sama sekali: keduanya bekerja atas
+file yang diberikan di baris perintah. `verify` memang dirancang jalan **tanpa
+database dan tanpa jaringan**, dan tidak punya jalur untuk membaca bahan kunci
+rahasia — lihat E2 di [docs/Security_v1.1.md](docs/Security_v1.1.md).
+
+Flag per perintah:
+
+| Perintah | Flag |
+|---|---|
+| `db bootstrap-roles` | `--env-file`, `--migrator-env-file`, `--no-prompt`, `--allow-remote-admin` |
+| `db migrate` | `--migrations-dir`, `--migrator-env-file` |
+| `db status` | `--migrations-dir`, `--migrator-env-file` |
+| `keygen` | `--signing-key-file`, `--public-keys-file` |
+| `serve` | `--env-file` |
+| `verify` | `<envelope>` (posisional), `--pubkey`, `--mandate` |
+
+`guard --version` ada di tingkat atas. Perintah runtime lainnya (`execute`,
+`approvals`, `watch`, `reconcile`) menyusul di milestone berikutnya.
 
 Rotasi password otomatis **belum ada**. Rencananya
 `guard db bootstrap-roles --rotate-passwords`, tenggat sebelum M3; prosedur
