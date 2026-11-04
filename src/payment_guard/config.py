@@ -34,6 +34,8 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Final
 
+from payment_guard.addresses import AddressError, normalize_address
+from payment_guard.chains import BASE_SEPOLIA, chain_id_for
 from payment_guard.db import MigrationError
 
 #: Nama file konfigurasi runtime, relatif terhadap akar repo.
@@ -286,24 +288,26 @@ def load_guard_config(env_file: Path, *, repo_root: Path) -> GuardConfig:
             f"{env_file.name}."
         )
 
-    mandate_path = _require_existing_file("mandate_path", value_of("mandate_path"), env_file)
-    signing_key_path = _require_existing_file(
-        "signing_key_path", value_of("signing_key_path"), env_file
+    mandate_path = _require_existing_file(
+        GUARD_ENV_VARS["mandate_path"], value_of("mandate_path"), env_file
     )
-    _require_outside_repo(signing_key_path, repo_root)
+    signing_key_path = _require_existing_file(
+        GUARD_ENV_VARS["signing_key_path"], value_of("signing_key_path"), env_file
+    )
+    _require_outside_repo(GUARD_ENV_VARS["signing_key_path"], signing_key_path, repo_root)
     public_keys_path = _require_existing_file(
-        "public_keys_path", value_of("public_keys_path"), env_file
+        GUARD_ENV_VARS["public_keys_path"], value_of("public_keys_path"), env_file
     )
 
     heartbeat_seconds = _require_bounded_int(
-        "heartbeat_seconds",
+        GUARD_ENV_VARS["heartbeat_seconds"],
         value_of("heartbeat_seconds"),
         default=DEFAULT_HEARTBEAT_SECONDS,
         minimum=HEARTBEAT_SECONDS_MIN,
         maximum=HEARTBEAT_SECONDS_MAX,
     )
     lock_timeout_ms = _require_bounded_int(
-        "lock_timeout_ms",
+        GUARD_ENV_VARS["lock_timeout_ms"],
         value_of("lock_timeout_ms"),
         default=DEFAULT_LOCK_TIMEOUT_MS,
         minimum=LOCK_TIMEOUT_MS_MIN,
@@ -378,12 +382,12 @@ def load_approvals_config(env_file: Path, *, repo_root: Path) -> ApprovalsConfig
         )
 
     signing_key_path = _require_existing_file(
-        "signing_key_path", value_of("signing_key_path"), env_file
+        APPROVALS_ENV_VARS["signing_key_path"], value_of("signing_key_path"), env_file
     )
-    _require_outside_repo(signing_key_path, repo_root)
+    _require_outside_repo(APPROVALS_ENV_VARS["signing_key_path"], signing_key_path, repo_root)
 
     lock_timeout_ms = _require_bounded_int(
-        "lock_timeout_ms",
+        APPROVALS_ENV_VARS["lock_timeout_ms"],
         value_of("lock_timeout_ms"),
         default=DEFAULT_LOCK_TIMEOUT_MS,
         minimum=LOCK_TIMEOUT_MS_MIN,
@@ -397,8 +401,171 @@ def load_approvals_config(env_file: Path, *, repo_root: Path) -> ApprovalsConfig
     )
 
 
-def _require_existing_file(field: str, raw: str, env_file: Path) -> Path:
-    var = GUARD_ENV_VARS[field]
+# --------------------------------------------------------------------------- #
+# Konfigurasi proses Executor (M5)
+# --------------------------------------------------------------------------- #
+
+#: Variabel yang dibaca Executor (PRD v2 bagian 9, Arsitektur v1.1 bagian 2.1).
+#:
+#: Perhatikan yang **tidak** ada di sini: ``GUARD_SIGNING_KEY_PATH``. Executor
+#: hanya memegang kunci publik Guard, supaya ia bisa memeriksa persetujuan
+#: tanpa pernah bisa membuatnya (Arsitektur v1.1 bagian 2). Ada tes AST yang
+#: memeriksa nama variabel itu tidak muncul di modul Executor sama sekali.
+#:
+#: ``EXECUTOR_KEY_PATH`` adalah kunci wallet milik Executor sendiri. Ia ditolak
+#: bila berada di dalam akar repo, dengan pemeriksaan dan alasan yang sama
+#: seperti kunci penanda tangan Guard (Security v1.1 I1).
+EXECUTOR_ENV_VARS: Final[dict[str, str]] = {
+    "db_url": RUNTIME_URL_ENV_VARS["executor"],
+    "wallet_key_path": "EXECUTOR_KEY_PATH",
+    "public_keys_path": GUARD_ENV_VARS["public_keys_path"],
+    "rpc_url": "RPC_URL",
+    "chain_id": "CHAIN_ID",
+    "usdc_address": "USDC_ADDRESS",
+    "lock_timeout_ms": "EXECUTOR_LOCK_TIMEOUT_MS",
+}
+
+#: Endpoint RPC publik Base Sepolia.
+#:
+#: Diverifikasi 4 November 2026 ke dokumentasi Base, halaman "Connect to Base"
+#: (https://docs.base.org/get-started/connect-to-base), yang menyebut
+#: ``https://sepolia.base.org`` dengan chain id ``84532``.
+#:
+#: URL ini **tanpa kunci API**, dan itu syarat, bukan kebetulan: nilai bawaan
+#: ikut ter-commit, jadi ia tidak boleh pernah berupa URL berkunci. Operator
+#: yang memakai penyedia berbayar menaruh URL-nya di ``.env``, yang
+#: di-gitignore, dan Executor tidak pernah mencetak URL itu utuh; lihat
+#: :func:`payment_guard.db.endpoint_host`.
+DEFAULT_RPC_URL: Final = "https://sepolia.base.org"
+
+#: Kontrak USDC testnet di Base Sepolia.
+#:
+#: Diverifikasi 4 November 2026 ke dokumentasi Circle, halaman "USDC contract
+#: addresses" (https://developers.circle.com/stablecoins/usdc-contract-addresses),
+#: baris tabel testnet "Base Sepolia".
+#:
+#: Disimpan lowercase supaya cocok dengan bentuk ternormalisasi di seluruh
+#: sistem. Nilai ini tidak dipercaya buta: Executor memanggil ``decimals()``
+#: pada kontrak ini saat start dan menolak jalan bila hasilnya bukan 6, jadi
+#: alamat yang salah tertangkap sebelum ada transaksi yang dibangun.
+DEFAULT_USDC_ADDRESS: Final = "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
+
+#: Skema URL RPC yang diterima. Daftar tertutup, dan hanya HTTP: klien di
+#: :class:`payment_guard.chain.Web3Client` memakai ``HTTPProvider``, jadi
+#: menerima ``ws://`` di sini akan menghasilkan konfigurasi yang lolos validasi
+#: lalu gagal saat dipakai. ``file://`` dan skema lain tidak punya arti untuk
+#: endpoint JSON-RPC.
+RPC_URL_SCHEMES: Final[tuple[str, ...]] = ("https://", "http://")
+
+#: Batas atas ``chain_id``; kolom ``decisions.chain_id`` adalah ``INT``.
+_CHAIN_ID_MAX: Final = 2**31 - 1
+
+
+@dataclass(frozen=True)
+class ExecutorConfig:
+    """Konfigurasi satu proses Executor, sudah divalidasi.
+
+    Tidak punya atribut untuk kunci penanda tangan Guard, untuk URL proses
+    lain, maupun untuk mandate: Executor memeriksa envelope dengan kunci
+    publik, dan mandate yang berlaku dibaca dari ``active_mandates``.
+    """
+
+    db_url: str
+    wallet_key_path: Path
+    public_keys_path: Path
+    rpc_url: str
+    chain_id: int
+    usdc_address: str
+    lock_timeout_ms: int
+
+
+def load_executor_config(env_file: Path, *, repo_root: Path) -> ExecutorConfig:
+    """Muat dan validasi konfigurasi Executor dari environment lalu ``env_file``.
+
+    ``.env.migrator`` tidak pernah dibuka, seperti pemuat runtime lain.
+
+    Args:
+        env_file: berkas ``.env`` runtime.
+        repo_root: akar repo, dipakai untuk menolak kunci wallet di dalamnya.
+
+    Raises:
+        GuardConfigError: pada pelanggaran pertama yang ditemukan.
+    """
+    from_file = read_env_file(env_file)
+
+    def value_of(field: str) -> str:
+        var = EXECUTOR_ENV_VARS[field]
+        return (os.environ.get(var) or from_file.get(var) or "").strip()
+
+    db_url = value_of("db_url")
+    if not db_url:
+        raise GuardConfigError(
+            f"{EXECUTOR_ENV_VARS['db_url']} belum diisi. Jalankan "
+            f"`guard db bootstrap-roles` lebih dulu, atau isi di {env_file.name}."
+        )
+
+    wallet_key_path = _require_existing_file(
+        EXECUTOR_ENV_VARS["wallet_key_path"], value_of("wallet_key_path"), env_file
+    )
+    _require_outside_repo(EXECUTOR_ENV_VARS["wallet_key_path"], wallet_key_path, repo_root)
+    public_keys_path = _require_existing_file(
+        EXECUTOR_ENV_VARS["public_keys_path"], value_of("public_keys_path"), env_file
+    )
+
+    rpc_url = value_of("rpc_url") or DEFAULT_RPC_URL
+    if not rpc_url.startswith(RPC_URL_SCHEMES):
+        raise GuardConfigError(
+            f"{EXECUTOR_ENV_VARS['rpc_url']} harus dimulai dengan salah satu dari: "
+            f"{', '.join(RPC_URL_SCHEMES)}"
+        )
+
+    expected_chain_id = chain_id_for(BASE_SEPOLIA)
+    chain_id = _require_bounded_int(
+        EXECUTOR_ENV_VARS["chain_id"],
+        value_of("chain_id"),
+        default=expected_chain_id,
+        minimum=1,
+        maximum=_CHAIN_ID_MAX,
+    )
+    if chain_id != expected_chain_id:
+        raise GuardConfigError(
+            f"{EXECUTOR_ENV_VARS['chain_id']} harus {expected_chain_id} "
+            f"({BASE_SEPOLIA}), dapat {chain_id}. v1 hanya mendukung satu chain; "
+            "lihat payment_guard.chains."
+        )
+
+    raw_usdc = value_of("usdc_address") or DEFAULT_USDC_ADDRESS
+    try:
+        usdc_address = normalize_address(raw_usdc)
+    except AddressError as exc:
+        raise GuardConfigError(f"{EXECUTOR_ENV_VARS['usdc_address']} tidak sah: {exc}") from None
+
+    lock_timeout_ms = _require_bounded_int(
+        EXECUTOR_ENV_VARS["lock_timeout_ms"],
+        value_of("lock_timeout_ms"),
+        default=DEFAULT_LOCK_TIMEOUT_MS,
+        minimum=LOCK_TIMEOUT_MS_MIN,
+        maximum=LOCK_TIMEOUT_MS_MAX,
+    )
+
+    return ExecutorConfig(
+        db_url=db_url,
+        wallet_key_path=wallet_key_path,
+        public_keys_path=public_keys_path,
+        rpc_url=rpc_url,
+        chain_id=chain_id,
+        usdc_address=usdc_address,
+        lock_timeout_ms=lock_timeout_ms,
+    )
+
+
+def _require_existing_file(var: str, raw: str, env_file: Path) -> Path:
+    """Pastikan nilai ``var`` menunjuk berkas yang ada dan bisa dibaca.
+
+    Menerima **nama variabel environment**, bukan nama field, supaya pemuat
+    selain Guard (mis. Executor) bisa memakainya tanpa field-nya harus ada
+    di :data:`GUARD_ENV_VARS`.
+    """
     if not raw:
         raise GuardConfigError(f"{var} belum diisi (environment atau {env_file.name})")
     path = Path(raw).expanduser()
@@ -418,7 +585,7 @@ def _require_existing_file(field: str, raw: str, env_file: Path) -> Path:
     return resolved
 
 
-def _require_outside_repo(path: Path, repo_root: Path) -> None:
+def _require_outside_repo(var: str, path: Path, repo_root: Path) -> None:
     """Tolak bahan kunci yang berada di dalam akar repo.
 
     Berkas di dalam repo bisa ikut ter-commit karena satu ``git add -f``, satu
@@ -429,7 +596,7 @@ def _require_outside_repo(path: Path, repo_root: Path) -> None:
     root = repo_root.resolve()
     if path == root or root in path.parents:
         raise GuardConfigError(
-            f"{GUARD_ENV_VARS['signing_key_path']} berada di dalam akar repo: {path}\n"
+            f"{var} berada di dalam akar repo: {path}\n"
             f"Akar repo: {root}\n"
             "Bahan kunci harus di luar repo supaya tidak bisa ter-commit karena "
             "kecelakaan. Pindahkan berkasnya, mis. ke direktori sendiri di luar "
@@ -437,8 +604,7 @@ def _require_outside_repo(path: Path, repo_root: Path) -> None:
         )
 
 
-def _require_bounded_int(field: str, raw: str, *, default: int, minimum: int, maximum: int) -> int:
-    var = GUARD_ENV_VARS[field]
+def _require_bounded_int(var: str, raw: str, *, default: int, minimum: int, maximum: int) -> int:
     if not raw:
         return default
     try:

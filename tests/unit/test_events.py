@@ -66,6 +66,12 @@ class TestEnum:
             "approval_approved",
             "approval_rejected",
             "decision_expired",
+            # M5
+            "execution_signed",
+            "execution_broadcast",
+            "execution_confirmed",
+            "execution_failed",
+            "execution_rejected_check",
         }
 
     def test_later_milestone_events_are_absent(self) -> None:
@@ -75,7 +81,6 @@ class TestEnum:
         enum yang memuat nama yang salah ejaannya.
         """
         for later in (
-            "execution_broadcast",
             "settlement_finalized",
             "reconciliation_state_changed",
             "alarm_final_settlement_reorged",

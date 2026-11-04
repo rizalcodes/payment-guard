@@ -10,10 +10,10 @@ Dokumen yang mengikat: [docs/PRD_v2.1.md](docs/PRD_v2.1.md),
 [migrations/0001_init.sql](migrations/0001_init.sql) dan
 [migrations/0002_roles.sql](migrations/0002_roles.sql).
 
-Status: **M0 (scaffold)**. Yang sudah ada adalah struktur repo, runner migrasi,
-role database, dan tesnya. Komponen runtime (Guard, Executor, Approvals CLI,
-Watcher, Reconciler) menyusul di M1 dan sesudahnya. README lengkap adalah
-pekerjaan M9.
+Status: **M5**. Yang sudah ada: struktur repo, runner migrasi, role database,
+aturan mandate, envelope bertanda tangan, Guard sebagai server MCP, Approvals
+CLI, agent demo, dan Executor dengan write-ahead serta recovery. Watcher dan
+Reconciler menyusul di M6 dan sesudahnya. README lengkap adalah pekerjaan M9.
 
 ## Prasyarat
 
@@ -106,7 +106,39 @@ Batas ini diterima dengan sengaja: lihat RR-12 di
 `GUARD_SIGNING_KEY_PATH` **harus** menunjuk ke luar akar repo; Guard menolak
 start kalau tidak. Lihat `.env.example`.
 
-## Perintah yang tersedia sampai M4
+## Menjalankan Executor
+
+Executor memegang **kunci wallet-nya sendiri** dan hanya **kunci publik** Guard.
+Ia tidak pernah membaca `GUARD_SIGNING_KEY_PATH`; ada tes yang memeriksa bahwa
+nama variabel itu tidak muncul di modulnya sama sekali. `EXECUTOR_KEY_PATH`
+tunduk pada aturan yang sama seperti kunci Guard: **harus di luar akar repo**.
+
+```bash
+uv run guard execute <decision_id>   # satu keputusan approved, write-ahead lalu broadcast
+uv run guard recover                 # selesaikan yang tertinggal. Idempoten.
+```
+
+Saat start, Executor memanggil `decimals()` pada kontrak USDC dan **menolak
+jalan** bila hasilnya bukan 6, serta mencocokkan `eth_chainId` dengan 84532.
+Saldo ETH yang kurang hanya memberi peringatan, bukan menolak start: saldo gas
+yang rendah tidak boleh menghalangi `guard recover` justru saat ia dibutuhkan.
+
+`execute` menulis baris `executions` berstatus `signed` beserta `tx_hash`,
+`nonce`, dan `raw_tx`, dan **meng-commit-nya sebelum broadcast**. Receipt tidak
+ditunggu; `recover` yang menyelesaikannya. `recover` menyiarkan ulang `raw_tx`
+yang sama persis, jadi menjalankannya berulang kali tidak bisa menghasilkan
+pembayaran kedua. Status `failed` hanya ditulis bila receipt revert atau nonce-nya
+dipakai transaksi lain — **tidak pernah** karena timeout.
+
+Tidak ada flag konfirmasi di sini dan tidak ada `--yes`. Yang menyetujui
+pembayaran adalah operator di `guard approvals approve`; `execute` hanya
+memproses keputusan `approved` yang belum punya execution.
+
+Panduan demo satu pembayaran dari ujung ke ujung, termasuk faucet dan alamat
+jaringan beserta sumber verifikasinya, ada di
+[scripts/demo_execute.md](scripts/demo_execute.md).
+
+## Perintah yang tersedia sampai M5
 
 | Perintah | Dijalankan sebagai | Membaca | Guna |
 |---|---|---|---|
@@ -118,6 +150,8 @@ start kalau tidak. Lihat `.env.example`.
 | `guard approvals list` | operator | `.env` | Keputusan yang menunggu persetujuan manusia |
 | `guard approvals approve` | operator, interaktif | `.env` | Setujui satu keputusan; batas dicek ulang |
 | `guard approvals reject` | operator, interaktif | `.env` | Tolak satu keputusan; memicu cooldown |
+| `guard execute` | host agent / operator | `.env` | Eksekusi satu keputusan approved: cek 1–6, write-ahead, broadcast |
+| `guard recover` | operator | `.env` | Selesaikan execution `signed` atau `broadcast` yang tertinggal |
 | `guard verify` | operator | — | Periksa envelope dengan kunci publik saja |
 
 `approvals` memakai `APPROVER_DB_URL` dari `.env`, bukan URL Guard: hanya role
@@ -142,10 +176,17 @@ Flag per perintah:
 | `approvals list` | `--env-file` |
 | `approvals approve` | `<decision_id>` (posisional), `--env-file` |
 | `approvals reject` | `<decision_id>` (posisional), `--env-file` |
+| `execute` | `<decision_id>` (posisional), `--env-file` |
+| `recover` | `--env-file` |
 | `verify` | `<envelope>` (posisional), `--pubkey`, `--mandate` |
 
-`guard --version` ada di tingkat atas. Perintah runtime lainnya (`execute`,
-`watch`, `reconcile`) menyusul di milestone berikutnya.
+`execute` dan `recover` memakai `EXECUTOR_DB_URL`, `EXECUTOR_KEY_PATH`, dan
+`RPC_URL` dari `.env`. `RPC_URL` **rahasia** bila Anda memakai penyedia
+berbayar, karena kunci API biasa diletakkan di path atau query-nya; Executor
+tidak pernah mencetaknya utuh, hanya skema dan host-nya.
+
+`guard --version` ada di tingkat atas. Perintah runtime lainnya (`watch`,
+`reconcile`) menyusul di milestone berikutnya.
 
 Rotasi password otomatis **belum diimplementasi**. Rencananya
 `guard db bootstrap-roles --rotate-passwords`, ditinjau di M9 bersama perubahan

@@ -493,6 +493,9 @@ IMPURE_M3_MODULES = (
     # M4
     "approvals_cli.py",
     "demo_agent.py",
+    # M5
+    "chain.py",
+    "executor.py",
 )
 
 
@@ -570,6 +573,85 @@ def test_decision_writers_take_the_agent_lock(name: str) -> None:
     source = (SRC / "payment_guard" / name).read_text(encoding="utf-8")
     assert "take_xact_lock" in source, name
     assert '"agent"' in source, name
+
+
+#: Modul Executor. Dipisah dari daftar di atas karena ada aturan tambahan
+#: yang hanya berlaku untuk keduanya: mereka tidak boleh punya jalur apa pun
+#: ke kunci penanda tangan Guard.
+EXECUTOR_MODULES = ("chain.py", "executor.py")
+
+#: Nama yang menandakan akses ke bahan kunci penanda tangan Guard.
+SIGNING_KEY_NAMES = (
+    "GUARD_SIGNING_KEY_PATH",
+    "load_signing_identity",
+    "SigningIdentity",
+    "signing_key_path",
+    "Ed25519PrivateKey",
+)
+
+
+@pytest.mark.parametrize("name", EXECUTOR_MODULES)
+def test_executor_module_exists(name: str) -> None:
+    """Kalau modulnya hilang, tes di bawah lulus tanpa memeriksa apa pun."""
+    assert (SRC / "payment_guard" / name).is_file(), name
+
+
+@pytest.mark.parametrize("name", EXECUTOR_MODULES)
+@pytest.mark.parametrize("forbidden", SIGNING_KEY_NAMES)
+def test_executor_never_names_the_signing_key(name: str, forbidden: str) -> None:
+    """Executor hanya memegang kunci publik Guard (Arsitektur v1.1 bagian 2).
+
+    Diperiksa atas teks sumber, bukan hanya impor: sebuah nama variabel
+    environment bisa muncul sebagai string tanpa impor apa pun, dan string itu
+    sudah cukup untuk membaca berkasnya.
+    """
+    source = (SRC / "payment_guard" / name).read_text(encoding="utf-8")
+    assert forbidden not in source, f"{name} menyebut {forbidden}"
+
+
+@pytest.mark.parametrize("name", EXECUTOR_MODULES)
+def test_executor_does_not_import_guard_or_approvals(name: str) -> None:
+    """Executor tidak memuat modul proses lain.
+
+    ``guard_service`` dan ``approvals_cli`` keduanya membuka berkas kunci
+    penanda tangan. Mengimpor salah satunya akan memberi Executor jalur ke
+    bahan kunci itu walau ia tidak pernah memakainya dengan sengaja.
+    """
+    tree = ast.parse((SRC / "payment_guard" / name).read_text(encoding="utf-8"))
+    internal = _internal_imports_of(tree)
+    for forbidden in ("guard_service", "approvals_cli", "keygen", "mcp_server"):
+        assert forbidden not in internal, f"{name} mengimpor {forbidden}"
+
+
+def test_only_the_executor_builds_transactions() -> None:
+    """``encode_transfer`` hanya dipanggil dari satu modul.
+
+    Calldata adalah satu-satunya tempat tujuan dan jumlah pembayaran
+    ditetapkan. Kalau pemanggilnya menyebar, "transaksi dibangun dari payload"
+    berhenti bisa diperiksa dengan membaca satu berkas.
+    """
+    callers = []
+    for path in source_files():
+        if path.name == "chain.py":
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id == "encode_transfer":
+                    callers.append(path.name)
+                    break
+    assert sorted(set(callers)) == ["executor.py"], callers
+
+
+def test_web3_is_confined_to_the_chain_module() -> None:
+    """``web3`` dan ``eth_account`` hanya boleh disentuh satu modul.
+
+    Alasannya sama dengan ``pycryptodome`` di ``hashing.py``: satu tempat untuk
+    dibaca saat backend-nya diganti, dan satu tempat yang perlu ditinjau manual
+    karena di situlah uang ditandatangani.
+    """
+    assert _modules_importing("web3") == ["chain.py"]
+    assert _modules_importing("eth_account") == ["chain.py"]
 
 
 def test_no_module_reads_the_process_clock_for_decisions() -> None:

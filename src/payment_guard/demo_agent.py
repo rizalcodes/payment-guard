@@ -243,7 +243,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--chain", default="base-sepolia")
     parser.add_argument("--env-file", type=Path, default=None)
     parser.add_argument("--public-keys-file", type=Path, default=Path("guard_public.json"))
-    args = parser.parse_args([] if argv is None else argv)
+    # ``None`` diteruskan apa adanya: argparse membacanya sebagai
+    # ``sys.argv[1:]``. Versi pertama mengubahnya menjadi ``[]``, yang membuat
+    # setiap argumen dari baris perintah diabaikan dan perintahnya selalu gagal
+    # pada dua argumen wajibnya. Tidak ada tes yang memanggil ``main`` saat itu,
+    # jadi tidak ada yang menangkapnya.
+    args = parser.parse_args(argv)
 
     hasil = asyncio.run(
         run_once(
@@ -257,3 +262,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(json.dumps(hasil, indent=2, ensure_ascii=False))
     return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

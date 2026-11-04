@@ -353,6 +353,7 @@ def _decide(
     require_uuid(decision_id)
 
     row = _read_decision(config, decision_id)
+    _require_still_pending(row)
     guard_running = probe_guard_running(config, row.agent_id)
 
     _write_summary(stream, decision_id, row, approving=approving, guard_running=guard_running)
@@ -363,6 +364,26 @@ def _decide(
     )
     stream.write(f"\n{outcome.status} ({outcome.reason_code})\n")
     return outcome
+
+
+def _require_still_pending(row: DecisionRow) -> None:
+    """Tolak keputusan yang sudah diputus, sebelum ada ringkasan dan prompt.
+
+    Pemeriksaan yang **mengikat** tetap berada di dalam lock di
+    :func:`_commit_decision`, dan ia tidak boleh dihapus: antara pembacaan ini
+    dan lock itu, Guard atau operator lain masih bisa memutuskan baris yang
+    sama. Yang diperbaiki di sini hanya urutan bicara. Sebelumnya operator
+    disuguhi ringkasan lengkap dan diminta mengetik token enam karakter, lalu
+    baru diberi tahu bahwa keputusannya sudah diambil — dan karena token
+    dibangkitkan sekali lalu dibuang, usaha itu hilang seluruhnya.
+
+    Raises:
+        ApprovalError: bila statusnya bukan ``needs_human``.
+    """
+    if row.status != Status.NEEDS_HUMAN.value:
+        raise ApprovalError(
+            f"keputusan ini sudah diputuskan (status {row.status!r}); tidak ada yang diubah"
+        )
 
 
 def probe_guard_running(config: ApprovalsConfig, agent_id: str) -> bool:

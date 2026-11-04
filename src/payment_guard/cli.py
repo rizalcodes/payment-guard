@@ -1,6 +1,6 @@
 """Entry point ``guard``.
 
-Perintah yang tersedia sampai M4:
+Perintah yang tersedia sampai M5:
 
     guard db migrate          terapkan migrasi yang belum terapan (role migrator)
     guard db status           laporkan migrasi terapan dan tertunda
@@ -8,6 +8,8 @@ Perintah yang tersedia sampai M4:
     guard keygen              buat pasangan kunci Ed25519 (sekali)
     guard serve               jalankan server MCP stdio (dua tool)
     guard approvals ...       setujui atau tolak keputusan needs_human
+    guard execute             eksekusi satu keputusan approved ke chain
+    guard recover             selesaikan execution yang tertinggal
     guard verify              periksa envelope dengan kunci publik saja
 
 ``migrate`` dan ``status`` hanya membaca ``.env.migrator``; keduanya tidak
@@ -18,8 +20,10 @@ hanya membaca ``.env``. Lihat :mod:`payment_guard.config`.
 jalur untuk membaca bahan kunci rahasia (:mod:`payment_guard.verify_cli`).
 
 ``approvals`` berjalan sebagai role approver dan hanya di terminal interaktif
-(Security v1.1 E3, ST-23). Perintah runtime lainnya (``execute``, ``watch``,
-``reconcile``) menyusul di milestone berikutnya.
+(Security v1.1 E3, ST-23). ``execute`` dan ``recover`` berjalan sebagai role
+executor dengan kunci wallet sendiri, dan tidak pernah membaca kunci penanda
+tangan Guard. Perintah runtime lainnya (``watch``, ``reconcile``) menyusul di
+milestone berikutnya.
 """
 
 from __future__ import annotations
@@ -136,6 +140,45 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def _cmd_execute(args: argparse.Namespace) -> int:
+    # Lazy seperti `serve` dan `approvals`, dan karena alasan tambahan: modul
+    # ini menarik web3 dan eth-account, yang mahal diimpor. `guard verify`
+    # tidak boleh ikut memuat tumpukan chain hanya untuk memeriksa satu berkas.
+    from payment_guard.chain import ChainError
+    from payment_guard.config import load_executor_config
+    from payment_guard.executor import ExecutorError, run_execute
+
+    try:
+        config = load_executor_config(args.env_file, repo_root=_repo_root())
+    except GuardConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        return run_execute(config, args.decision_id)
+    except (ChainError, ExecutorError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _cmd_recover(args: argparse.Namespace) -> int:
+    from payment_guard.chain import ChainError
+    from payment_guard.config import load_executor_config
+    from payment_guard.executor import ExecutorError, run_recover
+
+    try:
+        config = load_executor_config(args.env_file, repo_root=_repo_root())
+    except GuardConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        return run_recover(config)
+    except (ChainError, ExecutorError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
@@ -274,6 +317,39 @@ def build_parser() -> argparse.ArgumentParser:
         item = approvals_sub.add_parser(name, help=bantuan)
         item.add_argument("decision_id", help="UUID dari jawaban check_payment")
     approvals_parser.set_defaults(handler=_cmd_approvals)
+
+    # --- execute dan recover: Executor, role executor, kunci wallet sendiri ---
+    #
+    # Tidak ada flag konfirmasi dan tidak ada `--yes`: yang menyetujui
+    # pembayaran adalah operator di `guard approvals approve`, dan keputusan itu
+    # sudah bertanda tangan. Di sini tidak ada lagi yang boleh dipilih —
+    # `execute` hanya memproses keputusan `approved` yang belum punya
+    # execution, dan menolak apa pun selain itu.
+    execute_parser = sub.add_parser(
+        "execute",
+        help="eksekusi satu keputusan approved ke chain (write-ahead lalu broadcast)",
+    )
+    execute_parser.add_argument(
+        "decision_id", help="UUID keputusan approved yang belum punya execution"
+    )
+    execute_parser.set_defaults(handler=_cmd_execute)
+
+    recover_parser = sub.add_parser(
+        "recover",
+        help="selesaikan execution yang tertinggal (signed atau broadcast). Idempoten.",
+    )
+    recover_parser.set_defaults(handler=_cmd_recover)
+
+    for item in (execute_parser, recover_parser):
+        item.add_argument(
+            "--env-file",
+            type=Path,
+            default=None,
+            help=(
+                f"file konfigurasi runtime (default: {RUNTIME_ENV_FILENAME} di akar repo). "
+                "Memakai EXECUTOR_DB_URL, EXECUTOR_KEY_PATH, dan RPC_URL."
+            ),
+        )
 
     # --- verify: hanya kunci publik, tanpa database dan tanpa jaringan ---
     verify_parser = sub.add_parser(

@@ -98,7 +98,21 @@ class TestDependencies:
         assert "cryptography" in names, "disiapkan untuk M2 (signing)"
         assert "pycryptodome" in names, "Keccak-256 untuk M1 dan M5"
         assert "mcp" in names, "SDK MCP resmi untuk server Guard (M3)"
-        assert len(names) == 4, f"dependensi runtime harus minimal, ada: {names}"
+        assert "web3" in names, "RPC dan tanda tangan transaksi untuk Executor (M5)"
+        assert len(names) == 5, f"dependensi runtime harus minimal, ada: {names}"
+
+    def test_web3_is_pinned_and_confined(self, pyproject: dict) -> None:
+        """PRD v2 bagian 5 mengizinkan web3.py; batas versinya tetap wajib.
+
+        ``web3`` membawa puluhan paket transitif, jadi ia satu-satunya
+        dependensi M5 dan hanya ``chain.py`` yang boleh mengimpornya; penjaga
+        impornya ada di ``test_source_hygiene.py``.
+        """
+        spec = next(d for d in pyproject["project"]["dependencies"] if d.startswith("web3"))
+        assert ">=" in spec and "<" in spec, f"web3 harus dibatasi versinya: {spec}"
+
+    def test_lockfile_pins_web3(self) -> None:
+        assert 'name = "web3"' in (ROOT / "uv.lock").read_text(encoding="utf-8")
 
     def test_mcp_is_the_official_sdk_and_pinned(self, pyproject: dict) -> None:
         """PRD v2 bagian 5: SDK resmi Python, bukan implementasi protokol sendiri."""

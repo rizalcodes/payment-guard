@@ -9,9 +9,10 @@ ejaan. Satu enum berarti ``docs/events.md`` di M9 bisa dibuat dari kode, dan
 CHECK ``event`` di database bisa ditambahkan tanpa menemukan kejutan.
 
 Hanya kejadian yang sudah dipakai yang ada di sini. Kejadian milestone lain
-(``execution_*``, ``settlement_*``, ``reconciliation_*``, ``alarm_*``) sengaja
-**belum** dibuat: enum yang memuat nama yang belum pernah ditulis tidak bisa
-dibedakan dari enum yang memuat nama yang salah.
+(``settlement_*``, ``reconciliation_*``, ``alarm_*``) sengaja **belum**
+dibuat: enum yang memuat nama yang belum pernah ditulis tidak bisa dibedakan
+dari enum yang memuat nama yang salah. ``execution_*`` masuk di M5 karena di
+situlah Executor mulai menulisnya.
 """
 
 from __future__ import annotations
@@ -64,6 +65,20 @@ class Event(StrEnum):
     #: ``needs_human`` melewati ``expires_at`` dan menjadi ``expired``.
     DECISION_EXPIRED = "decision_expired"
 
+    # --- M5: eksekusi on-chain (PRD v2 bagian 9, PRD v2.1 bagian 9) ---
+    #: Transaksi sudah ditandatangani dan ditulis write-ahead, belum disiarkan.
+    #: Inilah baris yang membuat recovery mungkin: ia ada sebelum ada apa pun
+    #: di jaringan, jadi crash sesudahnya tidak kehilangan jejak.
+    EXECUTION_SIGNED = "execution_signed"
+    #: ``eth_sendRawTransaction`` diterima node.
+    EXECUTION_BROADCAST = "execution_broadcast"
+    #: Receipt diterima dengan ``status = 1``.
+    EXECUTION_CONFIRMED = "execution_confirmed"
+    #: Receipt revert, atau nonce-nya dipakai transaksi lain. **Bukan** timeout.
+    EXECUTION_FAILED = "execution_failed"
+    #: Salah satu dari cek 1..6 gagal; tidak ada transaksi yang dibangun.
+    EXECUTION_REJECTED_CHECK = "execution_rejected_check"
+
 
 #: Actor yang sah untuk tiap kejadian.
 #:
@@ -77,6 +92,12 @@ class Event(StrEnum):
 #: lazy (Arsitektur v1.1 bagian 7): siapa pun yang pertama menyentuh baris itu
 #: yang menuliskannya, dan dua role itulah yang punya hak UPDATE kolom status
 #: di ``0002_roles.sql``. Di M4 hanya jalur ``human`` yang dipakai.
+#:
+#: Kejadian M5 semuanya ``executor``, dan hanya itu. Berbeda dari persetujuan,
+#: di sini memang prosesnya yang bertindak: tidak ada manusia yang menekan
+#: apa pun di antara tanda tangan dan broadcast, dan justru itu yang membuat
+#: write-ahead perlu. ``execution_failed`` juga tidak pernah ``human``: ia
+#: menyatakan apa yang dilihat Executor di chain, bukan penilaian siapa pun.
 EVENT_ACTORS: Final[dict[Event, frozenset[Actor]]] = {
     Event.MANDATE_LOADED: frozenset({Actor.GUARD}),
     Event.DECISION_MADE: frozenset({Actor.GUARD}),
@@ -86,6 +107,11 @@ EVENT_ACTORS: Final[dict[Event, frozenset[Actor]]] = {
     Event.APPROVAL_APPROVED: frozenset({Actor.HUMAN}),
     Event.APPROVAL_REJECTED: frozenset({Actor.HUMAN}),
     Event.DECISION_EXPIRED: frozenset({Actor.GUARD, Actor.HUMAN}),
+    Event.EXECUTION_SIGNED: frozenset({Actor.EXECUTOR}),
+    Event.EXECUTION_BROADCAST: frozenset({Actor.EXECUTOR}),
+    Event.EXECUTION_CONFIRMED: frozenset({Actor.EXECUTOR}),
+    Event.EXECUTION_FAILED: frozenset({Actor.EXECUTOR}),
+    Event.EXECUTION_REJECTED_CHECK: frozenset({Actor.EXECUTOR}),
 }
 
 #: Kunci payload yang ditolak, apa pun isinya.

@@ -13,6 +13,7 @@ dependencies = [
     "pycryptodome>=3.21,<4",
     # MCP server resmi (FastMCP, transport stdio) untuk Guard di M3.
     "mcp>=1.2,<2",
+    "web3>=7.6,<8",
 ]
 
 [project.scripts]
@@ -38,12 +39,29 @@ testpaths = ["tests"]
 markers = [
     "integration: butuh Postgres dari docker compose project payment-guard (port 5434)",
 ]
-filterwarnings = ["error"]
+filterwarnings = [
+    "error",
+    # `import web3` ikut memuat provider websocket lama, dan websockets >= 14
+    # memperingatkan deprecation di tingkat modul. Tidak ada kode di repo ini
+    # yang memanggilnya: Executor memakai HTTPProvider (lihat RPC_URL_SCHEMES
+    # di config.py), dan peringatannya muncul hanya karena rantai impor web3.
+    #
+    # Filter ini SENGAJA cocok dengan satu pesan saja, bukan dengan
+    # DeprecationWarning secara umum: deprecation lain, milik kita maupun milik
+    # pustaka lain, harus tetap menggagalkan tes.
+    "ignore:websockets.legacy is deprecated:DeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
 target-version = "py312"
+
+[tool.ruff.lint.isort]
+# `tests/fake_chain.py` dipakai tes unit dan tes integrasi. Tanpa baris ini
+# ruff menggolongkannya sebagai pustaka pihak ketiga dan mengurutkannya
+# bersama paket eksternal.
+known-first-party = ["payment_guard", "fake_chain"]
 
 [tool.ruff.lint]
 select = [

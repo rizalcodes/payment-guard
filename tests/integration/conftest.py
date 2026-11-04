@@ -241,4 +241,9 @@ def migrated(bootstrapped: dict[str, str]) -> dict[str, str]:
 # Fixture khusus Guard (M3) hidup di berkas sendiri supaya conftest ini tetap
 # terbaca. Impor bintang dipakai dengan sengaja: pytest hanya menemukan
 # fixture yang ada di namespace conftest.
+# Fixture khusus Executor (M5) juga hidup di berkas sendiri. Ia TIDAK memakai
+# `pristine_db`: lihat penjelasan di kepala `conftest_executor.py` soal mengapa
+# rantai fixture di atas merusak `.env` operator dan mengapa M5 tidak
+# membutuhkannya.
+from conftest_executor import *  # noqa: E402, F403
 from conftest_guard import *  # noqa: E402, F403

@@ -38,6 +38,15 @@ _CHECKED_SEVERITIES: Final = frozenset({"NOTICE", "WARNING"})
 
 _URL_WITH_CREDENTIALS: Final = re.compile(r"(?P<scheme>[a-z+]+://)(?P<userinfo>[^/@\s]*@)?")
 
+#: Skema dan host sebuah URL, tanpa userinfo, path, query, atau fragment.
+#:
+#: Dipakai untuk endpoint RPC, yang bisa membawa kunci API **di dalam path**
+#: (``https://host/v2/<kunci>``) dan bukan hanya di userinfo. :func:`redact_url`
+#: tidak cukup untuk itu: ia menyembunyikan userinfo dan membiarkan sisanya.
+_URL_SCHEME_AND_HOST: Final = re.compile(
+    r"\A(?P<scheme>[a-z][a-z0-9+.-]*://)(?:[^/@\s]*@)?(?P<host>[^/?#\s]*)"
+)
+
 # SQL statik. Tidak ada bagian yang berasal dari input; nilai selalu parameter.
 #
 # ``set_config`` dipakai, bukan ``SET``: ``SET`` tidak menerima parameter, dan
@@ -47,6 +56,7 @@ SET_LOCK_TIMEOUT: Final = "SELECT set_config('lock_timeout', %s, false)"
 SET_STATEMENT_TIMEOUT: Final = "SELECT set_config('statement_timeout', %s, false)"
 SELECT_DB_NOW: Final = "SELECT extract(epoch from now())::bigint"
 TAKE_XACT_LOCK: Final = "SELECT pg_advisory_xact_lock(%s)"
+TAKE_XACT_LOCK_SHARED: Final = "SELECT pg_advisory_xact_lock_shared(%s)"
 TRY_SESSION_LOCK: Final = "SELECT pg_try_advisory_lock(%s)"
 RELEASE_SESSION_LOCK: Final = "SELECT pg_advisory_unlock(%s)"
 
@@ -65,6 +75,22 @@ def redact_url(url: str) -> str:
         return "<redacted>"
     rest = url[match.end() :]
     return f"{match.group('scheme')}<redacted>@{rest}"
+
+
+def endpoint_host(url: str) -> str:
+    """Skema dan host ``url`` saja, aman dicetak ke log operator.
+
+    ``https://user:pw@rpc.example/v2/kunci-rahasia?token=x`` menjadi
+    ``https://rpc.example``. Berbeda dari :func:`redact_url`, fungsi ini juga
+    membuang path dan query, karena penyedia RPC biasa menaruh kunci API di
+    sana. Bentuk yang tidak dikenali diganti seluruhnya, bukan dibiarkan lolos.
+    """
+    if not url:
+        return "<empty>"
+    match = _URL_SCHEME_AND_HOST.match(url)
+    if match is None or not match.group("host"):
+        return "<redacted>"
+    return f"{match.group('scheme')}{match.group('host')}"
 
 
 class MigrationError(RuntimeError):
@@ -215,6 +241,19 @@ def take_xact_lock(cur: psycopg.Cursor, namespace: str, identity: str = "") -> N
     lock tertinggal karena pengecualian.
     """
     cur.execute(TAKE_XACT_LOCK, (advisory_key(namespace, identity),))
+
+
+def take_xact_lock_shared(cur: psycopg.Cursor, namespace: str, identity: str = "") -> None:
+    """Ambil ``pg_advisory_xact_lock_shared``. Menunggu sampai dapat.
+
+    Beberapa pemegang shared bisa jalan bersamaan, tapi tidak ada yang bisa
+    jalan bersamaan dengan pemegang eksklusif. Itulah bentuk yang dibutuhkan
+    ``mandate:<agent_id>`` di jalur Executor (Arsitektur v1.1 bagian 4): dua
+    eksekusi untuk agent yang sama tidak perlu saling menunggu, tapi tidak satu
+    pun boleh membaca ``active_mandates`` sementara Guard start sedang
+    menggantinya.
+    """
+    cur.execute(TAKE_XACT_LOCK_SHARED, (advisory_key(namespace, identity),))
 
 
 def try_session_lock(cur: psycopg.Cursor, namespace: str, identity: str = "") -> bool:

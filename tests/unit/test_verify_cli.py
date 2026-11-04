@@ -420,8 +420,8 @@ class TestKeySeparation:
         source = (SRC / "keygen.py").read_text(encoding="utf-8")
         assert any(marker in source for marker in self.FORBIDDEN_MARKERS)
 
-    def test_signing_module_is_the_only_place_that_signs(self) -> None:
-        """Hanya signing.py yang memanggil ``.sign()`` atas kunci."""
+    def _sign_callers(self) -> list[str]:
+        """Berkas di ``src/`` yang memanggil ``.sign()``."""
         callers = []
         for path in sorted(SRC.rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -433,7 +433,41 @@ class TestKeySeparation:
                 ):
                     callers.append(path.name)
                     break
-        assert callers == ["signing.py"], callers
+        return callers
+
+    def test_only_two_modules_sign_anything(self) -> None:
+        """``.sign()`` punya tepat dua pemanggil, dan masing-masing satu alasan.
+
+        ``signing.py`` menandatangani **envelope** dengan kunci Ed25519 Guard.
+        ``executor.py`` menandatangani **transaksi** dengan kunci wallet
+        Executor. Dua kunci berbeda yang memang harus tetap berbeda: yang
+        pertama menyatakan persetujuan, yang kedua membelanjakan uang yang
+        sudah disetujui.
+
+        Sampai M4 daftar ini hanya memuat satu nama. Yang dijaganya tetap sama:
+        modul ketiga tidak boleh mulai menandatangani sesuatu tanpa ada yang
+        menyadarinya.
+        """
+        assert self._sign_callers() == ["executor.py", "signing.py"]
+
+    def test_the_executor_signs_through_the_wallet_object(self) -> None:
+        """Executor memanggil method wallet, bukan menyentuh bahan kuncinya.
+
+        ``WalletIdentity.sign`` menyimpan akunnya di field yang disembunyikan
+        dari ``repr`` dan tidak pernah menyerahkannya ke pemanggil. Selama
+        setiap ``.sign()`` di ``executor.py`` penerimanya objek wallet, tidak
+        ada jalur di modul itu yang perlu membaca kunci.
+        """
+        tree = ast.parse((SRC / "executor.py").read_text(encoding="utf-8"))
+        penerima = [
+            node.func.value.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "sign"
+            and isinstance(node.func.value, ast.Attribute)
+        ]
+        assert penerima == ["wallet"], penerima
 
 
 class TestNoDatabaseOrNetwork:

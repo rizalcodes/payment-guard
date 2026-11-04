@@ -22,6 +22,7 @@ from payment_guard.demo_agent import (
     TOOL_ARGUMENTS,
     TOOL_NAMES,
     execute_payment,
+    main,
     tool_names,
 )
 from payment_guard.guard_service import load_signing_identity
@@ -194,6 +195,61 @@ class TestExecutePaymentStub:
         hasil = execute_payment(envelope, MANDATE_HASH, public_keys_path=keys["public"])
         rahasia = json.loads(keys["signing"].read_text(encoding="utf-8"))["private_key"]
         assert rahasia not in hasil.detail
+
+
+class TestCommandLine:
+    """Agent demo harus benar-benar bisa dijalankan.
+
+    Tes di kelas ini ada karena M4 mengirim ``main`` yang tidak bisa dipakai:
+    ia mengubah ``argv`` kosong menjadi ``[]`` alih-alih meneruskan ``None``,
+    sehingga setiap argumen dari baris perintah diabaikan, dan modulnya tidak
+    punya blok ``__main__`` sehingga ``python -m`` tidak menjalankan apa pun.
+    Keduanya lolos karena tidak ada satu pun tes yang memanggil ``main``.
+    """
+
+    def test_help_exits_cleanly(self) -> None:
+        with pytest.raises(SystemExit) as info:
+            main(["--help"])
+        assert info.value.code == 0
+
+    def test_the_two_required_arguments_are_enforced(self) -> None:
+        with pytest.raises(SystemExit) as info:
+            main([])
+        assert info.value.code == 2
+
+    def test_recipient_and_amount_are_positional(self, monkeypatch) -> None:
+        """Panduan demo memanggilnya tanpa flag; bentuknya harus cocok."""
+        dicatat: dict[str, object] = {}
+
+        async def tiruan(recipient, amount, reason, **kwargs):
+            dicatat.update({"recipient": recipient, "amount": amount, "reason": reason})
+            dicatat.update(kwargs)
+            return {"ok": True}
+
+        monkeypatch.setattr("payment_guard.demo_agent.run_once", tiruan)
+        assert main([RECIPIENT, "1.5", "--reason", "demo"]) == 0
+        assert dicatat["recipient"] == RECIPIENT
+        assert dicatat["amount"] == "1.5"
+        assert dicatat["reason"] == "demo"
+
+    def test_the_amount_stays_a_string(self, monkeypatch) -> None:
+        """Uang tidak pernah lewat ``float``, termasuk saat di-parse argparse."""
+        dicatat: dict[str, object] = {}
+
+        async def tiruan(recipient, amount, reason, **kwargs):
+            dicatat["amount"] = amount
+            return {}
+
+        monkeypatch.setattr("payment_guard.demo_agent.run_once", tiruan)
+        main([RECIPIENT, "0.000001"])
+        assert dicatat["amount"] == "0.000001"
+        assert isinstance(dicatat["amount"], str)
+
+    def test_the_module_can_be_run_with_dash_m(self) -> None:
+        """``python -m payment_guard.demo_agent`` butuh blok ``__main__``."""
+        source = MODULE.read_text(encoding="utf-8")
+        assert '__name__ == "__main__"' in source
+        assert "raise SystemExit(main())" in source
 
 
 class TestNoEscapeHatches:
