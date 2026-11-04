@@ -43,15 +43,18 @@ from payment_guard.chain import ChainError
 from payment_guard.config import ExecutorConfig
 from payment_guard.db import to_int
 from payment_guard.executor import (
+    NO_NONCE_USED,
     OUTCOME_REJECTED,
     REASON_ALREADY_EXECUTED,
     REASON_EXPIRED,
     REASON_MANDATE_NOT_ACTIVE,
+    SELECT_MAX_NONCE,
     STATUS_BROADCAST,
     STATUS_CONFIRMED,
     STATUS_FAILED,
     STATUS_SIGNED,
     execute_decision,
+    next_nonce,
     open_runtime,
     recover_pending,
     run_execute,
@@ -1020,3 +1023,109 @@ class TestNoKeyMaterialLeaks:
         row = fetch_execution(executor_db, seeded["decision_id"])
         assert row is not None
         assert bytes.fromhex(TEST_WALLET_SEED[2:]) not in bytes(row["raw_tx"])
+
+
+# --------------------------------------------------------------------------- #
+# Rumus nonce terhadap baris sungguhan
+# --------------------------------------------------------------------------- #
+
+
+class TestNonceFormulaAgainstRealRows:
+    """Rumus M6.0.1 terhadap Postgres, bukan terhadap kursor tiruan.
+
+    Tes unit di ``tests/unit/test_executor.py`` memakai kursor tiruan yang
+    **menirukan** ``coalesce(max(nonce), -1)``. Tiruan yang keliru akan lulus
+    sendiri, jadi dua kasus pangkal rumus ini dijalankan di sini terhadap
+    database yang sesungguhnya: kasus (a) tabel kosong dan kasus (b) satu baris
+    dengan nonce 5 sementara node menjawab 5.
+
+    Keduanya memanggil :func:`payment_guard.executor.next_nonce` langsung, di
+    luar ``execute_decision``, karena yang diperiksa adalah rumusnya — bukan
+    jalur eksekusinya, yang sudah punya tesnya sendiri di atas.
+    """
+
+    def nonce_for(self, url: str, *, pending: int) -> int:
+        with psycopg.connect(url) as conn, conn.cursor() as cur:
+            return next_nonce(cur, FakeChain(pending_nonce_value=pending), TEST_WALLET_ADDRESS)
+
+    def max_nonce_as_postgres_sees_it(self, url: str) -> int:
+        with psycopg.connect(url) as conn, conn.cursor() as cur:
+            cur.execute(SELECT_MAX_NONCE, (TEST_WALLET_ADDRESS,))
+            row = cur.fetchone()
+            assert row is not None, "agregat harus selalu mengembalikan satu baris"
+            return to_int(row[0])
+
+    def test_case_a_an_empty_table_yields_zero(self, executor_db: str) -> None:
+        """Tabel kosong, node di 0, hasilnya 0 — nonce pertama yang sah."""
+        assert count_executions(executor_db) == 0
+        assert self.max_nonce_as_postgres_sees_it(executor_db) == NO_NONCE_USED
+        assert self.nonce_for(executor_db, pending=0) == 0
+
+    def test_case_b_a_row_at_five_with_the_node_at_five_yields_six(
+        self,
+        executor_config: ExecutorConfig,
+        executor_db: str,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """Satu baris sungguhan bernonce 5, node menjawab 5, hasilnya 6.
+
+        Di sinilah dua satuan itu bertemu: 5 di ``executions`` adalah nonce
+        yang **sudah** dipakai, 5 dari node adalah nonce yang **akan** dipakai.
+        Mengambil yang terbesar tanpa menyamakan satuannya lebih dulu akan
+        memberi 5, dan ``UNIQUE(from_addr, nonce)`` yang menolaknya — setelah
+        transaksi kedua ditandatangani.
+        """
+        run(executor_config, chain, seeded["decision_id"])
+        with psycopg.connect(executor_db) as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE executions SET nonce = %s WHERE decision_id = %s",
+                (5, seeded["decision_id"]),
+            )
+            conn.commit()
+
+        assert self.max_nonce_as_postgres_sees_it(executor_db) == 5
+        assert self.nonce_for(executor_db, pending=5) == 6
+
+    def test_the_node_still_wins_when_it_is_further_ahead(
+        self,
+        executor_config: ExecutorConfig,
+        executor_db: str,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """Kasus (c) dengan baris sungguhan: transaksi dari luar sistem ini.
+
+        Hanya node yang melihatnya, jadi hanya node yang bisa melaporkannya.
+        """
+        run(executor_config, chain, seeded["decision_id"])
+        with psycopg.connect(executor_db) as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE executions SET nonce = %s WHERE decision_id = %s",
+                (5, seeded["decision_id"]),
+            )
+            conn.commit()
+
+        assert self.nonce_for(executor_db, pending=8) == 8
+
+    def test_a_failed_row_still_holds_its_nonce(
+        self,
+        executor_config: ExecutorConfig,
+        executor_db: str,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """``coalesce(max(nonce), -1)`` tidak memfilter status, dan itu sengaja.
+
+        Transaksi yang gagal bisa masih beredar di mempool. Memakai ulang
+        nonce-nya berarti dua transaksi berbeda bersaing untuk slot yang sama.
+        """
+        run(executor_config, chain, seeded["decision_id"])
+        with psycopg.connect(executor_db) as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE executions SET nonce = %s, status = %s WHERE decision_id = %s",
+                (5, STATUS_FAILED, seeded["decision_id"]),
+            )
+            conn.commit()
+
+        assert self.nonce_for(executor_db, pending=0) == 6

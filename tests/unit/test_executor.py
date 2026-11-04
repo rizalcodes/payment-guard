@@ -919,10 +919,23 @@ class TestNoKeyMaterialInTheModule:
 
 
 class NonceCursor:
-    """Kursor yang hanya menjawab ``SELECT max(nonce) …``."""
+    """Kursor yang hanya menjawab ``SELECT coalesce(max(nonce), -1) …``.
 
-    def __init__(self, max_nonce: int | None) -> None:
+    ``max_nonce`` adalah nilai ``max(nonce)`` **mentah** di tabel: ``None``
+    berarti tabel kosong untuk wallet itu. Kursor ini menirukan ``coalesce``
+    yang ada di SQL sungguhan, jadi ``None`` keluar sebagai ``-1`` — sama
+    seperti yang akan diterima kode dari Postgres. Tes integrasi di
+    ``tests/integration/test_execution_flow.py`` memeriksa bahwa tiruan ini
+    memang sesuai dengan database.
+
+    ``raw`` mematikan tiruan itu supaya penjaga bertahan lapis di
+    :func:`payment_guard.executor.next_nonce` bisa diuji: kalau suatu hari
+    ``coalesce`` hilang dari SQL, baris ``None`` tidak boleh menjadi nonce 1.
+    """
+
+    def __init__(self, max_nonce: int | None, *, raw: bool = False) -> None:
         self.max_nonce = max_nonce
+        self.raw = raw
         self.statements: list[str] = []
         self._result: tuple[object, ...] | None = None
 
@@ -930,7 +943,10 @@ class NonceCursor:
         if sql != executor.SELECT_MAX_NONCE:
             raise AssertionError(f"SQL tak terduga:\n{sql}")
         self.statements.append("max_nonce")
-        self._result = (self.max_nonce,)
+        if self.max_nonce is None and not self.raw:
+            self._result = (executor.NO_NONCE_USED,)
+        else:
+            self._result = (self.max_nonce,)
 
     def fetchone(self) -> tuple[object, ...] | None:
         return self._result
@@ -939,14 +955,68 @@ class NonceCursor:
 class TestNextNonce:
     """Keputusan operator M6.0: jangan hanya memakai ``pending`` dari RPC."""
 
-    def nonce(self, *, max_nonce: int | None, pending: int) -> int:
+    def nonce(self, *, max_nonce: int | None, pending: int, raw: bool = False) -> int:
         from fake_chain import FakeChain
 
         return next_nonce(
-            NonceCursor(max_nonce),  # type: ignore[arg-type]
+            NonceCursor(max_nonce, raw=raw),  # type: ignore[arg-type]
             FakeChain(pending_nonce_value=pending),
             TEST_WALLET_ADDRESS,
         )
+
+    # ----------------------------------------------------------------------- #
+    # Rumus yang dikunci operator (M6.0.1)
+    #
+    #     next_nonce = max(pending_rpc, coalesce(max_db_nonce, -1) + 1)
+    #
+    # Keempat kasus di bawah adalah yang dikunci berikut hasilnya. Ditulis
+    # sebagai satu tabel, bukan empat fungsi terpisah, supaya rumusnya terbaca
+    # sekaligus: yang penting di sini adalah hubungan antar barisnya.
+    # ----------------------------------------------------------------------- #
+
+    @pytest.mark.parametrize(
+        ("kasus", "max_db", "pending", "harapan"),
+        [
+            # a. Wallet baru. Nonce pertama yang sah adalah 0, bukan 1.
+            ("a: db kosong, node di 0", None, 0, 0),
+            # b. Node sudah melihat semua yang kami kirim. Catatan kami
+            #    menyebut 5 sebagai nonce TERAKHIR yang dipakai, node menyebut
+            #    5 sebagai nonce BERIKUTNYA: dua satuan, satu angka.
+            ("b: db 5, node 5", 5, 5, 6),
+            # c. Node lebih maju: ada transaksi dari wallet yang sama yang
+            #    dikirim di luar sistem ini. Hanya node yang melihatnya.
+            ("c: db 5, node 8", 5, 8, 8),
+            # d. Node tepat satu di depan catatan kami, yang justru keadaan
+            #    normal: ia sudah melihat transaksi terakhir kami.
+            ("d: db 5, node 6", 5, 6, 6),
+        ],
+    )
+    def test_the_locked_formula(
+        self, kasus: str, max_db: int | None, pending: int, harapan: int
+    ) -> None:
+        assert self.nonce(max_nonce=max_db, pending=pending) == harapan, kasus
+
+    def test_an_empty_table_is_minus_one_not_zero(self) -> None:
+        """``coalesce`` memakai -1, dan -1 bukan pilihan sembarang.
+
+        0 adalah nonce yang sah dan terpakai, jadi ia tidak bisa sekaligus
+        berarti "belum ada yang terpakai". -1 adalah satu-satunya nilai di
+        bawah nonce terkecil yang sah, dan ``CHECK (nonce >= 0)`` di
+        ``0001_init.sql`` menjamin ia tidak akan pernah bertabrakan dengan
+        nonce sungguhan.
+        """
+        assert executor.NO_NONCE_USED == -1
+        assert "coalesce(max(nonce), -1)" in executor.SELECT_MAX_NONCE
+
+    def test_a_missing_coalesce_still_cannot_produce_one(self) -> None:
+        """Penjaga bertahan lapis, untuk kalau ``coalesce`` hilang dari SQL.
+
+        Dengan ``raw``, database menjawab ``None`` seperti sebelum M6.0.1.
+        Hasilnya harus tetap 0: kekeliruan di jalur ini tidak melempar
+        pengecualian, ia hanya memberi nonce yang salah, dan itu baru terlihat
+        ketika transaksi pertama tidak pernah ter-mine.
+        """
+        assert self.nonce(max_nonce=None, pending=0, raw=True) == 0
 
     def test_a_fresh_wallet_starts_at_zero(self) -> None:
         """Tanpa riwayat dan tanpa transaksi, nonce pertama adalah 0.

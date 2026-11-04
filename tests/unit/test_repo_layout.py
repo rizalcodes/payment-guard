@@ -147,6 +147,13 @@ class TestCanonicalDocs:
     #: Prosedur manual operator.
     OPERATIONAL = ("runbook.md",)
 
+    #: Catatan riwayat: keputusan dan apa yang terjadi per tag.
+    #:
+    #: Dipisah dari CANONICAL karena keduanya tidak mengikat perilaku kode —
+    #: keduanya menjelaskan mengapa perilaku itu begitu, dan apa yang sudah
+    #: diketahui salah di tag yang sudah dibuat.
+    HISTORICAL = ("decisions.md", "CHANGELOG.md")
+
     @pytest.mark.parametrize("name", CANONICAL)
     def test_canonical_document_exists(self, name: str) -> None:
         assert (ROOT / "docs" / name).is_file(), name
@@ -159,6 +166,10 @@ class TestCanonicalDocs:
     def test_operational_document_exists(self, name: str) -> None:
         assert (ROOT / "docs" / name).is_file(), name
 
+    @pytest.mark.parametrize("name", HISTORICAL)
+    def test_historical_document_exists(self, name: str) -> None:
+        assert (ROOT / "docs" / name).is_file(), name
+
     def test_no_other_markdown_sneaks_into_docs(self) -> None:
         """Daftar isi ``docs/`` tertutup.
 
@@ -166,7 +177,7 @@ class TestCanonicalDocs:
         sementara tidak boleh terlihat sama di direktori yang sama.
         """
         ada = sorted(p.name for p in (ROOT / "docs").glob("*.md"))
-        harus = sorted([*self.CANONICAL, *self.DERIVED, *self.OPERATIONAL])
+        harus = sorted([*self.CANONICAL, *self.DERIVED, *self.OPERATIONAL, *self.HISTORICAL])
         assert ada == harus, f"isi docs/ berubah: {ada}"
 
     def test_the_runbook_covers_the_stuck_transaction(self) -> None:
@@ -182,6 +193,134 @@ class TestCanonicalDocs:
         assert "bump" in teks
         assert "maxFeePerGas" in teks
         assert "docs/runbook.md" in teks
+
+
+class TestTheReleaseRule:
+    """Aturan rilis M6.0.1 harus tertulis, di runbook dan di README.
+
+    Aturan ini ada karena satu kejadian, bukan karena kerapian: ``m5.1``
+    dibuat dengan satu tes merah di dalamnya karena suite dinilai di working
+    tree yang masih punya berkas untracked. Aturan yang hanya diingat akan
+    hilang bersama sesi yang mengingatnya, jadi ia ditulis — dan tes ini yang
+    menahannya tetap tertulis.
+    """
+
+    def runbook(self) -> str:
+        return (ROOT / "docs" / "runbook.md").read_text(encoding="utf-8")
+
+    def readme(self) -> str:
+        return (ROOT / "README.md").read_text(encoding="utf-8")
+
+    def test_the_runbook_has_a_release_section(self) -> None:
+        assert "## 7. Rilis" in self.runbook()
+
+    def test_the_runbook_demands_a_clean_checkout(self) -> None:
+        teks = self.runbook()
+        assert "checkout bersih" in teks
+        assert "git stash -u" in teks
+        assert "git clone" in teks
+
+    def test_the_runbook_names_the_test_that_caught_this(self) -> None:
+        """Aturan tanpa kejadiannya akan dibaca sebagai formalitas."""
+        teks = self.runbook()
+        assert "test_only_example_env_files_are_tracked" in teks
+        assert "untracked" in teks
+
+    def test_the_readme_repeats_the_rule(self) -> None:
+        teks = self.readme()
+        assert "checkout bersih" in teks
+        assert "test_only_example_env_files_are_tracked" in teks
+        assert "untracked" in teks
+
+
+class TestTheDecisionLog:
+    """``docs/decisions.md`` memuat keputusan nonce M6.0.1, kata per kata.
+
+    Kalimat yang diminta operator diperiksa apa adanya. Parafrase akan lulus
+    tes yang longgar dan kehilangan hal yang justru dikunci: bahwa jaring
+    pengamannya tetap ada di database.
+    """
+
+    DIMINTA = (
+        "Rumus nonce di brief diganti karena nonce 0 tidak pernah terpakai di wallet\n"
+        "baru. `UNIQUE(from_addr, nonce)` tetap jaring pengaman terakhir."
+    )
+
+    def text(self) -> str:
+        return (ROOT / "docs" / "decisions.md").read_text(encoding="utf-8")
+
+    def test_the_locked_sentence_is_present(self) -> None:
+        assert self.DIMINTA in self.text()
+
+    def test_it_records_the_attribution_correction(self) -> None:
+        teks = self.text()
+        assert "Haiku 5.5" in teks
+        assert "Opus 5" in teks
+        assert "b675851" in teks, "commit yang TIDAK disentuh harus ikut dicatat"
+
+    def test_the_changelog_records_the_red_test_in_m5_1(self) -> None:
+        teks = (ROOT / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
+        assert "test_only_example_env_files_are_tracked" in teks
+        assert ".env.test.example" in teks
+        assert "Tag `m5.1` tidak dipindahkan." in teks
+
+    def test_the_changelog_records_the_hash_mapping(self) -> None:
+        teks = (ROOT / "docs" / "CHANGELOG.md").read_text(encoding="utf-8")
+        for hash_ in ("6c8adf6", "2c72a1d", "b675851"):
+            assert hash_ in teks, hash_
+
+
+class TestTheNonceFormulaIsStatedOnce:
+    """Rumus nonce muncul di tiga dokumen, dan harus sama di ketiganya.
+
+    Operator mengunci satu versi rumus. Rumus yang sama ditulis ulang di tiga
+    tempat akan menyimpang pada perubahan berikutnya, dan dokumen yang saling
+    bertentangan lebih buruk daripada dokumen yang tidak lengkap — pembacanya
+    tidak punya cara tahu mana yang berlaku.
+    """
+
+    RUMUS = "next_nonce = max(pending_rpc, coalesce(max_db_nonce, -1) + 1)"
+
+    BERKAS = (
+        ("docs", "PRD_v2.1.md"),
+        ("docs", "Architecture_v1.1.md"),
+        ("docs", "runbook.md"),
+        ("docs", "decisions.md"),
+    )
+
+    @pytest.mark.parametrize(("folder", "name"), BERKAS)
+    def test_the_formula_appears_verbatim(self, folder: str, name: str) -> None:
+        teks = (ROOT / folder / name).read_text(encoding="utf-8")
+        assert self.RUMUS in teks, f"{name} tidak memuat rumus yang dikunci"
+
+    def test_the_code_states_the_same_formula(self) -> None:
+        teks = (ROOT / "src" / "payment_guard" / "executor.py").read_text(encoding="utf-8")
+        assert self.RUMUS in teks
+        assert "coalesce(max(nonce), -1)" in teks
+
+    #: Dokumen yang **menyatakan** apa yang berlaku.
+    #:
+    #: ``decisions.md`` sengaja tidak termasuk: di sanalah bentuk lama justru
+    #: harus dikutip, karena keputusannya tidak bisa dijelaskan tanpa
+    #: menunjukkan apa yang ditolak.
+    NORMATIF = (
+        ("docs", "PRD_v2.1.md"),
+        ("docs", "Architecture_v1.1.md"),
+        ("docs", "runbook.md"),
+    )
+
+    @pytest.mark.parametrize(("folder", "name"), NORMATIF)
+    def test_no_stale_variant_survives(self, folder: str, name: str) -> None:
+        """Bentuk lama tidak boleh tertinggal di dokumen yang menyatakan.
+
+        Bentuk lama memberi nonce 1 untuk wallet baru. Tertinggal di satu
+        dokumen saja sudah cukup untuk membuat orang berikutnya menulis ulang
+        kode sesuai dokumen itu.
+        """
+        teks = (ROOT / folder / name).read_text(encoding="utf-8")
+        assert "nonce tertinggi di DB + 1" not in teks
+        assert "nonce DB + 1" not in teks
+        assert "max(nonce)) + 1" not in teks
 
 
 class TestLockfileIsHashed:

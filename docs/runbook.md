@@ -148,10 +148,17 @@ menaruh kunci API di path atau query.
 
 ## 4. Nonce menurut kami dan menurut node berbeda
 
-Executor mengambil nonce dari yang lebih besar antara dua sumber:
-`eth_getTransactionCount(pending)` dan `max(nonce)` dari `executions` untuk
-alamat itu. Jadi node yang baru di-restart tidak bisa membuat nonce terpakai
-dua kali.
+Executor mengambil nonce di dalam lock `executor:<from_addr>`:
+
+```
+next_nonce = max(pending_rpc, coalesce(max_db_nonce, -1) + 1)
+```
+
+Dua sumber, jadi node yang baru di-restart tidak bisa membuat nonce terpakai
+dua kali. `+ 1` hanya melekat pada sisi database, karena `max(nonce)` adalah
+nonce terakhir yang **dipakai** sedangkan `pending_rpc` sudah nonce
+**berikutnya**. Wallet tanpa riwayat mulai di 0. Rumus lengkapnya beserta
+alasannya ada di [decisions.md](decisions.md).
 
 Yang **tidak** ditangani: transaksi dari wallet yang sama yang dikirim di luar
 Payment Guard dan belum terlihat node. Kalau Anda memakai wallet Executor untuk
@@ -191,3 +198,42 @@ docker compose exec postgres psql -U guard_admin -d payment_guard -c \
 Daftar kejadian beserta payload-nya ada di [events.md](events.md). `audit_log`
 append-only lewat trigger dan lewat hak akses; UPDATE dan DELETE ditolak untuk
 semua role, termasuk admin.
+
+---
+
+## 7. Rilis
+
+**Sebelum membuat tag, jalankan suite penuh pada checkout bersih.** Clone baru
+ke folder scratchpad di luar repo, atau `git stash -u` di repo asal.
+
+```bash
+# Pilihan A: clone bersih (disarankan)
+git clone --no-hardlinks . /path/ke/scratchpad/payment-guard-rilis
+cd /path/ke/scratchpad/payment-guard-rilis
+uv sync --locked --all-groups
+PAYMENT_GUARD_TEST_ADMIN_DB_URL=... uv run --no-sync pytest tests/ -q
+
+# Pilihan B: di repo asal
+git stash -u          # termasuk berkas untracked
+uv run --no-sync pytest tests/ -q
+git stash pop
+```
+
+**Jangan menilai suite di working tree yang punya berkas untracked.** Itu
+penyebab `test_only_example_env_files_are_tracked` lolos lokal tapi merah di
+commit: tes itu membaca indeks git, jadi berkas `.env*` yang belum ter-`add`
+tidak terlihat olehnya. Suite dijalankan, hijau, lalu `git add` memasukkan
+berkas itu dan tag yang dibuat sesudahnya memuat tes merah. Kejadiannya ada di
+[CHANGELOG.md](CHANGELOG.md) pada `m5.1`.
+
+Hal yang sama berlaku untuk berkas yang **dihapus** tapi belum di-stage, dan
+untuk `.venv` yang masih memuat paket dari percobaan sebelumnya. Clone bersih
+menyelesaikan ketiganya sekaligus; `git stash -u` hanya dua yang pertama.
+
+Urutan rilis:
+
+1. Suite penuh pada checkout bersih — hijau.
+2. `pre-commit run --all-files` — hijau.
+3. `git status --porcelain` — kosong.
+4. Commit, lalu tag.
+5. Catat di [CHANGELOG.md](CHANGELOG.md), termasuk yang diketahui masih salah.

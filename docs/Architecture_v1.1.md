@@ -322,7 +322,19 @@ sequenceDiagram
 Recovery tidak memverifikasi ulang envelope, mandate, atau `valid_until`. Execution yang sudah dikomit tetap diselesaikan.
 
 ### 8.3 Nonce
-Di bawah lock `executor:<from_addr>`: `max(nonce pending dari RPC, nonce tertinggi di DB + 1)`. `UNIQUE(from_addr, nonce)` sebagai jaring pengaman.
+Di bawah lock `executor:<from_addr>`:
+
+```
+next_nonce = max(pending_rpc, coalesce(max_db_nonce, -1) + 1)
+```
+
+- `pending_rpc` = `eth_getTransactionCount(from_addr, "pending")`.
+- `max_db_nonce` = `max(nonce)` di `executions` untuk `from_addr`, semua status.
+- `coalesce(..., -1)` wajib eksplisit. Tabel kosong menghasilkan **0**, bukan 1.
+
+Dua sumber karena masing-masing bisa tertinggal: node tidak melihat transaksi yang baru kami kirim, catatan kami tidak melihat transaksi yang dikirim di luar sistem ini. `+ 1` hanya melekat pada sisi database, karena `max(nonce)` adalah nonce terakhir yang **dipakai** sedangkan `pending_rpc` sudah nonce **berikutnya**.
+
+`UNIQUE(from_addr, nonce)` tetap jaring pengaman terakhir.
 
 ---
 
@@ -459,6 +471,6 @@ Aturan:
 3. Session lock per agent di Guard, per chain di Watcher, di koneksi dedikasi.
 4. Tidak ada idempotency key di `check_payment` (v1).
 5. Mandate tidak di-reload panas.
-6. Nonce: `max(nonce pending RPC, nonce DB + 1)` di bawah lock Executor.
+6. Nonce: rumus di bagian 8.3, di bawah lock Executor. Rumusnya ditulis satu kali di sana dan tidak diulang di sini.
 7. Serialisasi 4b dan pergantian mandate lewat advisory lock `mandate:<agent_id>`, bukan `FOR SHARE`.
 8. Matriks hak minimum, dengan role per proses dan role grup NOLOGIN.

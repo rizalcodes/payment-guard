@@ -256,6 +256,17 @@ Tidak ada tes otomatis yang menyiarkan transaksi — pembayaran sungguhan
 dikerjakan operator secara manual lewat
 [scripts/demo_execute.md](scripts/demo_execute.md).
 
+### Sebelum membuat tag
+
+**Jalankan suite penuh pada checkout bersih:** clone baru ke folder scratchpad
+di luar repo, atau `git stash -u` di repo asal.
+
+**Jangan menilai suite di working tree yang punya berkas untracked.** Itu
+penyebab `test_only_example_env_files_are_tracked` lolos lokal tapi merah di
+commit — tes itu membaca indeks git, jadi berkas `.env*` yang belum ter-`add`
+tidak terlihat olehnya. Prosedur lengkap dan urutan rilisnya ada di
+[docs/runbook.md](docs/runbook.md) bagian 7.
+
 ## Pre-commit
 
 ```bash

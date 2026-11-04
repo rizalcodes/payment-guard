@@ -143,6 +143,18 @@ Payload menambahkan `mandate_hash` (64 hex lowercase). Aturan kanonik dan awalan
 
 Cek 4b dan write-ahead berada dalam satu transaksi, dengan `pg_advisory_xact_lock_shared(mandate:<agent_id>)` diambil sebelum membaca `active_mandates`. Urutan lock dalam transaksi Executor: `mandate:` dulu, lalu INSERT `executions`.
 
+**Nonce.** Diambil di dalam lock `executor:<from_addr>`, dari dua sumber:
+
+```
+next_nonce = max(pending_rpc, coalesce(max_db_nonce, -1) + 1)
+```
+
+- `pending_rpc` = `eth_getTransactionCount(from_addr, "pending")`.
+- `max_db_nonce` = `max(nonce)` di `executions` untuk `from_addr`, semua status.
+- `coalesce(..., -1)` wajib eksplisit. Tabel kosong menghasilkan **0**, bukan 1.
+
+`+ 1` hanya melekat pada sisi database, karena `max(nonce)` adalah nonce terakhir yang **dipakai** sedangkan `pending_rpc` sudah nonce **berikutnya**. `UNIQUE(from_addr, nonce)` tetap jaring pengaman terakhir. Rumus ini sama persis dengan Arsitektur v1.1 bagian 8.3, dan satu tes menjaga keduanya tidak menyimpang.
+
 **Recovery** (`guard executor recover` dan awal setiap `guard execute`): bekerja pada baris `executions` yang sudah ada. Tidak memverifikasi ulang envelope, mandate, atau `valid_until`. Execution yang sudah `signed`/`broadcast` sudah dikomit: rebroadcast `raw_tx` yang sama, atau cek receipt. `failed` hanya bila nonce dipakai transaksi lain atau receipt revert.
 
 ---

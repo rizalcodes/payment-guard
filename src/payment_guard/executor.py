@@ -201,9 +201,21 @@ ORDER BY id
 #: Semua status ikut dihitung, termasuk ``failed``: nonce yang sudah dipakai
 #: transaksi yang gagal tetap tidak boleh dipakai lagi oleh kami, karena
 #: transaksi lama bisa saja masih beredar di mempool.
+#:
+#: ``coalesce(..., -1)`` ditulis eksplisit, dan itu bukan kosmetik. Nonce
+#: pertama yang sah adalah **0**, jadi "belum ada nonce terpakai" tidak bisa
+#: diwakili oleh 0 — ia harus diwakili oleh -1, supaya ``+ 1`` di
+#: :func:`next_nonce` berlaku seragam untuk tabel kosong maupun tidak. Tanpa
+#: ini, cabang tabel-kosong perlu aritmetikanya sendiri, dan cabang itulah yang
+#: paling jarang dilewati sehingga paling mudah salah.
 SELECT_MAX_NONCE: Final = """
-SELECT max(nonce) FROM executions WHERE from_addr = %s
+SELECT coalesce(max(nonce), -1) FROM executions WHERE from_addr = %s
 """
+
+#: Nilai yang mewakili "wallet ini belum pernah memakai nonce apa pun".
+#:
+#: Bukan 0, karena 0 adalah nonce yang sah dan terpakai.
+NO_NONCE_USED: Final = -1
 
 #: ``created_at`` dan ``updated_at`` memakai DEFAULT ``now()``: tidak ada CHECK
 #: di ``executions`` yang membandingkannya dengan nilai turunan epoch, jadi
@@ -631,23 +643,39 @@ def next_nonce(cur: psycopg.Cursor, client: ChainClient, from_addr: str) -> int:
     Yang lebih besar menang, jadi tidak ada satu pun sumber yang bisa membuat
     nonce terpakai dua kali.
 
-    **Catatan penyimpangan.** Brief M6.0 menuliskan rumusnya sebagai
-    ``max(pending_rpc, max(nonce)) + 1``. Ditulis begitu, wallet baru tanpa
-    riwayat akan mendapat nonce 1 pada transaksi pertamanya — karena ``pending``
-    sudah 0 untuk wallet kosong — sehingga nonce 0 tidak pernah dipakai dan
-    setiap transaksi sesudahnya macet di belakang celah yang tidak akan pernah
-    terisi. ``+ 1`` yang dimaksud melekat pada sisi database saja, karena
-    ``max(nonce)`` adalah nonce **terakhir yang dipakai** sedangkan ``pending``
-    sudah berupa nonce **berikutnya**. Rumus di bawah menyamakan satuannya
-    dulu, lalu mengambil yang terbesar.
+    **Rumus yang dikunci operator** (M6.0.1)::
+
+        next_nonce = max(pending_rpc, coalesce(max_db_nonce, -1) + 1)
+
+    Dua satuan yang berbeda disamakan dulu, dan di situlah seluruh isi rumus
+    ini: ``max(nonce)`` adalah nonce **terakhir yang dipakai**, sedangkan
+    ``pending`` sudah berupa nonce **berikutnya**. ``+ 1`` karena itu melekat
+    pada sisi database saja, dan ``coalesce(..., -1)`` membuat tabel kosong
+    menghasilkan 0 — bukan 1.
+
+    Perbedaannya bukan selisih satu angka yang bisa diabaikan. Brief M6.0
+    menuliskan rumusnya sebagai ``max(pending_rpc, max(nonce)) + 1``. Ditulis
+    begitu, wallet baru tanpa riwayat mendapat nonce 1 pada transaksi
+    pertamanya — karena ``pending`` sudah 0 untuk wallet kosong — sehingga
+    nonce 0 tidak pernah dipakai dan **setiap** transaksi sesudahnya macet di
+    belakang celah yang tidak akan pernah terisi. Wallet itu berhenti bisa
+    membayar, dan tidak ada yang gagal sampai transaksi pertama tidak pernah
+    ter-mine. Lihat ``docs/decisions.md``.
+
+    ``UNIQUE(from_addr, nonce)`` tetap jaring pengaman terakhir: rumus ini
+    mengurangi kesempatan tabrakan, tapi yang menolak tabrakan adalah database.
 
     Harus dipanggil di dalam lock ``executor:<from_addr>``: tanpa itu dua
     eksekusi paralel membaca nilai yang sama dan rumus apa pun tidak menolong.
     """
     cur.execute(SELECT_MAX_NONCE, (from_addr,))
     row = cur.fetchone()
-    # Tidak ada baris berarti belum ada nonce terpakai, jadi berikutnya 0.
-    from_executions = 0 if row is None or row[0] is None else to_int(row[0]) + 1
+    # Agregat selalu mengembalikan satu baris, dan `coalesce` di SQL sudah
+    # mengubah tabel kosong menjadi -1. Keduanya tetap dijaga di sini karena
+    # keliru di jalur ini menghasilkan nonce yang salah secara diam-diam, bukan
+    # pengecualian.
+    max_used = NO_NONCE_USED if row is None or row[0] is None else to_int(row[0])
+    from_executions = max_used + 1
     from_rpc = client.pending_nonce(from_addr)
     return max(from_rpc, from_executions)
 
