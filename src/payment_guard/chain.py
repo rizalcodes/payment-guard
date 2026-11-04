@@ -36,19 +36,23 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Any, Final, Protocol, TypeVar, cast
 
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
+from eth_typing import ChecksumAddress
 from web3 import Web3
 from web3.exceptions import TransactionNotFound, Web3Exception
+from web3.types import TxParams
 
 from payment_guard.addresses import AddressError, normalize_address, to_checksum_address
 from payment_guard.db import endpoint_host
 from payment_guard.hashing import keccak256
+from payment_guard.money import BaseUnits
 
 # --------------------------------------------------------------------------- #
 # Konstanta ABI
@@ -96,11 +100,29 @@ GAS_LIMIT_DENOMINATOR: Final = 10
 #: blok tanpa menaikkan ongkos yang benar-benar dibayar.
 BASE_FEE_MULTIPLIER: Final = 2
 
-#: Batas waktu satu panggilan HTTP RPC, dalam detik.
-DEFAULT_RPC_TIMEOUT_SECONDS: Final = 20
+#: Batas waktu **menyambung**, dalam detik. Pendek dengan sengaja: port yang
+#: tertutup atau host yang salah tidak perlu ditunggu selama batas baca.
+DEFAULT_RPC_CONNECT_TIMEOUT_SECONDS: Final = 5
+
+#: Batas waktu **membaca** jawaban, dalam detik.
+DEFAULT_RPC_READ_TIMEOUT_SECONDS: Final = 20
+
+#: Jumlah percobaan per panggilan RPC, termasuk percobaan pertama.
+RPC_MAX_ATTEMPTS: Final = 3
+
+#: Jeda sebelum percobaan ke-2 dan ke-3, dalam detik.
+#:
+#: Bilangan bulat dengan sengaja: tidak ada ``float`` di ``src/`` mana pun, dan
+#: ada tes higiene yang menegakkannya. Jeda sub-detik tidak akan menolong
+#: menghadapi node yang sedang tidak sehat.
+RPC_BACKOFF_SECONDS: Final[tuple[int, ...]] = (1, 2)
 
 #: Status receipt yang berarti transaksi berhasil.
 RECEIPT_SUCCESS: Final = 1
+
+
+#: Tipe hasil satu panggilan RPC. Dipakai :meth:`Web3Client._call`.
+T = TypeVar("T")
 
 
 class ChainError(RuntimeError):
@@ -128,7 +150,7 @@ TRANSFER_SELECTOR: Final = selector_of(TRANSFER_SIGNATURE)
 DECIMALS_SELECTOR: Final = selector_of(DECIMALS_SIGNATURE)
 
 
-def encode_transfer(recipient: str, amount_base: int) -> bytes:
+def encode_transfer(recipient: str, amount_base: BaseUnits) -> bytes:
     """Calldata untuk ``transfer(recipient, amount_base)``.
 
     Dua argumen, dan tidak ada argumen ketiga yang bisa disisipkan: itulah
@@ -203,8 +225,17 @@ class WalletIdentity:
         Raises:
             ChainError: bila eth-account menolak bentuk transaksinya.
         """
+        # Disalin ke dict biasa dulu, lalu di-cast. eth-account dan web3
+        # menuntut dua bentuk dict yang berbeda untuk transaksi yang sama, dan
+        # keduanya memakai alias tipe internalnya sendiri. Nilai di dalam
+        # ``payload`` sudah dibentuk :meth:`TransactionPlan.as_transaction`,
+        # jadi ``cast`` di sini melintasi batas pustaka — ia tidak melewati
+        # pemeriksaan milik kita. Bentuknya tetap dijaga di sisi kita: ``nonce``
+        # diperiksa di bawah, dan ``to``, ``data``, serta ``value`` dibangun
+        # dari :class:`TransactionPlan`, bukan dari masukan bebas.
+        payload: dict[str, object] = dict(transaction)
         try:
-            signed = self.signer.sign_transaction(dict(transaction))
+            signed = self.signer.sign_transaction(cast("dict[str, Any]", payload))
         except (ValueError, TypeError) as exc:
             # Pesan eth-account bisa memuat isi transaksi, tapi tidak pernah
             # memuat kunci. Baris pertamanya cukup dan paling mudah dibaca.
@@ -399,9 +430,27 @@ class Web3Client:
     path atau query, jadi pesan error hanya menyebut skema dan host.
     """
 
-    def __init__(self, rpc_url: str, *, timeout_seconds: int = DEFAULT_RPC_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self,
+        rpc_url: str,
+        *,
+        connect_timeout_seconds: int = DEFAULT_RPC_CONNECT_TIMEOUT_SECONDS,
+        read_timeout_seconds: int = DEFAULT_RPC_READ_TIMEOUT_SECONDS,
+        max_attempts: int = RPC_MAX_ATTEMPTS,
+        sleep: Callable[[int], object] = time.sleep,
+    ) -> None:
         self._host = endpoint_host(rpc_url)
-        self._web3 = Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": timeout_seconds}))
+        self._max_attempts = max(1, max_attempts)
+        self._sleep = sleep
+        self._web3 = Web3(
+            Web3.HTTPProvider(
+                rpc_url,
+                # Pasangan (connect, read). requests menerima keduanya terpisah,
+                # dan memberinya satu angka berarti menunggu selama batas baca
+                # hanya untuk tahu bahwa portnya tertutup.
+                request_kwargs={"timeout": (connect_timeout_seconds, read_timeout_seconds)},
+            )
+        )
 
     @property
     def host(self) -> str:
@@ -409,33 +458,41 @@ class Web3Client:
         return self._host
 
     def chain_id(self) -> int:
-        with self._wrapped("eth_chainId"):
-            return int(self._web3.eth.chain_id)
+        return int(self._call("eth_chainId", lambda: self._web3.eth.chain_id))
 
     def token_decimals(self, token: str) -> int:
-        call = {"to": to_checksum_address(token), "data": "0x" + DECIMALS_SELECTOR.hex()}
-        with self._wrapped("decimals()"):
-            result = self._web3.eth.call(call)  # type: ignore[arg-type]
+        call = cast(
+            TxParams,
+            {"to": _checksummed(token), "data": "0x" + DECIMALS_SELECTOR.hex()},
+        )
+        result = self._call("decimals()", lambda: self._web3.eth.call(call))
         return decode_uint256(bytes(result))
 
     def eth_balance(self, address: str) -> int:
-        with self._wrapped("eth_getBalance"):
-            return int(self._web3.eth.get_balance(to_checksum_address(address)))
+        checksummed = _checksummed(address)
+        return int(self._call("eth_getBalance", lambda: self._web3.eth.get_balance(checksummed)))
 
     def pending_nonce(self, address: str) -> int:
-        with self._wrapped("eth_getTransactionCount(pending)"):
-            return int(
-                self._web3.eth.get_transaction_count(to_checksum_address(address), "pending")
+        checksummed = _checksummed(address)
+        return int(
+            self._call(
+                "eth_getTransactionCount(pending)",
+                lambda: self._web3.eth.get_transaction_count(checksummed, "pending"),
             )
+        )
 
     def confirmed_nonce(self, address: str) -> int:
-        with self._wrapped("eth_getTransactionCount(latest)"):
-            return int(self._web3.eth.get_transaction_count(to_checksum_address(address), "latest"))
+        checksummed = _checksummed(address)
+        return int(
+            self._call(
+                "eth_getTransactionCount(latest)",
+                lambda: self._web3.eth.get_transaction_count(checksummed, "latest"),
+            )
+        )
 
     def fees(self) -> Fees:
-        with self._wrapped("eth_feeHistory"):
-            tip = int(self._web3.eth.max_priority_fee)
-            block = self._web3.eth.get_block("latest")
+        tip = int(self._call("eth_maxPriorityFeePerGas", lambda: self._web3.eth.max_priority_fee))
+        block = self._call("eth_getBlockByNumber", lambda: self._web3.eth.get_block("latest"))
         base = block.get("baseFeePerGas")
         if base is None:
             raise ChainError(
@@ -447,50 +504,95 @@ class Web3Client:
         )
 
     def estimate_gas(self, transaction: Mapping[str, object]) -> int:
-        with self._wrapped("eth_estimateGas"):
-            estimate = int(self._web3.eth.estimate_gas(dict(transaction)))  # type: ignore[arg-type]
+        payload = cast(TxParams, dict(transaction))
+        estimate = int(self._call("eth_estimateGas", lambda: self._web3.eth.estimate_gas(payload)))
         return estimate * GAS_LIMIT_NUMERATOR // GAS_LIMIT_DENOMINATOR
 
     def send_raw_transaction(self, raw_tx: bytes) -> str:
-        with self._wrapped("eth_sendRawTransaction"):
-            sent = self._web3.eth.send_raw_transaction(raw_tx)
+        sent = self._call(
+            "eth_sendRawTransaction", lambda: self._web3.eth.send_raw_transaction(raw_tx)
+        )
         return _normalize_tx_hash(sent)
 
     def receipt(self, tx_hash: str) -> Receipt | None:
-        try:
-            found = self._web3.eth.get_transaction_receipt(tx_hash)  # type: ignore[arg-type]
-        except TransactionNotFound:
+        def ask() -> object | None:
+            try:
+                return self._web3.eth.get_transaction_receipt(tx_hash)  # type: ignore[arg-type]
+            except TransactionNotFound:
+                # Bukan kegagalan: transaksinya memang belum masuk blok.
+                # Ditangani di dalam aksi supaya ia tidak ikut di-retry.
+                return None
+
+        found = self._call("eth_getTransactionReceipt", ask)
+        if found is None:
             return None
-        except Web3Exception as exc:
-            raise ChainError(f"eth_getTransactionReceipt gagal di {self._host}: {exc}") from None
+        receipt = cast(Mapping[str, object], found)
         return Receipt(
-            tx_hash=_normalize_tx_hash(found["transactionHash"]),
-            status=int(found["status"]),
-            block_number=int(found["blockNumber"]),
+            tx_hash=_normalize_tx_hash(receipt["transactionHash"]),
+            status=int(cast(int, receipt["status"])),
+            block_number=int(cast(int, receipt["blockNumber"])),
         )
 
-    def _wrapped(self, what: str) -> _RpcFailure:
-        return _RpcFailure(what, self._host)
+    def _call(self, what: str, action: Callable[[], T]) -> T:
+        """Jalankan satu panggilan RPC dengan batas percobaan dan jeda.
+
+        Yang diulang hanya **kegagalan transport**: timeout, koneksi tertutup,
+        DNS gagal. ``requests`` melemparkannya sebagai turunan ``OSError``, dan
+        artinya kita tidak tahu apakah permintaannya sampai. Mengulang aman di
+        kedua arah — pembacaan tidak punya efek samping, dan
+        ``eth_sendRawTransaction`` dengan byte yang **sama** memberi ``tx_hash``
+        yang sama, jadi ia tidak bisa menjadi dua pembayaran.
+
+        Yang **tidak** diulang adalah jawaban protokol (``Web3Exception``):
+        node sudah menjawab dan menolak, jadi percobaan berikutnya hanya akan
+        mendapat penolakan yang sama. Mengulanginya cuma memperlambat kegagalan.
+
+        Tidak ada jalur menunggu tanpa batas: paling banyak
+        :data:`RPC_MAX_ATTEMPTS` percobaan, masing-masing dibatasi timeout
+        connect dan read, dengan jeda dari :data:`RPC_BACKOFF_SECONDS`.
+
+        Raises:
+            ChainError: selalu, bila seluruh percobaan gagal — pesannya tidak
+                pernah memuat URL RPC utuh.
+        """
+        terakhir = ""
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                return action()
+            except ChainError:
+                raise
+            except OSError as exc:
+                terakhir = _first_line(exc)
+                if attempt < self._max_attempts:
+                    self._sleep(_backoff_for(attempt))
+            except Web3Exception as exc:
+                raise ChainError(f"{what} ditolak {self._host}: {_first_line(exc)}") from None
+            except (ValueError, KeyError) as exc:
+                raise ChainError(f"{what} gagal di {self._host}: {_first_line(exc)}") from None
+        raise ChainError(
+            f"{what} gagal di {self._host} setelah {self._max_attempts} percobaan: {terakhir}"
+        )
 
 
-class _RpcFailure:
-    """Ubah kegagalan web3 menjadi :class:`ChainError` tanpa membocorkan URL."""
+def _checksummed(address: str) -> ChecksumAddress:
+    """Alamat ber-checksum EIP-55 dalam tipe yang diminta web3.
 
-    def __init__(self, what: str, host: str) -> None:
-        self._what = what
-        self._host = host
+    Checksum dihitung di :mod:`payment_guard.addresses` dengan Keccak-256 kami
+    sendiri, bukan oleh web3. ``cast`` di sini hanya menyatakan ulang jaminan
+    yang sudah diberikan fungsi itu; ia tidak melonggarkan pemeriksaan apa pun
+    yang nyata.
+    """
+    return cast(ChecksumAddress, to_checksum_address(address))
 
-    def __enter__(self) -> None:
-        return None
 
-    def __exit__(self, exc_type: object, exc: BaseException | None, tb: object) -> bool:
-        if exc is None:
-            return False
-        if isinstance(exc, ChainError):
-            return False
-        if isinstance(exc, Web3Exception | OSError | ValueError | KeyError):
-            raise ChainError(f"{self._what} gagal di {self._host}: {_first_line(exc)}") from None
-        return False
+def _backoff_for(attempt: int) -> int:
+    """Jeda sebelum percobaan berikutnya, dalam detik.
+
+    Percobaan di luar panjang :data:`RPC_BACKOFF_SECONDS` memakai jeda
+    terakhirnya, jadi ``max_attempts`` yang besar tidak menyebabkan IndexError.
+    """
+    index = min(attempt - 1, len(RPC_BACKOFF_SECONDS) - 1)
+    return RPC_BACKOFF_SECONDS[index]
 
 
 # --------------------------------------------------------------------------- #

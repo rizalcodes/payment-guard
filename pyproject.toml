@@ -7,7 +7,7 @@ requires-python = "==3.12.*"
 dependencies = [
     "psycopg[binary]>=3.2,<4",
     # Dipakai mulai M2 (signing Ed25519). Dipin sekarang supaya lockfile stabil.
-    "cryptography>=43,<47",
+    "cryptography>=50,<51",
     # Keccak-256 untuk Ethereum (M1, M5). hashlib hanya punya SHA3-256 yang
     # distandarkan NIST, yang padding-nya berbeda. Lihat payment_guard.hashing.
     "pycryptodome>=3.21,<4",
@@ -21,8 +21,11 @@ guard = "payment_guard.cli:main"
 
 [dependency-groups]
 dev = [
+    "mypy>=1.13,<2",
+    "pip-audit>=2.7,<3",
     "pre-commit>=4.7.0",
     "pytest>=8.3,<9",
+    "pyyaml>=6,<7",
     "ruff>=0.8,<1",
 ]
 
@@ -36,8 +39,13 @@ module-root = "src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Tes `live` menyentuh chain sungguhan dan membelanjakan gas. Dilewati secara
+# bawaan, dan membukanya butuh dua hal sekaligus: `-m live` di baris perintah
+# DAN PAYMENT_GUARD_LIVE=1 di environment. Lihat tests/integration/test_live.py.
+addopts = ["-m", "not live"]
 markers = [
-    "integration: butuh Postgres dari docker compose project payment-guard (port 5434)",
+    "integration: butuh Postgres dari compose profile `test` (port 5435, database *_test)",
+    "live: menyentuh Base Sepolia sungguhan dan membelanjakan gas; dilewati secara bawaan",
 ]
 filterwarnings = [
     "error",
@@ -46,11 +54,38 @@ filterwarnings = [
     # yang memanggilnya: Executor memakai HTTPProvider (lihat RPC_URL_SCHEMES
     # di config.py), dan peringatannya muncul hanya karena rantai impor web3.
     #
-    # Filter ini SENGAJA cocok dengan satu pesan saja, bukan dengan
-    # DeprecationWarning secara umum: deprecation lain, milik kita maupun milik
-    # pustaka lain, harus tetap menggagalkan tes.
-    "ignore:websockets.legacy is deprecated:DeprecationWarning",
+    # Empat bagian, dan keempatnya menyempit: aksi, pesan, kategori, dan
+    # **modul asal**. Tanpa bagian keempat, deprecation mana pun yang kebetulan
+    # berbunyi sama akan ikut dibisukan. Deprecation lain — milik kita maupun
+    # milik pustaka lain — tetap menggagalkan tes.
+    'ignore:websockets\.legacy is deprecated:DeprecationWarning:websockets\.legacy',
 ]
+
+[tool.mypy]
+python_version = "3.12"
+# `--strict` disetel di baris perintah dan di pre-commit untuk daftar modul yang
+# memang sudah bersih (lihat .pre-commit-config.yaml). Ia sudah mencakup
+# warn_unused_ignores, warn_redundant_casts, dan no_implicit_reexport, jadi
+# tidak diulang di sini.
+#
+# `warn_unreachable` SENGAJA TIDAK dipakai, dan ini bukan kelalaian.
+#
+# Kode ini memeriksa tipe saat **runtime** di setiap batas sistem: baris
+# database, payload JSON, dan argumen tool datang tanpa tipe, dan anotasi
+# Python terhapus saat program berjalan. Penjaga seperti
+# `isinstance(value, bool)` pada parameter yang dianotasi `str` atau
+# `BaseUnits` secara statik memang tidak terjangkau — tapi justru itu yang
+# menangkap `True` yang datang dari JSON, dan ada tes yang menuntutnya tetap
+# menangkapnya. Menyalakan warn_unreachable berarti memilih antara membuang
+# penjaga yang bekerja atau menaburkan `type: ignore`; keduanya lebih buruk
+# daripada tidak menyalakannya.
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+# Paket ini tidak mengirim anotasi yang lengkap. Kami tidak memeriksa isinya;
+# yang diperiksa adalah kode kami yang memanggilnya.
+module = ["eth_account.*", "Crypto.*", "mcp.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 100

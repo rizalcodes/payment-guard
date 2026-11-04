@@ -58,7 +58,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from payment_guard.canonical import CanonicalError, canonical_bytes
 from payment_guard.chains import BASE_SEPOLIA, chain_id_for
-from payment_guard.money import format_base_units
+from payment_guard.money import BaseUnits, format_base_units
 
 #: Awalan domain untuk tanda tangan envelope (PRD v2 bagian 7).
 #:
@@ -205,7 +205,7 @@ def build_payload(
     mandate_id: str,
     agent_id: str,
     recipient: str,
-    amount_base: int,
+    amount_base: BaseUnits,
     issued_at: int,
     valid_until: int,
     mandate_hash: str,

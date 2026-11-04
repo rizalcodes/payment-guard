@@ -21,10 +21,21 @@ pytestmark = pytest.mark.integration
 ROOT = Path(__file__).resolve().parents[2]
 
 #: File rahasia yang WAJIB diabaikan git.
-MUST_BE_IGNORED = (".env", ".env.migrator")
+#:
+#: ``.env.test`` ikut di sini sejak M5.1: ia memuat URL admin cluster tes, yang
+#: memegang CREATEROLE di cluster itu.
+MUST_BE_IGNORED = (".env", ".env.migrator", ".env.test")
 
 #: File contoh yang WAJIB bisa di-commit.
-MUST_BE_TRACKABLE = (".env.example", ".env.migrator.example")
+#:
+#: Daftar ini tertutup, dan ``test_only_example_env_files_are_tracked`` membaca
+#: **indeks git** untuk membandingkannya. Itu berarti berkas ``.env*`` baru
+#: lolos selama ia masih untracked dan baru gagal setelah di-commit — yang
+#: persis terjadi pada ``.env.test.example`` di M5.1: suite dijalankan sebelum
+#: commit, lalu berkasnya masuk indeks dan tes ini mulai gagal di master.
+#: Menambahkan berkas ``.env*`` berarti menambahkannya ke salah satu daftar di
+#: sini, pada commit yang sama.
+MUST_BE_TRACKABLE = (".env.example", ".env.migrator.example", ".env.test.example")
 
 
 @pytest.fixture(scope="module", autouse=True)

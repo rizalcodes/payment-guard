@@ -14,6 +14,34 @@ repos:
         args: [--fix]
       - id: ruff-format
 
+  # mypy dijalankan dari venv proyek, bukan dari repo mirror.
+  #
+  # Hook mirror memasang environment sendiri, jadi ia butuh web3, psycopg, dan
+  # mcp disebut ulang di `additional_dependencies` — daftar kedua yang akan
+  # menyimpang dari uv.lock tanpa ada yang menyadarinya. Memakai venv proyek
+  # menjaga satu sumber kebenaran. `--no-sync` dipakai supaya hook tidak pernah
+  # memasang ulang .venv di tengah sesi.
+  #
+  # Daftar modulnya eksplisit: hanya berkas yang memang sudah bersih di bawah
+  # --strict yang dijaga, supaya hook ini menolak regresi alih-alih mengeluh
+  # tentang hal yang belum pernah rapi.
+  - repo: local
+    hooks:
+      - id: mypy-strict
+        name: mypy --strict (uang, aturan, dan jalur eksekusi)
+        entry: uv run --no-sync mypy --strict
+        language: system
+        pass_filenames: false
+        files: ^src/payment_guard/.*\.py$
+        args:
+          - src/payment_guard/money.py
+          - src/payment_guard/addresses.py
+          - src/payment_guard/rules.py
+          - src/payment_guard/chain.py
+          - src/payment_guard/decision_service.py
+          - src/payment_guard/executor.py
+          - src/payment_guard/approvals_cli.py
+
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:

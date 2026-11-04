@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import io
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -874,11 +875,7 @@ class TestRunExecute:
         chain: FakeChain,
         seeded: dict,
     ) -> None:
-        """``UNIQUE(from_addr, nonce)`` di ``0001_init.sql``.
-
-        Nonce datang dari RPC, jadi dua eksekusi dengan nonce yang sama akan
-        ditolak database. Itu lapis terakhir di bawah lock ``executor:``.
-        """
+        """Jalur biasa: node mengikuti, dan kedua sumber nonce sepakat."""
         lain = seed_approved_decision(
             executor_db,
             agent_id=AGENT_ID,
@@ -898,7 +895,7 @@ class TestRunExecute:
         )
         assert nonces == [0, 1]
 
-    def test_a_repeated_nonce_is_refused_by_the_database(
+    def test_a_lagging_rpc_cannot_cause_a_repeated_nonce(
         self,
         executor_config: ExecutorConfig,
         executor_db: str,
@@ -906,6 +903,19 @@ class TestRunExecute:
         chain: FakeChain,
         seeded: dict,
     ) -> None:
+        """Keputusan operator M6.0: nonce tidak boleh hanya dari RPC.
+
+        Node di tes ini **tidak pernah** melihat transaksi pertama:
+        ``pending_nonce`` tetap 0 sepanjang tes. Node yang baru di-restart, atau
+        node di belakang penyeimbang beban, berperilaku begini.
+
+        Sampai M5 keadaan ini menghasilkan dua transaksi dengan nonce 0, dan
+        yang menangkapnya hanyalah ``UNIQUE(from_addr, nonce)`` — setelah
+        transaksi kedua sudah ditandatangani, dengan pengecualian database yang
+        sampai ke operator. Sekarang lantai nonce juga dibaca dari
+        ``executions``, yang di-commit sebelum broadcast, jadi eksekusi kedua
+        memilih nonce 1 tanpa pernah bertabrakan.
+        """
         lain = seed_approved_decision(
             executor_db,
             agent_id=AGENT_ID,
@@ -915,10 +925,50 @@ class TestRunExecute:
             signing_key_path=guard_keys["signing"],
         )
         run(executor_config, chain, seeded["decision_id"])
-        # RPC "lupa" menaikkan nonce. Database yang menangkapnya.
-        with pytest.raises(psycopg.errors.UniqueViolation):
-            run(executor_config, chain, lain)
-        assert count_executions(executor_db) == 1
+        assert chain.pending_nonce_value == 0, "node sengaja dibiarkan tertinggal"
+
+        run(executor_config, chain, lain)
+
+        assert count_executions(executor_db) == 2
+        nonces = sorted(
+            fetch_execution(executor_db, d)["nonce"]  # type: ignore[index]
+            for d in (seeded["decision_id"], lain)
+        )
+        assert nonces == [0, 1]
+        assert chain.distinct_broadcasts() == 2
+
+    def test_the_unique_constraint_is_still_the_last_layer(
+        self, executor_config: ExecutorConfig, executor_db: str, chain: FakeChain, seeded: dict
+    ) -> None:
+        """``UNIQUE(from_addr, nonce)`` tetap ada, dan tetap menolak.
+
+        Lantai nonce di aplikasi mencegah tabrakan yang **kami** sebabkan.
+        Constraint ini mencegah sisanya, dan ia tidak boleh hilang hanya karena
+        lapis di atasnya jadi lebih baik.
+        """
+        run(executor_config, chain, seeded["decision_id"])
+        row = fetch_execution(executor_db, seeded["decision_id"])
+        assert row is not None
+
+        with psycopg.connect(executor_db) as conn, conn.cursor() as cur:
+            with pytest.raises(psycopg.errors.UniqueViolation):
+                cur.execute(
+                    """
+                    INSERT INTO executions (
+                      decision_id, tx_hash, from_addr, to_addr, amount_base,
+                      nonce, raw_tx, status
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, 'signed')
+                    """,
+                    (
+                        str(uuid.uuid4()),
+                        "0x" + "ab" * 32,
+                        row["from_addr"],
+                        row["to_addr"],
+                        1,
+                        row["nonce"],
+                        b"\x02palsu",
+                    ),
+                )
 
 
 # --------------------------------------------------------------------------- #

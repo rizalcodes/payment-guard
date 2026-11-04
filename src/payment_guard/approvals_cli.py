@@ -64,7 +64,7 @@ from payment_guard.decision_service import ValidatedRequest, build_snapshot
 from payment_guard.events import Actor, Event, audit
 from payment_guard.guard_service import load_signing_identity
 from payment_guard.mandate import Mandate, load_normalized
-from payment_guard.money import format_amount
+from payment_guard.money import BaseUnits, base_units, format_amount
 from payment_guard.reasons import ReasonCode, Status
 from payment_guard.rules import Request, Snapshot, evaluate
 from payment_guard.signing import build_payload, sign
@@ -180,7 +180,7 @@ class PendingDecision:
     decision_id: str
     agent_id: str
     recipient: str
-    amount_base: int
+    amount_base: BaseUnits
     reason_text: str
     expires_at: int
 
@@ -191,7 +191,7 @@ class DecisionRow:
 
     agent_id: str
     recipient: str
-    amount_base: int
+    amount_base: BaseUnits
     reason_text: str
     status: str
     mandate_hash: str
@@ -316,7 +316,7 @@ def fetch_pending(config: ApprovalsConfig) -> list[PendingDecision]:
             decision_id=row[0],
             agent_id=row[1],
             recipient=row[2],
-            amount_base=to_int(row[3]),
+            amount_base=base_units(to_int(row[3])),
             reason_text=row[4] or "",
             expires_at=int(row[5]),
         )
@@ -759,7 +759,7 @@ def _fetch_decision_row(cur: psycopg.Cursor, decision_id: str) -> DecisionRow:
     return DecisionRow(
         agent_id=row[0],
         recipient=row[1],
-        amount_base=to_int(row[2]),
+        amount_base=base_units(to_int(row[2])),
         reason_text=row[3] or "",
         status=row[4],
         mandate_hash=row[5],

@@ -49,7 +49,13 @@ from typing import Final
 from payment_guard.addresses import AddressError, normalize_allowlist
 from payment_guard.canonical import canonical_bytes
 from payment_guard.chains import is_supported_chain, supported_chains
-from payment_guard.money import MoneyError, format_amount, format_base_units, parse_amount
+from payment_guard.money import (
+    BaseUnits,
+    MoneyError,
+    format_amount,
+    format_base_units,
+    parse_amount,
+)
 
 #: ``agent_id`` yang sah (PRD 6.1, ST-32).
 #:
@@ -118,9 +124,9 @@ class Mandate:
     agent_id: str
     chain: str
     allowed_recipients: tuple[str, ...]
-    max_per_tx: int
-    max_per_day: int
-    human_approval_above: int
+    max_per_tx: BaseUnits
+    max_per_day: BaseUnits
+    human_approval_above: BaseUnits
     retry_cooldown_seconds: int
     aggregation_window_seconds: int
     decision_ttl_seconds: int
@@ -331,7 +337,7 @@ def _require_allowed_recipients(value: object) -> tuple[str, ...]:
         raise MandateError(f"allowed_recipients: {exc}") from None
 
 
-def _require_money(field: str, value: object) -> int:
+def _require_money(field: str, value: object) -> BaseUnits:
     try:
         return parse_amount(value)  # type: ignore[arg-type]
     except MoneyError as exc:
@@ -346,7 +352,7 @@ def _require_seconds(field: str, value: object) -> int:
     return value
 
 
-def _require_limit_ordering(amounts: Mapping[str, int]) -> None:
+def _require_limit_ordering(amounts: Mapping[str, BaseUnits]) -> None:
     """Tegakkan ``0 < human_approval_above <= max_per_tx <= max_per_day``.
 
     Urutan ini membuat setiap batas punya arti. Kalau

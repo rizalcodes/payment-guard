@@ -12,6 +12,7 @@ from payment_guard.money import (
     BASE_UNITS_PER_USDC,
     USDC_DECIMALS,
     MoneyError,
+    base_units,
     format_amount,
     format_base_units,
     parse_amount,
@@ -138,7 +139,7 @@ class TestRejectedAmounts:
 
 class TestFormatAmount:
     @pytest.mark.parametrize(
-        ("base_units", "expected"),
+        ("jumlah", "expected"),
         [
             (1, "0.000001"),
             (10, "0.000010"),
@@ -150,12 +151,12 @@ class TestFormatAmount:
             (0, "0.000000"),
         ],
     )
-    def test_formats_with_six_decimals(self, base_units: int, expected: str) -> None:
-        assert format_amount(base_units) == expected
+    def test_formats_with_six_decimals(self, jumlah: int, expected: str) -> None:
+        assert format_amount(base_units(jumlah)) == expected
 
     def test_always_has_six_decimals(self) -> None:
-        for base_units in (1, 1_000_000, 123_456_789):
-            whole, _, fraction = format_amount(base_units).partition(".")
+        for jumlah in (1, 1_000_000, 123_456_789):
+            whole, _, fraction = format_amount(base_units(jumlah)).partition(".")
             assert whole
             assert len(fraction) == USDC_DECIMALS
 
@@ -219,3 +220,68 @@ class TestRoundTrip:
         twice = format_amount(parse_amount(once))
         assert once == twice
         assert parse_amount(once) == parse_amount(text)
+
+
+class TestBaseUnitsDoor:
+    """``base_units`` adalah satu-satunya pintu dari ``int`` telanjang.
+
+    Fungsi publik lain di modul uang tidak menerima ``int`` untuk nilai uang,
+    jadi setiap tempat yang memanggil pintu ini adalah tempat yang perlu
+    dibaca manusia untuk memastikan satuannya benar. Tes di kelas ini menjaga
+    pintunya tetap memeriksa, bukan sekadar menenangkan pemeriksa tipe —
+    ``NewType`` tidak memeriksa apa pun saat program berjalan.
+    """
+
+    def test_a_valid_integer_passes_through(self) -> None:
+        assert base_units(25_000_000) == 25_000_000
+
+    def test_zero_is_allowed(self) -> None:
+        """Nol adalah jatah terpakai yang sah, bukan jumlah pembayaran."""
+        assert base_units(0) == 0
+
+    def test_negative_is_refused(self) -> None:
+        with pytest.raises(MoneyError, match="tidak boleh negatif"):
+            base_units(-1)
+
+    @pytest.mark.parametrize("bukan_int", [True, False, "25", 1.5, None, (1,)])
+    def test_non_integers_are_refused(self, bukan_int: object) -> None:
+        """``True`` termasuk: di Python ia subclass ``int``."""
+        with pytest.raises(MoneyError):
+            base_units(bukan_int)  # type: ignore[arg-type]
+
+    def test_the_result_is_usable_as_an_integer(self) -> None:
+        """``NewType`` tidak membungkus apa pun saat runtime."""
+        nilai = base_units(7)
+        assert isinstance(nilai, int)
+        assert nilai + 1 == 8
+
+
+class TestMoneyTypeRoundTrip:
+    """Regresi satuan: desimal ke base units dan kembali, tanpa kehilangan.
+
+    Ini penjaga untuk bug M4 yang nyata: kolom base units pernah dibaca dengan
+    pembaca desimal, dan setiap batas diam-diam dikalikan sejuta tanpa satu pun
+    pengecualian. Tipe ketat membuat kekeliruan itu gagal di pemeriksa tipe;
+    tes ini membuatnya gagal juga saat dijalankan.
+    """
+
+    @pytest.mark.parametrize(
+        "desimal", ["0.000001", "1.000000", "25.000000", "25.500000", "200.000000"]
+    )
+    def test_parse_then_format_returns_the_same_text(self, desimal: str) -> None:
+        assert format_amount(parse_amount(desimal)) == desimal
+
+    @pytest.mark.parametrize("jumlah", [1, 1_000_000, 25_000_000, 10**30])
+    def test_format_then_parse_returns_the_same_number(self, jumlah: int) -> None:
+        assert parse_amount(format_amount(base_units(jumlah))) == jumlah
+
+    def test_base_units_and_decimal_are_different_values(self) -> None:
+        """Inti kekeliruan yang dicegah tipe: "25" bukan 25_000_000."""
+        assert parse_amount("25") == 25_000_000
+        assert format_base_units(base_units(25)) == "25"
+        assert format_amount(base_units(25)) == "0.000025"
+
+    def test_format_base_units_is_not_the_decimal_form(self) -> None:
+        jumlah = base_units(25_000_000)
+        assert format_base_units(jumlah) == "25000000"
+        assert format_amount(jumlah) == "25.000000"

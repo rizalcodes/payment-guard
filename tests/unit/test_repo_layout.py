@@ -126,6 +126,182 @@ class TestTestLayout:
         assert list((ROOT / "tests").rglob("__init__.py")) == []
 
 
+class TestCanonicalDocs:
+    """Dokumen yang mengikat harus ada, dengan nama yang dirujuk kode dan tes.
+
+    Nama berkasnya dirujuk dari docstring di seluruh ``src/``, dari README, dan
+    dari ``scripts/demo_execute.md``. Mengganti namanya memutus rujukan itu
+    tanpa ada yang gagal, jadi daftar ini yang menahannya.
+    """
+
+    CANONICAL = (
+        "Payment_Guard_PRD_v2.md",
+        "PRD_v2.1.md",
+        "Architecture_v1.1.md",
+        "Security_v1.1.md",
+    )
+
+    #: Dokumen turunan: dihasilkan atau dijaga tes, bukan ditulis bebas.
+    DERIVED = ("events.md", "schema.md")
+
+    #: Prosedur manual operator.
+    OPERATIONAL = ("runbook.md",)
+
+    @pytest.mark.parametrize("name", CANONICAL)
+    def test_canonical_document_exists(self, name: str) -> None:
+        assert (ROOT / "docs" / name).is_file(), name
+
+    @pytest.mark.parametrize("name", DERIVED)
+    def test_derived_document_exists(self, name: str) -> None:
+        assert (ROOT / "docs" / name).is_file(), name
+
+    @pytest.mark.parametrize("name", OPERATIONAL)
+    def test_operational_document_exists(self, name: str) -> None:
+        assert (ROOT / "docs" / name).is_file(), name
+
+    def test_no_other_markdown_sneaks_into_docs(self) -> None:
+        """Daftar isi ``docs/`` tertutup.
+
+        Bukan untuk kerapian: dokumen yang mengikat dan dokumen catatan
+        sementara tidak boleh terlihat sama di direktori yang sama.
+        """
+        ada = sorted(p.name for p in (ROOT / "docs").glob("*.md"))
+        harus = sorted([*self.CANONICAL, *self.DERIVED, *self.OPERATIONAL])
+        assert ada == harus, f"isi docs/ berubah: {ada}"
+
+    def test_the_runbook_covers_the_stuck_transaction(self) -> None:
+        """Keterbatasan yang disebut README harus punya prosedurnya."""
+        teks = (ROOT / "docs" / "runbook.md").read_text(encoding="utf-8")
+        assert "Transaksi macet" in teks
+        assert "nonce" in teks
+        assert "jangan menghapus" in teks.lower()
+
+    def test_the_readme_states_the_known_limitations(self) -> None:
+        teks = (ROOT / "README.md").read_text(encoding="utf-8")
+        assert "## Known limitations" in teks
+        assert "bump" in teks
+        assert "maxFeePerGas" in teks
+        assert "docs/runbook.md" in teks
+
+
+class TestLockfileIsHashed:
+    """Pemasangan harus bisa diulang, dan isinya bisa diperiksa.
+
+    Lockfile tanpa hash berarti "versi yang sama" tidak menjamin "byte yang
+    sama", dan pip-audit di CI mengaudit sesuatu yang belum tentu terpasang.
+    """
+
+    def text(self) -> str:
+        return (ROOT / "uv.lock").read_text(encoding="utf-8")
+
+    def test_the_lockfile_exists(self) -> None:
+        assert (ROOT / "uv.lock").is_file()
+
+    def test_it_carries_sha256_hashes(self) -> None:
+        assert 'hash = "sha256:' in self.text()
+
+    def test_there_is_a_hash_for_roughly_every_package(self) -> None:
+        """Lebih banyak hash daripada paket: sdist dan beberapa wheel per paket."""
+        isi = self.text()
+        paket = isi.count("\nname = ")
+        hashes = isi.count('hash = "sha256:')
+        assert paket > 50, f"lockfile hanya memuat {paket} paket"
+        assert hashes >= paket, f"{hashes} hash untuk {paket} paket"
+
+    def test_the_runtime_dependencies_are_all_locked(self) -> None:
+        import tomllib
+
+        isi = self.text()
+        pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        for spec in pyproject["project"]["dependencies"]:
+            nama = spec.split(">")[0].split("=")[0].split("<")[0].split("[")[0]
+            assert f'name = "{nama}"' in isi, nama
+
+
+class TestContinuousIntegration:
+    """Berkas CI ditulis di M6.0 dan belum pernah dijalankan: repo tanpa remote.
+
+    Yang bisa diperiksa sekarang adalah bentuknya, dan satu sifat yang harus
+    benar sejak awal: tidak ada rahasia di dalamnya.
+    """
+
+    def workflow(self) -> str:
+        return (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    def test_the_workflow_exists(self) -> None:
+        assert (ROOT / ".github" / "workflows" / "ci.yml").is_file()
+
+    def test_it_is_valid_yaml_with_three_jobs(self) -> None:
+        import yaml
+
+        parsed = yaml.safe_load(self.workflow())
+        assert set(parsed["jobs"]) == {"lint", "test", "audit"}
+
+    def test_it_contains_no_secrets(self) -> None:
+        """Tidak ada ``${{ secrets.* }}``.
+
+        Satu-satunya password di sana adalah password Postgres sementara untuk
+        container layanan yang hidup selama satu job, sama dengan yang ada di
+        docker-compose.yml.
+        """
+        assert "secrets." not in self.workflow()
+
+    def effective(self) -> str:
+        """Isi workflow **tanpa komentar**.
+
+        Tes di bawah memeriksa apa yang CI benar-benar lakukan, bukan apa yang
+        komentarnya sebutkan. Komentar di berkas itu menjelaskan mengapa port
+        5434 dan ``PAYMENT_GUARD_LIVE`` justru **tidak** dipakai, dan pencarian
+        teks mentah akan menganggap penjelasan itu sebagai pelanggaran.
+        """
+        return "\n".join(
+            baris for baris in self.workflow().splitlines() if not baris.strip().startswith("#")
+        )
+
+    def test_the_test_job_never_uses_the_operator_port(self) -> None:
+        """5434 adalah cluster operator; CI memakai 5435 seperti harness lokal."""
+        import yaml
+
+        parsed = yaml.safe_load(self.workflow())
+        ports = parsed["jobs"]["test"]["services"]["postgres"]["ports"]
+        assert ports == ["5435:5432"]
+        assert "5434" not in self.effective()
+
+    def test_the_test_database_name_satisfies_the_harness(self) -> None:
+        """Harness menolak nama database yang tidak berakhiran ``_test``."""
+        import yaml
+
+        parsed = yaml.safe_load(self.workflow())
+        service = parsed["jobs"]["test"]["services"]["postgres"]
+        assert service["env"]["POSTGRES_DB"].endswith("_test")
+
+    def test_live_tests_are_never_enabled(self) -> None:
+        """CI tidak boleh membelanjakan gas.
+
+        Dua kunci tes live harus dua-duanya absen dari yang CI jalankan:
+        variabel ``PAYMENT_GUARD_LIVE`` dan penanda ``-m live``.
+        """
+        berjalan = self.effective()
+        assert "PAYMENT_GUARD_LIVE" not in berjalan
+        assert "-m live" not in berjalan
+        assert '-m "live"' not in berjalan
+
+    def test_every_job_installs_from_the_lockfile(self) -> None:
+        """``--locked`` menggagalkan CI bila uv.lock basi, bukan memperbaruinya."""
+        assert self.workflow().count("uv sync --locked") == 3
+
+    def test_it_runs_ruff_mypy_pytest_and_pip_audit(self) -> None:
+        teks = self.workflow()
+        for perintah in (
+            "ruff check",
+            "ruff format --check",
+            "mypy --strict",
+            "pytest",
+            "pip-audit",
+        ):
+            assert perintah in teks, perintah
+
+
 class TestDependencies:
     def test_minimal_runtime_dependencies(self, pyproject: dict) -> None:
         names = [

@@ -17,7 +17,30 @@ pernah tercatat di ``decisions``.
 from __future__ import annotations
 
 import re
-from typing import Final
+from typing import Final, NewType
+
+#: Jumlah uang dalam **base units**: bilangan bulat, 1 USDC = 1_000_000.
+#:
+#: ``NewType``, bukan alias. Alias (``BaseUnits = int``) tidak memberi apa pun
+#: ke pemeriksa tipe: setiap ``int`` akan tetap diterima. ``NewType`` membuat
+#: mypy menolak ``int`` telanjang di posisi uang, sehingga satu-satunya jalan
+#: masuk adalah lewat :func:`base_units`, :func:`parse_amount`, atau nilai yang
+#: sudah bertipe itu.
+#:
+#: Yang dicegah bukan kesalahan aritmetika — ``int`` tetap ``int`` saat runtime
+#: dan tidak ada ongkos tambahan. Yang dicegah adalah **kekeliruan satuan**:
+#: menyerahkan desimal USDC (``25``) ke tempat yang mengharapkan base units
+#: (``25_000_000``), atau sebaliknya. Kekeliruan itu bukan hipotetis di repo
+#: ini: M4 pernah membaca kolom base units dengan pembaca desimal, dan setiap
+#: batas diam-diam dikalikan sejuta tanpa satu pun pengecualian.
+BaseUnits = NewType("BaseUnits", int)
+
+#: Jumlah uang sebagai **desimal USDC ternormalisasi**, selalu enam desimal,
+#: mis. ``"25.000000"``. Bentuk untuk mata manusia dan untuk mandate.
+#:
+#: Dibedakan dari ``str`` biasa dengan alasan yang sama: ``"25"`` dan
+#: ``"25000000"`` dua-duanya string, dan hanya satu yang berarti 25 USDC.
+UsdcAmount = NewType("UsdcAmount", str)
 
 #: Jumlah desimal USDC.
 USDC_DECIMALS: Final = 6
@@ -49,8 +72,28 @@ class MoneyError(ValueError):
     """
 
 
-def parse_amount(text: str) -> int:
-    """Ubah jumlah USDC desimal menjadi ``int`` base units.
+def base_units(value: int) -> BaseUnits:
+    """Satu-satunya pintu dari ``int`` telanjang ke :data:`BaseUnits`.
+
+    Dipakai di batas sistem tempat angka datang tanpa tipe: kolom
+    ``NUMERIC(78,0)`` dari database, dan string digit dari payload envelope.
+    Nilainya divalidasi di sini, jadi melewati pintu ini bukan sekadar
+    menenangkan pemeriksa tipe.
+
+    Fungsi publik lain di modul ini **tidak** menerima ``int`` telanjang untuk
+    nilai uang. Itu disengaja: setiap tempat yang memanggil fungsi ini adalah
+    tempat yang perlu dibaca manusia untuk memastikan satuannya benar, dan
+    jumlahnya sedikit serta bisa dicari.
+
+    Raises:
+        MoneyError: bila ``value`` bukan ``int``, atau negatif.
+    """
+    _require_base_units(value)
+    return BaseUnits(value)
+
+
+def parse_amount(text: str) -> BaseUnits:
+    """Ubah jumlah USDC desimal menjadi base units.
 
     Hanya menerima ``str``. Angka yang sudah berupa ``int`` atau ``float``
     ditolak dengan sengaja: ``float`` tidak boleh masuk jalur uang sama sekali,
@@ -80,14 +123,14 @@ def parse_amount(text: str) -> int:
     whole_text, fraction_text = match.group(1), match.group(2)
     # Pad ke kanan supaya "25.5" menjadi 500000, bukan 5.
     fraction_digits = (fraction_text[1:] if fraction_text else "").ljust(USDC_DECIMALS, "0")
-    base_units = int(whole_text) * BASE_UNITS_PER_USDC + int(fraction_digits)
+    total = int(whole_text) * BASE_UNITS_PER_USDC + int(fraction_digits)
 
-    if base_units <= 0:
+    if total <= 0:
         raise MoneyError(f"jumlah {text!r} harus lebih besar dari nol")
-    return base_units
+    return BaseUnits(total)
 
 
-def format_amount(base_units: int) -> str:
+def format_amount(amount: BaseUnits) -> UsdcAmount:
     """Tulis base units sebagai desimal ternormalisasi, selalu 6 desimal.
 
     ``25_000_000`` menjadi ``"25.000000"``. Bentuk ini yang dipakai di
@@ -95,28 +138,36 @@ def format_amount(base_units: int) -> str:
     maknanya sama menghasilkan byte yang sama.
 
     Raises:
-        MoneyError: bila ``base_units`` bukan ``int`` atau negatif.
+        MoneyError: bila ``amount`` bukan ``int`` atau negatif.
     """
-    _require_base_units(base_units)
-    whole, fraction = divmod(base_units, BASE_UNITS_PER_USDC)
-    return f"{whole}.{fraction:0{USDC_DECIMALS}d}"
+    _require_base_units(amount)
+    whole, fraction = divmod(amount, BASE_UNITS_PER_USDC)
+    return UsdcAmount(f"{whole}.{fraction:0{USDC_DECIMALS}d}")
 
 
-def format_base_units(base_units: int) -> str:
+def format_base_units(amount: BaseUnits) -> str:
     """Tulis base units sebagai bilangan bulat desimal, mis. ``"25000000"``.
 
     Dipakai di tempat yang butuh bilangan bulat sebagai string: JSON kanonik
     mandate, dan payload envelope di M2.
 
     Raises:
-        MoneyError: bila ``base_units`` bukan ``int`` atau negatif.
+        MoneyError: bila ``amount`` bukan ``int`` atau negatif.
     """
-    _require_base_units(base_units)
-    return str(base_units)
+    _require_base_units(amount)
+    return str(amount)
 
 
-def _require_base_units(base_units: int) -> None:
-    if isinstance(base_units, bool) or not isinstance(base_units, int):
-        raise MoneyError(f"base units harus int, bukan {type(base_units).__name__}")
-    if base_units < 0:
-        raise MoneyError(f"base units tidak boleh negatif: {base_units}")
+def _require_base_units(amount: int) -> None:
+    """Validasi nilai base units. Menerima ``int`` karena ia penjaga pintunya.
+
+    Inilah satu-satunya fungsi di modul ini yang boleh menerima ``int``
+    telanjang: ia dipanggil dari :func:`base_units`, yang memang pintu masuk,
+    dan dari fungsi penulis yang nilainya sudah bertipe :data:`BaseUnits`.
+    Pemeriksaan runtime tetap ada karena ``NewType`` tidak memeriksa apa pun
+    saat program berjalan.
+    """
+    if isinstance(amount, bool) or not isinstance(amount, int):
+        raise MoneyError(f"base units harus int, bukan {type(amount).__name__}")
+    if amount < 0:
+        raise MoneyError(f"base units tidak boleh negatif: {amount}")

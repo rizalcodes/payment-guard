@@ -53,7 +53,14 @@ from payment_guard.db import connect, db_now, take_xact_lock, to_int
 from payment_guard.events import Event, audit
 from payment_guard.guard_service import GuardSession
 from payment_guard.mandate import Mandate
-from payment_guard.money import MoneyError, format_amount, format_base_units, parse_amount
+from payment_guard.money import (
+    BaseUnits,
+    MoneyError,
+    base_units,
+    format_amount,
+    format_base_units,
+    parse_amount,
+)
 from payment_guard.reasons import ReasonCode, Status, cooldown_triggering_pairs
 from payment_guard.rules import Decision, Denial, Request, RuleInputError, Snapshot, evaluate
 from payment_guard.signing import build_payload, sign
@@ -193,7 +200,7 @@ class ValidatedRequest:
     """Hasil langkah 0: nilai yang sudah dinormalisasi dan aman dipakai."""
 
     recipient: str
-    amount_base: int
+    amount_base: BaseUnits
     chain: str
     chain_id: int
     reason: str
@@ -332,8 +339,10 @@ def build_snapshot(
         ),
     )
     row = cur.fetchone()
-    committed_day = to_int(row[0]) if row is not None else 0
-    committed_recipient = to_int(row[1]) if row is not None else 0
+    # Batas sistem: kolom NUMERIC datang tanpa satuan. `base_units`
+    # adalah satu-satunya pintu, dan ia memvalidasi nilainya.
+    committed_day = base_units(to_int(row[0]) if row is not None else 0)
+    committed_recipient = base_units(to_int(row[1]) if row is not None else 0)
 
     pairs = sorted(cooldown_triggering_pairs())
     cur.execute(
@@ -597,7 +606,7 @@ def get_decision_status(session: GuardSession, decision_id: str) -> DecisionResu
         expires_at,
         _valid_until,
     ) = row
-    amount_int = to_int(amount_base)
+    amount_int = base_units(to_int(amount_base))
     return DecisionResult(
         decision_id=stored_id,
         status=status,

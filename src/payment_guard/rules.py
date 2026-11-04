@@ -34,6 +34,7 @@ from typing import Final
 
 from payment_guard.addresses import ADDRESS_PATTERN
 from payment_guard.mandate import Mandate
+from payment_guard.money import BaseUnits
 from payment_guard.reasons import (
     ReasonCode,
     Status,
@@ -74,7 +75,7 @@ class Request:
     """
 
     recipient: str
-    amount_base: int
+    amount_base: BaseUnits
     chain_id: int
 
 
@@ -107,8 +108,8 @@ class Snapshot:
     mengabaikan yang bukan pemicu, tapi pemilihan baris tetap tugas pemanggil.
     """
 
-    committed_day: int
-    committed_recipient: int
+    committed_day: BaseUnits
+    committed_recipient: BaseUnits
     latest_triggering_denial: Denial | None = None
 
 

@@ -45,6 +45,7 @@ from payment_guard.executor import (
     ExecutionPlan,
     ExecutorError,
     build_transaction_plan,
+    next_nonce,
     parse_and_verify,
     require_uuid,
     verify_and_plan,
@@ -910,3 +911,88 @@ class TestNoKeyMaterialInTheModule:
     def test_the_wallet_address_is_not_hardcoded(self) -> None:
         """Alamat wallet datang dari berkas kunci, bukan dari sumber."""
         assert TEST_WALLET_ADDRESS not in MODULE.read_text(encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
+# Nonce: dua sumber, yang terbesar menang
+# --------------------------------------------------------------------------- #
+
+
+class NonceCursor:
+    """Kursor yang hanya menjawab ``SELECT max(nonce) …``."""
+
+    def __init__(self, max_nonce: int | None) -> None:
+        self.max_nonce = max_nonce
+        self.statements: list[str] = []
+        self._result: tuple[object, ...] | None = None
+
+    def execute(self, sql: str, params: tuple[object, ...] | None = None) -> None:
+        if sql != executor.SELECT_MAX_NONCE:
+            raise AssertionError(f"SQL tak terduga:\n{sql}")
+        self.statements.append("max_nonce")
+        self._result = (self.max_nonce,)
+
+    def fetchone(self) -> tuple[object, ...] | None:
+        return self._result
+
+
+class TestNextNonce:
+    """Keputusan operator M6.0: jangan hanya memakai ``pending`` dari RPC."""
+
+    def nonce(self, *, max_nonce: int | None, pending: int) -> int:
+        from fake_chain import FakeChain
+
+        return next_nonce(
+            NonceCursor(max_nonce),  # type: ignore[arg-type]
+            FakeChain(pending_nonce_value=pending),
+            TEST_WALLET_ADDRESS,
+        )
+
+    def test_a_fresh_wallet_starts_at_zero(self) -> None:
+        """Tanpa riwayat dan tanpa transaksi, nonce pertama adalah 0.
+
+        Bukan 1. Rumus ``max(pending, max(nonce)) + 1`` yang ditulis harfiah
+        akan memberi 1 di sini, meninggalkan celah di nonce 0 yang tidak akan
+        pernah terisi — dan setiap transaksi sesudahnya macet di belakangnya.
+        """
+        assert self.nonce(max_nonce=None, pending=0) == 0
+
+    def test_the_rpc_wins_when_it_is_ahead(self) -> None:
+        """Transaksi dari luar sistem ini hanya terlihat oleh node."""
+        assert self.nonce(max_nonce=None, pending=5) == 5
+
+    def test_our_records_win_when_the_node_is_behind(self) -> None:
+        """Inti keputusannya: node yang tertinggal tidak boleh menentukan.
+
+        Baris ``executions`` di-commit sebelum broadcast, jadi ia tidak pernah
+        tertinggal dari apa yang kami kirim. Node bisa.
+        """
+        assert self.nonce(max_nonce=3, pending=0) == 4
+
+    def test_the_larger_of_the_two_is_taken(self) -> None:
+        assert self.nonce(max_nonce=3, pending=9) == 9
+        assert self.nonce(max_nonce=9, pending=3) == 10
+
+    def test_they_agree_on_the_ordinary_path(self) -> None:
+        """Node sudah melihat semuanya: kedua sumber memberi jawaban sama."""
+        assert self.nonce(max_nonce=4, pending=5) == 5
+
+    def test_a_single_past_execution_moves_the_floor(self) -> None:
+        assert self.nonce(max_nonce=0, pending=0) == 1
+
+    def test_both_sources_are_consulted(self) -> None:
+        from fake_chain import FakeChain
+
+        cursor = NonceCursor(2)
+        client = FakeChain(pending_nonce_value=0)
+        next_nonce(cursor, client, TEST_WALLET_ADDRESS)  # type: ignore[arg-type]
+        assert cursor.statements == ["max_nonce"]
+        assert "pending_nonce" in client.calls
+
+    def test_the_query_is_scoped_to_one_wallet(self) -> None:
+        """Nonce milik alamat, bukan milik sistem."""
+        assert "from_addr = %s" in executor.SELECT_MAX_NONCE
+
+    def test_the_query_counts_every_status(self) -> None:
+        """Termasuk ``failed``: transaksi lamanya bisa masih beredar."""
+        assert "status" not in executor.SELECT_MAX_NONCE

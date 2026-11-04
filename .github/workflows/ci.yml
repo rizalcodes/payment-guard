@@ -1,0 +1,147 @@
+# Payment Guard - CI
+#
+# BELUM PERNAH DIJALANKAN. Repo ini belum punya remote (lihat laporan M6.0),
+# jadi berkas ini ditulis supaya siap, bukan karena sudah terbukti hijau.
+# Baris pertama yang perlu diperiksa saat remote pertama ditambahkan adalah
+# versi action yang dipin di bawah.
+#
+# Tidak ada `secrets` di berkas ini, dan itu disengaja. Satu-satunya password
+# di sini adalah password Postgres sementara untuk container layanan yang hidup
+# selama satu job, sama dengan yang ada di `docker-compose.yml`. Ia tidak
+# pernah menghadap jaringan dan tidak melindungi apa pun.
+#
+# Tes `live` TIDAK dijalankan: `addopts` di pyproject.toml menyetel
+# `-m "not live"`, dan `PAYMENT_GUARD_LIVE` tidak pernah disetel di sini. CI
+# tidak boleh membelanjakan gas.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Dipin, bukan `latest`: proyek ini memakai lockfile ber-hash, dan toolchain
+  # yang berubah sendiri membuat "lockfile yang sama" berhenti berarti sama.
+  UV_VERSION: "0.13.6"
+
+jobs:
+  lint:
+    name: ruff, mypy, dokumen turunan
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pasang uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Pasang dependensi dari lockfile
+        # `--locked` gagal bila uv.lock tidak lagi sesuai pyproject.toml.
+        # Itu yang diinginkan: lockfile yang basi harus menggagalkan CI, bukan
+        # diperbarui diam-diam.
+        run: uv sync --locked --all-groups
+
+      - name: ruff check
+        run: uv run --no-sync ruff check .
+
+      - name: ruff format
+        run: uv run --no-sync ruff format --check .
+
+      - name: mypy --strict
+        # Daftar modul eksplisit: hanya berkas yang memang sudah bersih di
+        # bawah --strict yang dijaga, supaya langkah ini menolak regresi
+        # alih-alih mengeluh tentang hal yang belum pernah rapi. Daftarnya
+        # sama dengan hook di .pre-commit-config.yaml.
+        run: |
+          uv run --no-sync mypy --strict \
+            src/payment_guard/money.py \
+            src/payment_guard/addresses.py \
+            src/payment_guard/rules.py \
+            src/payment_guard/chain.py \
+            src/payment_guard/decision_service.py \
+            src/payment_guard/executor.py \
+            src/payment_guard/approvals_cli.py
+
+      - name: docs/schema.md sesuai migrations/
+        run: uv run --no-sync python scripts/generate_schema_doc.py --check
+
+  test:
+    name: pytest (unit dan integrasi, tanpa live)
+    runs-on: ubuntu-24.04
+
+    services:
+      postgres:
+        # Versi dipin. Tes hak akses bergantung pada perilaku GRANT/REVOKE
+        # Postgres 16.
+        image: postgres:16.10-alpine
+        env:
+          # Nama database job ini. Harness menolak jalan kecuali namanya
+          # berakhiran `_test`; lihat tests/integration/conftest.py.
+          POSTGRES_DB: payment_guard_ci_test
+          POSTGRES_USER: guard_admin
+          POSTGRES_PASSWORD: devonly_not_a_secret
+        ports:
+          # 5435, bukan 5434. Port 5434 adalah cluster operator di mesin
+          # pengembang, dan harness tes menolaknya secara eksplisit.
+          - 5435:5432
+        options: >-
+          --health-cmd "pg_isready -U guard_admin -d payment_guard_ci_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pasang uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Pasang dependensi dari lockfile
+        run: uv sync --locked --all-groups
+
+      - name: pytest
+        env:
+          # Satu-satunya sumber URL admin tes. Harness tidak pernah membaca
+          # .env maupun .env.migrator.
+          PAYMENT_GUARD_TEST_ADMIN_DB_URL: postgresql://guard_admin:devonly_not_a_secret@127.0.0.1:5435/payment_guard_ci_test
+        # Tanpa `-m`: addopts di pyproject.toml sudah menyetel `-m "not live"`.
+        run: uv run --no-sync pytest tests/ -q
+
+  audit:
+    name: pip-audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pasang uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Pasang dependensi dari lockfile
+        run: uv sync --locked --all-groups
+
+      - name: Ekspor dependensi runtime ber-hash
+        # Yang diaudit adalah dependensi RUNTIME saja: `--no-dev` membuang
+        # alat pengembangan, yang tidak ikut dikirim. Hash tetap ikut, jadi
+        # yang diaudit benar-benar versi yang terpasang.
+        run: uv export --no-dev --format requirements-txt --no-emit-project -o requirements-runtime.txt
+
+      - name: pip-audit
+        run: uv run --no-sync pip-audit -r requirements-runtime.txt

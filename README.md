@@ -222,6 +222,40 @@ Role **grup** (`guard_rw` dan seterusnya) tetap tanpa awalan: namanya tertulis
 harfiah di `migrations/0002_roles.sql`, yang terkunci. Role itu NOLOGIN, tanpa
 password, dan tidak muncul di file env mana pun.
 
+Tipe dan audit dependensi:
+
+```bash
+uv run --no-sync mypy --strict src/payment_guard/money.py src/payment_guard/addresses.py \
+  src/payment_guard/rules.py src/payment_guard/chain.py \
+  src/payment_guard/decision_service.py src/payment_guard/executor.py \
+  src/payment_guard/approvals_cli.py
+uv export --no-dev --format requirements-txt --no-emit-project | uv run --no-sync pip-audit -r /dev/stdin
+```
+
+Daftar modulnya eksplisit, dan itu disengaja: hanya berkas yang memang sudah
+bersih di bawah `--strict` yang dijaga, supaya hook menolak regresi alih-alih
+mengeluh tentang hal yang belum pernah rapi. Hook yang sama ada di pre-commit.
+
+### Tes live
+
+Tes yang menyentuh Base Sepolia sungguhan ada di
+[tests/integration/test_live.py](tests/integration/test_live.py) dan
+**dilewati secara bawaan**. Membukanya butuh dua hal sekaligus:
+
+```bash
+set PAYMENT_GUARD_LIVE=1
+uv run --no-sync pytest tests/integration/test_live.py -m live -q
+```
+
+`addopts` menyetel `-m "not live"`, jadi tanpa `-m live` tes itu tidak
+dikumpulkan; dan tanpa `PAYMENT_GUARD_LIVE=1` ia dilewati dengan alasan. Dua
+kunci, bukan satu, supaya tidak ada yang menjalankannya karena kecelakaan.
+
+Tes live hanya **membaca** dari chain: chain id, `decimals()`, dan saldo gas.
+Tidak ada tes otomatis yang menyiarkan transaksi — pembayaran sungguhan
+dikerjakan operator secara manual lewat
+[scripts/demo_execute.md](scripts/demo_execute.md).
+
 ## Pre-commit
 
 ```bash
@@ -262,6 +296,49 @@ Forward-only, SQL murni di atas psycopg 3, tanpa Alembic maupun SQLAlchemy.
 `migrations/0002_roles.sql` hanya memberi hak tingkat tabel dan sequence, dan
 gagal keras bila role grup belum ada. Hak tingkat schema dan `CREATE ROLE`
 adalah wewenang bootstrap, bukan migrator.
+
+## Known limitations
+
+Yang berikut ini **tidak** ada di v1, dan tidak ada yang tersembunyi di balik
+bendera. Prosedur manual untuk masing-masing ada di
+[docs/runbook.md](docs/runbook.md).
+
+**Tidak ada bump maupun replacement transaksi.** Tidak ada perintah yang
+menaikkan ongkos transaksi yang sudah disiarkan. Mengganti transaksi berarti
+menandatangani transaksi kedua dengan nonce yang sama, dan dua transaksi sah
+dengan nonce sama untuk satu pembayaran adalah keadaan paling berbahaya di
+sistem ini. Melakukannya dengan benar butuh aturan kapan yang lama dianggap
+mati, dan aturan itu belum ada.
+
+**Transaksi macet tetap `broadcast`.** Ia tidak pernah menjadi `failed` karena
+lambat. `failed` hanya ditulis bila receipt-nya revert, atau nonce-nya dipakai
+transaksi lain. Menandai `failed` karena timeout akan menyembunyikan pembayaran
+yang sesungguhnya berhasil, dan itu kesalahan yang lebih buruk daripada
+menunggu. Prosedur membebaskan nonce secara manual ada di runbook bagian 1.
+
+**Margin ongkos adalah konstanta, bukan konfigurasi.** `maxFeePerGas` disetel
+ke `baseFeePerGas` blok terakhir dikali dua, ditambah tip dari
+`eth_maxPriorityFeePerGas`. Pengali dua adalah anjuran EIP-1559 yang biasa:
+base fee naik paling banyak 12,5 persen per blok, jadi margin itu menahan
+sekitar enam blok kenaikan berturut-turut. Yang benar-benar dibayar tetap base
+fee saat transaksi masuk ditambah tip; `maxFeePerGas` hanya batas atas. Batas
+gas memakai `eth_estimateGas` ditambah 20 persen. Ketiga angka itu hidup di
+`src/payment_guard/chain.py`, dan mengubahnya adalah perubahan kode yang
+terlihat di diff — bukan setelan yang bisa digeser diam-diam.
+
+**Tidak ada yang menjalankan `guard recover` otomatis.** Tidak ada daemon dan
+tidak ada penjadwal. Receipt tercatat ketika operator menjalankannya, atau di
+awal `guard execute` berikutnya.
+
+**Wallet Executor sebaiknya hanya dipakai proses ini.** Nonce diambil dari yang
+lebih besar antara jawaban RPC dan catatan `executions` kami, jadi node yang
+tertinggal tidak bisa menyebabkan tabrakan. Yang tidak tertangani adalah
+transaksi dari wallet yang sama yang dikirim di luar Payment Guard dan belum
+terlihat node.
+
+**Belum ada Watcher dan Reconciler.** Pembayaran on-chain belum dicocokkan
+kembali ke keputusan yang mengizinkannya; `settlements` masih kosong. Itu M6
+dan sesudahnya.
 
 ## Security model
 

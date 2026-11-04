@@ -86,7 +86,7 @@ from payment_guard.db import (
     to_int,
 )
 from payment_guard.events import Event, audit
-from payment_guard.money import format_amount, format_base_units
+from payment_guard.money import BaseUnits, base_units, format_amount, format_base_units
 from payment_guard.reasons import Status
 from payment_guard.signing import (
     ENVELOPE_VERSION,
@@ -196,6 +196,15 @@ WHERE status = ANY(%s)
 ORDER BY id
 """
 
+#: Nonce tertinggi yang pernah **kami** alokasikan untuk sebuah wallet.
+#:
+#: Semua status ikut dihitung, termasuk ``failed``: nonce yang sudah dipakai
+#: transaksi yang gagal tetap tidak boleh dipakai lagi oleh kami, karena
+#: transaksi lama bisa saja masih beredar di mempool.
+SELECT_MAX_NONCE: Final = """
+SELECT max(nonce) FROM executions WHERE from_addr = %s
+"""
+
 #: ``created_at`` dan ``updated_at`` memakai DEFAULT ``now()``: tidak ada CHECK
 #: di ``executions`` yang membandingkannya dengan nilai turunan epoch, jadi
 #: tidak perlu aritmetika epoch seperti di ``decisions``.
@@ -258,7 +267,7 @@ class ExecutionPlan:
     decision_id: str
     agent_id: str
     recipient: str
-    amount_base: int
+    amount_base: BaseUnits
     mandate_hash: str
     chain_id: int
     valid_until: int
@@ -429,7 +438,9 @@ def verify_and_plan(
         decision_id=payload.decision_id,
         agent_id=payload.agent_id,
         recipient=payload.recipient,
-        amount_base=int(payload.amount_base),
+        # Payload envelope menyimpan jumlah sebagai string digit; ini
+        # batas sistem yang kedua, dan pintunya sama.
+        amount_base=base_units(int(payload.amount_base)),
         mandate_hash=payload.mandate_hash,
         chain_id=payload.chain_id,
         valid_until=payload.valid_until,
@@ -601,6 +612,46 @@ def build_transaction_plan(
     )
 
 
+def next_nonce(cur: psycopg.Cursor, client: ChainClient, from_addr: str) -> int:
+    """Nonce berikutnya untuk ``from_addr``: yang lebih besar dari dua sumber.
+
+    Dua sumber, karena masing-masing bisa tertinggal:
+
+    * ``eth_getTransactionCount(addr, "pending")`` adalah jawaban **node yang
+      ini**. Node yang baru di-restart, atau node di belakang penyeimbang beban
+      yang belum melihat transaksi kami, akan mengembalikan nonce yang sudah
+      kami pakai. Mengandalkannya sendirian berarti menandatangani transaksi
+      kedua dengan nonce yang sama, dan satu dari keduanya akan tergantikan
+      tanpa jejak.
+    * ``max(nonce)`` dari ``executions`` adalah catatan **kami**, dan ia
+      di-commit sebelum broadcast. Ia tidak pernah tertinggal dari apa yang
+      kami kirim, tapi ia tidak tahu transaksi lain dari wallet yang sama yang
+      dikirim di luar sistem ini.
+
+    Yang lebih besar menang, jadi tidak ada satu pun sumber yang bisa membuat
+    nonce terpakai dua kali.
+
+    **Catatan penyimpangan.** Brief M6.0 menuliskan rumusnya sebagai
+    ``max(pending_rpc, max(nonce)) + 1``. Ditulis begitu, wallet baru tanpa
+    riwayat akan mendapat nonce 1 pada transaksi pertamanya — karena ``pending``
+    sudah 0 untuk wallet kosong — sehingga nonce 0 tidak pernah dipakai dan
+    setiap transaksi sesudahnya macet di belakang celah yang tidak akan pernah
+    terisi. ``+ 1`` yang dimaksud melekat pada sisi database saja, karena
+    ``max(nonce)`` adalah nonce **terakhir yang dipakai** sedangkan ``pending``
+    sudah berupa nonce **berikutnya**. Rumus di bawah menyamakan satuannya
+    dulu, lalu mengambil yang terbesar.
+
+    Harus dipanggil di dalam lock ``executor:<from_addr>``: tanpa itu dua
+    eksekusi paralel membaca nilai yang sama dan rumus apa pun tidak menolong.
+    """
+    cur.execute(SELECT_MAX_NONCE, (from_addr,))
+    row = cur.fetchone()
+    # Tidak ada baris berarti belum ada nonce terpakai, jadi berikutnya 0.
+    from_executions = 0 if row is None or row[0] is None else to_int(row[0]) + 1
+    from_rpc = client.pending_nonce(from_addr)
+    return max(from_rpc, from_executions)
+
+
 def estimate_gas_for(runtime: ExecutorRuntime, data: bytes) -> int:
     """Perkiraan gas untuk calldata ``data``, dari RPC.
 
@@ -667,6 +718,11 @@ def execute_decision(
             stream.write(f"ditolak ({exc.reason}): {exc.detail}\n")
             return ExecutionOutcome(decision_id, OUTCOME_REJECTED, None, exc.detail)
 
+        # Di titik ini fase 1 sudah commit dan SEMUA lock sudah dilepas.
+        # Fase 2 (broadcast) dan fase 3 (catat status) berjalan tanpa lock:
+        # perjalanan jaringan tidak boleh menahan eksekusi lain, dan nonce
+        # kami sudah tercatat sehingga eksekusi berikutnya tidak akan
+        # memakainya lagi walau node belum melihat transaksi ini.
         stream.write(
             f"ditandatangani: {signed.tx_hash}\n"
             f"  jumlah : {format_amount(plan.amount_base)} USDC\n"
@@ -679,7 +735,13 @@ def execute_decision(
 def _sign_write_ahead(
     runtime: ExecutorRuntime, conn: psycopg.Connection, envelope_json: str
 ) -> tuple[SignedTransaction, ExecutionPlan]:
-    """Satu transaksi: cek 1..6, tanda tangan lokal, lalu INSERT write-ahead."""
+    """**Fase 1.** Satu transaksi: cek 1..6, tanda tangan lokal, INSERT, COMMIT.
+
+    Seluruh lock hidup dan mati di dalam fungsi ini. Saat ia kembali, baris
+    ``signed`` sudah di-commit dan lock ``mandate:`` serta ``executor:`` sudah
+    dilepas — sehingga broadcast di fase 2 tidak menahan satu pun eksekusi lain
+    selama perjalanan jaringan.
+    """
     with conn.transaction(), conn.cursor() as cur:
         plan = verify_and_plan(
             envelope_json,
@@ -697,7 +759,7 @@ def _sign_write_ahead(
         transaction = build_transaction_plan(
             plan,
             usdc_address=runtime.config.usdc_address,
-            nonce=runtime.client.pending_nonce(runtime.wallet.address),
+            nonce=next_nonce(cur, runtime.client, runtime.wallet.address),
             fees=runtime.client.fees(),
             gas=estimate_gas_for(runtime, data),
         )
@@ -1108,12 +1170,32 @@ def _audit_rejection(conn: psycopg.Connection, decision_id: str, reason: str) ->
         )
 
 
+def _require_bytes(value: object, label: str) -> bytes:
+    """Baca kolom ``BYTEA`` sebagai ``bytes``.
+
+    psycopg mengembalikan ``bytes`` untuk ``BYTEA``, tapi ``memoryview`` bukan
+    hal yang mustahil tergantung adapter. Keduanya diterima; apa pun selain itu
+    adalah baris yang tidak bisa dipakai, dan lebih baik gagal di sini daripada
+    menyiarkan ulang sesuatu yang bukan transaksi.
+
+    Menggantikan ``type: ignore`` yang sebelumnya menutupi pemeriksaan ini.
+
+    Raises:
+        ExecutorError: bila nilainya bukan byte.
+    """
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray | memoryview):
+        return bytes(value)
+    raise ExecutorError(f"{label} harus bytes, bukan {type(value).__name__}")
+
+
 def _pending_from_row(row: Sequence[object]) -> PendingExecution:
     return PendingExecution(
         decision_id=str(row[0]),
         tx_hash=str(row[1]),
         from_addr=str(row[2]),
         nonce=to_int(row[3]),
-        raw_tx=bytes(row[4]),  # type: ignore[arg-type]
+        raw_tx=_require_bytes(row[4], "raw_tx"),
         status=str(row[5]),
     )
