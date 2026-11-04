@@ -21,6 +21,7 @@ mendapat UPDATE tingkat tabel.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Final
 
@@ -38,6 +39,93 @@ OWNER_ROLE: Final = "migrator_owner"
 
 #: Skema tempat semua objek aplikasi berada.
 APP_SCHEMA: Final = "public"
+
+# --------------------------------------------------------------------------- #
+# Awalan nama role: isolasi harness tes
+# --------------------------------------------------------------------------- #
+
+#: Bentuk awalan nama role yang diterima. String kosong berarti "nama apa
+#: adanya", dan itu satu-satunya nilai yang dipakai di produksi.
+#:
+#: Awalan ada untuk satu alasan: role Postgres bersifat **cluster-wide**, bukan
+#: per database. Harness tes membuat dan menghapus role, jadi tanpa awalan, satu
+#: run tes dan satu instalasi operator yang berbagi cluster akan berebut nama
+#: yang sama. Itu sudah pernah terjadi: run tes menghapus role ``*_app``
+#: operator dan membuat ``.env`` mereka berhenti cocok.
+#:
+#: ``guard db bootstrap-roles`` tidak pernah memakainya. Ia hanya diberikan
+#: oleh harness tes.
+ROLE_PREFIX_PATTERN: Final = re.compile(r"\A(|[a-z][a-z0-9]{0,14}_)\Z")
+
+
+class RolePrefixError(ValueError):
+    """Awalan nama role tidak sah."""
+
+
+def require_role_prefix(prefix: str) -> str:
+    """Validasi awalan nama role dan kembalikan apa adanya.
+
+    Raises:
+        RolePrefixError: bila bentuknya tidak sesuai :data:`ROLE_PREFIX_PATTERN`.
+    """
+    if not isinstance(prefix, str) or ROLE_PREFIX_PATTERN.match(prefix) is None:
+        raise RolePrefixError(
+            f"awalan role {prefix!r} tidak sah: harus kosong, atau huruf kecil "
+            "dan angka yang diakhiri garis bawah, maksimum 15 karakter"
+        )
+    return prefix
+
+
+def group_role(process: str) -> str:
+    """Nama role grup untuk ``process``. **Tidak** pernah ber-awalan.
+
+    Nama role grup tertulis harfiah di ``migrations/0002_roles.sql``
+    (``GRANT SELECT ON mandates TO guard_rw``) dan berkas itu terkunci. Jadi
+    role grup adalah satu-satunya nama yang tetap dibagi antar run tes, dan
+    tidak ada cara mengubahnya tanpa menyentuh migrasi.
+
+    Batas itu bisa diterima, dan bukan karena terpaksa: role grup NOLOGIN,
+    tanpa password, dan tidak muncul di file env mana pun. Yang rusak pada
+    insiden yang melahirkan awalan ini adalah role **login** beserta
+    password-nya, dan itulah yang sekarang ber-awalan.
+
+    Raises:
+        KeyError: bila ``process`` bukan proses runtime.
+    """
+    return GROUP_ROLES[process]
+
+
+def login_role(process: str, prefix: str = "") -> str:
+    """Nama role LOGIN untuk ``process``, dengan awalan opsional.
+
+    Raises:
+        KeyError: bila ``process`` bukan proses runtime.
+        RolePrefixError: bila awalannya tidak sah.
+    """
+    return f"{require_role_prefix(prefix)}{LOGIN_ROLES[process]}"
+
+
+def owner_role(prefix: str = "") -> str:
+    """Nama role pemilik objek, dengan awalan opsional.
+
+    Raises:
+        RolePrefixError: bila awalannya tidak sah.
+    """
+    return f"{require_role_prefix(prefix)}{OWNER_ROLE}"
+
+
+def prefixed_roles(prefix: str) -> tuple[str, ...]:
+    """Semua role yang ber-awalan ``prefix``, dalam urutan aman untuk DROP.
+
+    Role login lebih dulu, lalu pemilik objek. Role grup **tidak** ada di sini:
+    ia tidak ber-awalan, jadi ia bukan milik satu run tes dan tidak boleh
+    dihapus atas nama run itu.
+    """
+    require_role_prefix(prefix)
+    if not prefix:
+        return ()
+    return (*(login_role(p, prefix) for p in PROCESSES), owner_role(prefix))
+
 
 #: Tabel yang hanya boleh diakses pemilik. Tidak ada GRANT ke role mana pun.
 OWNER_ONLY_TABLES: Final[frozenset[str]] = frozenset({"schema_migrations"})

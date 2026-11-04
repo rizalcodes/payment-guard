@@ -258,7 +258,7 @@ Tambahan atas bagian 13 PRD v2.1. Semua otomatis kecuali ditandai *review*.
 | ST-34 | Role aplikasi tidak bisa DROP, ALTER, TRUNCATE; tidak ada role yang bisa UPDATE/DELETE `audit_log`; semua role bisa INSERT `audit_log` |
 | ST-35 | `reason` berisi `\x1b[2J`, `\r`, `U+202E`, `U+200B`, `U+009B`, `U+0085`, `U+2028`, `U+00AD`, `U+E0041`, dan baris palsu "Amount: 1" → blok utama identik byte-demi-byte dengan kasus polos |
 | ST-36 | `reason` tampil ter-escape di blok kutipan dan sesuai daftar-izin |
-| ST-37 | Konfirmasi hanya menerima token 6 karakter yang benar |
+| ST-37 | Konfirmasi hanya menerima token 6 karakter yang benar; token **acak** (CSPRNG) dan dibangkitkan ulang tiap prompt, bukan turunan `decision_id`; alfabet Crockford base32 |
 | ST-38 | Matriks hak dicek dua arah dengan `pg_class` (tabel `r`/`p` dan sequence `S`) |
 | ST-39 | Hak efektif tiap (role, objek, hak) sesuai matriks, termasuk kolom UPDATE; tidak ada hak tambahan |
 | ST-40 | Tidak ada grant ke PUBLIC pada objek aplikasi; `schema_migrations` hanya owner |
@@ -287,7 +287,7 @@ Tambahan atas bagian 13 PRD v2.1. Semua otomatis kecuali ditandai *review*.
 | RR-6 | Tanpa rate limit per agent | **Diterima**, opsional v1.x |
 | RR-7 | Role yang dibobol menahan advisory lock (DoS) | **Diterima**, dibatasi `lock_timeout` |
 | RR-8 | Rantai pasok dependensi; kontrak USDC testnet bisa di-upgrade | **Dikurangi** (lockfile, audit), **diterima** |
-| RR-9 | Operator tertipu isi kutipan `reason` meski layar sudah dirancang (anti-injeksi tampilan, bukan jaminan) | **Diterima**. Token konfirmasi anti-refleks, bukan kontrol keamanan. Ditulis di README |
+| RR-9 | Operator tertipu isi kutipan `reason` meski layar sudah dirancang (anti-injeksi tampilan, bukan jaminan) | **Diterima**. Token konfirmasi anti-refleks, bukan kontrol keamanan. Ditulis di README. Sejak 4 Nov 2026 token **acak** per prompt, bukan turunan `decision_id`: nilai turunan bisa dihitung agent karena `decision_id` dikembalikan ke agent, sehingga agent bisa menyelipkan token yang benar ke dalam `reason`. Itu menutup satu jalur bujukan, tapi **tidak** mengubah sifat dasarnya — agent yang bisa menjalankan perintah di mesin operator bisa membaca layarnya (asumsi 2, RR-1) |
 | RR-10 | Envelope yang sudah beredar tidak bisa dibatalkan sampai `valid_until` | **Diterima**. `decision_ttl` pendek |
 | RR-11 | Execution `signed`/`broadcast` tidak dibatalkan saat mandate berganti | **Diterima** (by design, komitmen) |
 | RR-12 | Versi migrasi tidak bisa diverifikasi oleh Guard (`guard_app` tanpa hak ke `schema_migrations`). Database yang dimigrasi setengah jalan lolos start | **Diterima v1**. Mitigasi: langkah operator di README (`guard db status` harus "0 tertunda" sebelum `guard serve`). Perbaikan opsi B — tabel versi khusus lewat migrasi `0003` — ditinjau di M9 |

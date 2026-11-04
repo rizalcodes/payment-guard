@@ -13,6 +13,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+
 from conftest_guard import (
     RECIPIENT_A,
     audit_payloads,
@@ -20,7 +21,6 @@ from conftest_guard import (
     guard_url,
     mandate_document,
 )
-
 from payment_guard.config import GuardConfig
 from payment_guard.db import try_session_lock
 from payment_guard.decision_service import CheckPaymentInput, check_payment

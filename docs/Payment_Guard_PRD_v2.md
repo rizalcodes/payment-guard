@@ -171,7 +171,18 @@ Kejadian `repeated_retry` ke audit log bila >5 `retry_blocked` dalam satu cooldo
 ### 6.5 Alur `needs_human`
 
 - Status `needs_human` **tidak memesan jatah**. Disimpan dengan `created_at`; kedaluwarsa menjadi `expired` setelah `human_wait_ttl_seconds`.
-- `guard approvals approve <id>`: di dalam lock agent → tolak bila sudah `expired`; **cek ulang** `per_tx` dan `daily` dengan data terbaru (gagal → `rejected_by_human` dengan reason_code `over_daily_limit`/`over_per_tx_limit`); bila lolos set `approved_at = now`, `valid_until = now + decision_ttl_seconds`, tanda tangani.
+- `guard approvals approve <id>`: di dalam lock agent → tolak bila sudah `expired`; **cek ulang** `per_tx` dan `daily` dengan data terbaru (gagal → `denied` dengan reason_code `recheck_over_per_tx_limit` atau `recheck_over_daily_limit`); bila lolos set `approved_at = now`, `valid_until = now + decision_ttl_seconds`, tanda tangani.
+
+  > **Revisi, 4 November 2026.** Kalimat ini sebelumnya menulis
+  > `rejected_by_human` dengan reason_code `over_*`. Itu salah pada dua hal.
+  > Pertama, yang menolak di langkah ini adalah **sistem**, bukan manusia:
+  > operator sudah menekan setuju, dan batas yang sudah berubahlah yang
+  > menahannya. `rejected_by_human` hanya untuk penolakan eksplisit operator.
+  > Kedua, pasangan itu tidak bisa ditulis ke database: CHECK
+  > `status_reason_pairs` di `0001_init.sql` hanya mengizinkan
+  > `rejected_by_human` berpasangan dengan `human_rejected`. PRD v2.1 bagian
+  > 6.5 dan Arsitektur v1.1 bagian 7 sudah memakai bentuk yang benar, dan
+  > implementasi di `approvals_cli.py` mengikutinya.
 - `reject` → `rejected_by_human` (memicu cooldown).
 - Agent mengambil hasil lewat `get_decision_status` (hanya untuk decision milik identitas agent ini).
 

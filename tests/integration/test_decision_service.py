@@ -24,6 +24,7 @@ from collections.abc import Callable
 
 import psycopg
 import pytest
+
 from conftest_guard import (
     RECIPIENT_A,
     RECIPIENT_B,
@@ -38,7 +39,6 @@ from conftest_guard import (
     insert_decision,
     sum_approved,
 )
-
 from payment_guard.decision_service import (
     REPEATED_RETRY_THRESHOLD,
     CheckPaymentInput,

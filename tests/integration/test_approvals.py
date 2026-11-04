@@ -15,6 +15,7 @@ import uuid
 
 import psycopg
 import pytest
+
 from conftest_guard import (
     RECIPIENT_A,
     RECIPIENT_B,
@@ -26,7 +27,6 @@ from conftest_guard import (
     guard_url,
     insert_decision,
 )
-
 from payment_guard.approvals_cli import (
     ApprovalError,
     approve,

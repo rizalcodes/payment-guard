@@ -76,8 +76,14 @@ class Event(StrEnum):
     EXECUTION_CONFIRMED = "execution_confirmed"
     #: Receipt revert, atau nonce-nya dipakai transaksi lain. **Bukan** timeout.
     EXECUTION_FAILED = "execution_failed"
-    #: Salah satu dari cek 1..6 gagal; tidak ada transaksi yang dibangun.
-    EXECUTION_REJECTED_CHECK = "execution_rejected_check"
+    #: Salah satu cek Executor gagal; tidak ada transaksi yang dibangun.
+    #:
+    #: Jenis cek yang gagal ada di ``payload["check"]``, dari daftar tertutup
+    #: :data:`payment_guard.executor.REJECTION_REASONS`, **bukan** di nama
+    #: kejadian. Nama yang mengkodekan jenis akan berarti satu nama baru setiap
+    #: kali daftar cek bertambah, dan enum ini berhenti bisa dipakai sebagai
+    #: daftar. Keputusan operator, 4 November 2026.
+    EXECUTION_REJECTED = "execution_rejected"
 
 
 #: Actor yang sah untuk tiap kejadian.
@@ -111,7 +117,7 @@ EVENT_ACTORS: Final[dict[Event, frozenset[Actor]]] = {
     Event.EXECUTION_BROADCAST: frozenset({Actor.EXECUTOR}),
     Event.EXECUTION_CONFIRMED: frozenset({Actor.EXECUTOR}),
     Event.EXECUTION_FAILED: frozenset({Actor.EXECUTOR}),
-    Event.EXECUTION_REJECTED_CHECK: frozenset({Actor.EXECUTOR}),
+    Event.EXECUTION_REJECTED: frozenset({Actor.EXECUTOR}),
 }
 
 #: Kunci payload yang ditolak, apa pun isinya.

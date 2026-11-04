@@ -1,67 +1,32 @@
-"""Fixture integrasi Executor (M5). Tidak menghapus dan tidak merotasi role.
+"""Fixture integrasi Executor (M5). Diimpor oleh ``conftest.py`` di direktori ini.
 
-Diimpor oleh ``conftest.py`` di direktori ini.
+Executor dijalankan sebagai role login ``*_executor_app`` yang sebenarnya,
+bukan sebagai admin, supaya pemeriksaan hak di ``0002_roles.sql`` benar-benar
+berlaku. :func:`assert_connects_as` yang memastikannya: tanpa itu, tes hak
+akses bisa lolos dengan hak berlebih dan membuktikan lebih sedikit dari yang
+disangka.
 
-Mengapa fixture sendiri
------------------------
-
-Rantai fixture integrasi yang ada (``pristine_db`` -> ``bootstrapped`` ->
-``migrated``) melakukan dua hal yang **merusak cluster operator**:
-
-1. ``_drop_managed_roles`` menghapus role ``*_app``.
-2. ``run_bootstrap_roles`` dengan berkas env baru tidak bisa membaca password
-   lama dari Postgres, jadi ia **menyetel ulang** password role login yang
-   sudah ada. Itu membuat ``.env`` operator berhenti cocok.
-
-Keduanya tidak masalah di cluster CI yang bersih, dan memang perlu untuk tes
-idempotensi bootstrap. Tapi tes M5 tidak menguji bootstrap sama sekali; ia
-butuh satu database bermigrasi dan tidak lebih. Jadi fixture di sini:
-
-* **tidak pernah** menghapus role yang tidak ia buat sendiri,
-* **tidak pernah** menyentuh password role mana pun,
-* hanya membuat role **grup** bila belum ada — role NOLOGIN tanpa password,
-  dibuat lewat blok DO yang idempoten, dan dihapus di teardown hanya bila
-  fixture inilah yang membuatnya,
-* hanya menghapus database tes yang ia buat sendiri.
-
-Hak akses tanpa password
-------------------------
-
-Tes ini perlu menjalankan Executor dengan hak ``executor_rw``, bukan sebagai
-admin. Password ``executor_app`` hanya ada di ``.env`` operator, dan tes tidak
-boleh membacanya. Karena itu URL-nya memakai ``options=-c role=executor_rw``:
-libpq menyetel GUC ``role`` saat sesi dibuka, sehingga ``current_user`` menjadi
-role grup itu dan pemeriksaan hak benar-benar berlaku — status superuser tidak
-diwarisi lewat ``SET ROLE``.
-
-Mekanisme itu memeriksa dirinya sendiri di :func:`assert_connects_as`, yang
-dipanggil fixture. Tanpa itu, kegagalan menyetel role akan membuat tes lolos
-dengan hak superuser dan membuktikan lebih sedikit dari yang disangka.
+Versi M5 berkas ini membangun database dan role-nya sendiri, karena rantai
+``pristine_db`` saat itu menghapus role ``*_app`` dan menyetel ulang
+password-nya di cluster yang sama dengan instalasi operator. Sejak M5.1 harness
+berjalan di cluster tes terpisah dengan nama role ber-awalan acak, jadi fixture
+di sini kembali memakai rantai biasa dan semua jalan khusus itu hilang. Lihat
+kepala ``conftest.py``.
 """
 
 from __future__ import annotations
 
 import json
-import secrets
 import uuid
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 import psycopg
 import pytest
-from psycopg import sql
 
-from payment_guard.bootstrap import _create_group_role
 from payment_guard.config import ExecutorConfig
 from payment_guard.mandate import compute_mandate_hash, load_mandate, normalized_form
-from payment_guard.migrate import migrations_dir, run_migrate
-from payment_guard.privileges import GROUP_ROLES, PROCESSES
 from payment_guard.signing import build_payload, sign
-
-#: Awalan database tes M5. Memakai awalan yang sama dengan harness lain supaya
-#: pembersih sisa run lama di ``conftest.py`` juga mengenalinya.
-M5_DB_PREFIX = "pgtest_m5_"
 
 #: Chain id satu-satunya yang didukung v1.
 CHAIN_ID = 84532
@@ -70,26 +35,12 @@ CHAIN_ID = 84532
 USDC_ADDRESS = "0x036cbd53842c5426634e7929541ec2318f3dcf7e"
 
 
-def _replace_dbname(url: str, dbname: str) -> str:
-    base, _, _ = url.rpartition("/")
-    return f"{base}/{dbname}"
-
-
-def role_url(url: str, role: str) -> str:
-    """URL yang sama, tapi sesinya terbuka dengan ``role`` sudah disetel.
-
-    Nilainya di-encode: ``-c role=x`` memuat spasi dan tanda sama dengan, yang
-    keduanya punya arti di dalam conninfo.
-    """
-    pemisah = "&" if "?" in url else "?"
-    return f"{url}{pemisah}options=-c%20role%3D{role}"
-
-
 def assert_connects_as(url: str, expected_role: str) -> None:
     """Pastikan URL benar-benar membuka sesi sebagai ``expected_role``.
 
-    Penjaga untuk mekanisme ``options=-c role=...``. Kalau ia gagal tanpa
-    suara, seluruh tes hak akses di berkas ini akan berjalan sebagai superuser.
+    Penjaga untuk seluruh tes hak akses: kalau URL-nya ternyata milik admin,
+    tes di bawahnya akan lolos dengan hak berlebih dan membuktikan lebih
+    sedikit dari yang disangka.
     """
     with psycopg.connect(url) as conn, conn.cursor() as cur:
         cur.execute("SELECT current_user")
@@ -97,63 +48,28 @@ def assert_connects_as(url: str, expected_role: str) -> None:
         assert row is not None
         assert row[0] == expected_role, (
             f"URL membuka sesi sebagai {row[0]!r}, bukan {expected_role!r}; "
-            "mekanisme options=-c role=... tidak berfungsi dan tes hak akses "
-            "akan berjalan dengan hak berlebih"
+            "tes hak akses akan berjalan dengan hak yang salah"
         )
 
 
-def _ensure_group_roles(conn: psycopg.Connection) -> list[str]:
-    """Buat role grup yang belum ada. Mengembalikan yang BARU dibuat saja.
+@pytest.fixture
+def executor_db(pristine_db: str, migrated: dict[str, str]) -> str:
+    """URL **admin** ke database tes yang sudah dimigrasi penuh.
 
-    Role login tidak disentuh sama sekali, dan tidak ada password yang dibuat
-    atau diubah. Hanya nama yang dikembalikan di sini yang boleh dihapus di
-    teardown.
+    Dipakai untuk menyiapkan keadaan dan untuk membaca ``audit_log``, yang
+    role executor sendiri tidak boleh baca (``0002_roles.sql`` hanya memberinya
+    INSERT di tabel itu).
     """
-    wanted = [GROUP_ROLES[p] for p in PROCESSES]
-    with conn.cursor() as cur:
-        cur.execute("SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)", (wanted,))
-        existing = {row[0] for row in cur.fetchall()}
-        created = [name for name in wanted if name not in existing]
-        for name in created:
-            _create_group_role(cur, name)
-    return created
+    return pristine_db
 
 
 @pytest.fixture
-def executor_db(maintenance: psycopg.Connection, admin_url: str) -> Iterator[str]:
-    """Database tes baru yang sudah dimigrasi penuh, tanpa menyentuh role login.
+def executor_url(migrated: dict[str, str], roles: Any) -> str:
+    """URL role login Executor yang sebenarnya, bukan URL admin."""
+    from payment_guard.config import RUNTIME_URL_ENV_VARS
 
-    Mengembalikan URL admin ke database itu. Migrasi dijalankan oleh role
-    admin, jadi pemilik objeknya admin dan bukan ``migrator_owner``. Itu tidak
-    mengubah apa pun yang diuji di sini: trigger append-only tetap berlaku, dan
-    hak di ``0002_roles.sql`` tetap diberikan ke role grup yang sama.
-    """
-    created_roles = _ensure_group_roles(maintenance)
-
-    dbname = f"{M5_DB_PREFIX}{secrets.token_hex(6)}"
-    with maintenance.cursor() as cur:
-        cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(dbname)))
-    url = _replace_dbname(admin_url, dbname)
-    try:
-        applied = run_migrate(url, migrations_dir())
-        assert [f.label for f in applied] == ["0001_init.sql", "0002_roles.sql"]
-        yield url
-    finally:
-        with maintenance.cursor() as cur:
-            cur.execute(
-                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(dbname))
-            )
-            # Hanya role yang fixture ini buat sendiri. Role yang sudah ada
-            # sebelumnya milik operator dan tidak pernah disentuh.
-            for name in created_roles:
-                cur.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(name)))
-
-
-@pytest.fixture
-def executor_url(executor_db: str) -> str:
-    """URL database tes dengan hak ``executor_rw``, bukan hak admin."""
-    url = role_url(executor_db, GROUP_ROLES["executor"])
-    assert_connects_as(url, GROUP_ROLES["executor"])
+    url = migrated[RUNTIME_URL_ENV_VARS["executor"]]
+    assert_connects_as(url, roles.login("executor"))
     return url
 
 

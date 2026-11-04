@@ -22,6 +22,8 @@ from typing import Any
 
 import psycopg
 import pytest
+
+from conftest import RoleNames
 from conftest_executor import (
     CHAIN_ID,
     USDC_ADDRESS,
@@ -35,7 +37,6 @@ from conftest_executor import (
     set_active_mandate,
 )
 from conftest_guard import RECIPIENT_A, RECIPIENT_B, USDC
-
 from fake_chain import TEST_WALLET_ADDRESS, TEST_WALLET_SEED, FakeChain
 from payment_guard.chain import ChainError
 from payment_guard.config import ExecutorConfig
@@ -55,7 +56,6 @@ from payment_guard.executor import (
     run_execute,
     start_executor,
 )
-from payment_guard.privileges import GROUP_ROLES
 
 pytestmark = pytest.mark.integration
 
@@ -511,7 +511,7 @@ class TestChecksAgainstTheDatabase:
         assert count_executions(executor_db) == 1
         assert chain.distinct_broadcasts() == 1
 
-        payloads = audit_payloads_for(executor_db, "execution_rejected_check")
+        payloads = audit_payloads_for(executor_db, "execution_rejected")
         assert [p["check"] for p in payloads] == [REASON_ALREADY_EXECUTED]
 
     def test_an_expired_envelope_is_refused_and_audited(
@@ -536,7 +536,7 @@ class TestChecksAgainstTheDatabase:
 
         assert outcome.status == OUTCOME_REJECTED
         assert REASON_EXPIRED in keluaran
-        payloads = audit_payloads_for(executor_db, "execution_rejected_check")
+        payloads = audit_payloads_for(executor_db, "execution_rejected")
         assert [p["check"] for p in payloads] == [REASON_EXPIRED]
         assert payloads[0]["decision_id"] == kedaluwarsa
 
@@ -554,6 +554,40 @@ class TestChecksAgainstTheDatabase:
         assert REASON_MANDATE_NOT_ACTIVE in keluaran
         assert fetch_execution(executor_db, seeded["decision_id"]) is None
         assert chain.sent == []
+
+    def test_a_replay_after_a_mandate_change_is_reported_as_a_replay(
+        self, executor_config: ExecutorConfig, executor_db: str, chain: FakeChain, seeded: dict
+    ) -> None:
+        """Cek 5 mendahului cek 4b, dan di sini itulah yang penting.
+
+        Urutan kejadian: keputusan dieksekusi, lalu operator mengganti mandate,
+        lalu envelope yang sama dipakai lagi. Dua cek gagal sekaligus — sudah
+        ada execution, dan mandate-nya bukan yang aktif — dan yang harus
+        tercatat adalah ``already_executed``.
+
+        Kalau urutannya terbalik, satu pergantian mandate sesudah eksekusi
+        akan membuat **setiap** upaya replay sesudahnya tercatat sebagai
+        ``mandate_not_active``. Sinyal pemakaian ulang kredensial hilang di
+        balik keluhan tentang aturan, dan justru sinyal itu yang ingin dilihat.
+        Keputusan operator, 4 November 2026.
+        """
+        pertama, _ = run(executor_config, chain, seeded["decision_id"])
+        assert pertama.status == STATUS_BROADCAST
+
+        baru = seed_mandate(executor_db, agent_id=AGENT_ID, mandate_id="m-003", max_per_tx="30")
+        assert baru != seeded["mandate_hash"]
+        set_active_mandate(executor_db, agent_id=AGENT_ID, mandate_hash=baru)
+
+        ulang, keluaran = run(executor_config, chain, seeded["decision_id"])
+
+        assert ulang.status == OUTCOME_REJECTED
+        assert REASON_ALREADY_EXECUTED in keluaran
+        assert REASON_MANDATE_NOT_ACTIVE not in keluaran
+        assert count_executions(executor_db) == 1
+        assert chain.distinct_broadcasts() == 1
+
+        payloads = audit_payloads_for(executor_db, "execution_rejected")
+        assert [p["check"] for p in payloads] == [REASON_ALREADY_EXECUTED]
 
     def test_a_decision_that_is_not_approved_is_refused(
         self, executor_config: ExecutorConfig, executor_db: str, chain: FakeChain, seeded: dict
@@ -684,9 +718,11 @@ class TestAuditLogStaysAppendOnly:
 
 
 class TestExecutorPrivileges:
-    def test_the_executor_runs_as_the_executor_role(self, executor_config: ExecutorConfig) -> None:
+    def test_the_executor_runs_as_the_executor_role(
+        self, executor_config: ExecutorConfig, roles: RoleNames
+    ) -> None:
         """Penjaga: tes di kelas ini tidak berjalan dengan hak admin."""
-        assert_connects_as(executor_config.db_url, GROUP_ROLES["executor"])
+        assert_connects_as(executor_config.db_url, roles.login("executor"))
 
     def test_those_privileges_are_enough_to_execute(
         self, executor_config: ExecutorConfig, executor_db: str, chain: FakeChain, seeded: dict

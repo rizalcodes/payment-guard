@@ -13,7 +13,9 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg import sql
 
+from conftest import RoleNames
 from payment_guard.bootstrap import MIGRATOR_ENV_KEY
 from payment_guard.db import MigrationError
 from payment_guard.locks import MIGRATE_LOCK_KEY
@@ -348,7 +350,7 @@ class TestPrivilegeNotices:
         assert scalar(url, "SELECT count(*) FROM schema_migrations") == 0
 
     def test_failed_grant_fails_the_migration(
-        self, bootstrapped: dict[str, str], pristine_db: str, tmp_path: Path
+        self, bootstrapped: dict[str, str], pristine_db: str, tmp_path: Path, roles: RoleNames
     ) -> None:
         """GRANT tanpa grant option: berefek nol, hanya WARNING.
 
@@ -358,7 +360,9 @@ class TestPrivilegeNotices:
         """
         with psycopg.connect(pristine_db, autocommit=True) as conn, conn.cursor() as cur:
             cur.execute("CREATE TABLE milik_admin (id int)")
-            cur.execute("GRANT SELECT ON milik_admin TO migrator_owner")
+            cur.execute(
+                sql.SQL("GRANT SELECT ON milik_admin TO {}").format(sql.Identifier(roles.owner))
+            )
 
         directory = tmp_path / "migrations"
         directory.mkdir()
@@ -397,19 +401,19 @@ class TestPrivilegeNotices:
 class TestRolesMigrationGuard:
     """ST-41: 0002_roles.sql harus gagal keras bila role grup belum ada."""
 
-    def test_0002_fails_hard_without_group_roles(self, pristine_roles: str) -> None:
+    def test_0002_fails_hard_without_group_roles(self, pristine_db: str) -> None:
         # Dijalankan sebagai admin, bukan migrator: pada titik ini bootstrap
         # belum jalan, jadi role migrator pun belum ada. Yang diuji di sini
         # adalah penjaga di dalam file SQL, bukan identitas pemanggilnya.
         with pytest.raises(MigrationError) as exc:
-            run_migrate(pristine_roles, REAL_MIGRATIONS)
+            run_migrate(pristine_db, REAL_MIGRATIONS)
         message = str(exc.value)
         assert "jalankan guard db bootstrap-roles dulu" in message
         assert "guard_rw" in message
 
         # 0001 tetap terapan; 0002 dibatalkan penuh.
-        assert scalar(pristine_roles, "SELECT count(*) FROM schema_migrations") == 1
-        assert "audit_log" in table_names(pristine_roles)
+        assert scalar(pristine_db, "SELECT count(*) FROM schema_migrations") == 1
+        assert "audit_log" in table_names(pristine_db)
 
     def test_0002_succeeds_after_bootstrap(self, bootstrapped: dict[str, str]) -> None:
         applied = run_migrate(bootstrapped[MIGRATOR_ENV_KEY], REAL_MIGRATIONS)

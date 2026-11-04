@@ -29,13 +29,12 @@ import psycopg
 import pytest
 from psycopg import sql
 
+from conftest import RoleNames
 from payment_guard.bootstrap import ENV_KEY_FOR_PROCESS, MIGRATOR_ENV_KEY
 from payment_guard.privileges import (
     FORBIDDEN_TABLE_PRIVILEGES,
     GROUP_ROLES,
-    LOGIN_ROLES,
     OWNER_ONLY_TABLES,
-    OWNER_ROLE,
     PROCESSES,
     SEQUENCE_MATRIX,
     TABLE_MATRIX,
@@ -52,8 +51,14 @@ ALL_TABLE_PRIVILEGES = ("SELECT", "INSERT", "UPDATE", *FORBIDDEN_TABLE_PRIVILEGE
 #: Seluruh hak tingkat sequence. Matriks hanya memberi USAGE.
 ALL_SEQUENCE_PRIVILEGES = ("USAGE", "SELECT", "UPDATE")
 
-#: Role aplikasi: role grup dan role LOGIN sekaligus.
-ALL_APP_ROLES = [*GROUP_ROLES.values(), *LOGIN_ROLES.values()]
+
+def all_app_roles(roles: RoleNames) -> list[str]:
+    """Role aplikasi: role grup dan role LOGIN sekaligus.
+
+    Fungsi, bukan konstanta: nama role login ber-awalan acak per tes, jadi
+    daftar tingkat modul akan menyebut role yang tidak pernah ada.
+    """
+    return [*roles.all_groups(), *roles.all_logins()]
 
 
 def _query(url: str, statement: str, params: tuple[object, ...] = ()) -> list[tuple]:
@@ -167,7 +172,7 @@ class TestObjectInventory:
                         problems.append(f"{table}.{column} (matriks {process})")
         assert problems == [], problems
 
-    def test_all_objects_are_owned_by_the_migrator(self, owner_url: str) -> None:
+    def test_all_objects_are_owned_by_the_migrator(self, owner_url: str, roles: RoleNames) -> None:
         """Arsitektur v1.1 3.1: pemilik objek = role migrator, bukan superuser."""
         rows = _query(
             owner_url,
@@ -175,7 +180,7 @@ class TestObjectInventory:
             "JOIN pg_namespace n ON n.oid = c.relnamespace "
             "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p', 'S')",
         )
-        wrong = [(name, owner) for name, owner in rows if owner != OWNER_ROLE]
+        wrong = [(name, owner) for name, owner in rows if owner != roles.owner]
         assert wrong == [], wrong
 
 
@@ -185,7 +190,9 @@ class TestObjectInventory:
 
 
 class TestEffectiveTablePrivileges:
-    def test_group_roles_match_matrix_exactly(self, owner_cur: psycopg.Cursor) -> None:
+    def test_group_roles_match_matrix_exactly(
+        self, owner_cur: psycopg.Cursor, roles: RoleNames
+    ) -> None:
         """Role grup adalah penerima GRANT langsung di 0002_roles.sql."""
         problems = []
         for table in sorted(TABLE_MATRIX):
@@ -193,15 +200,17 @@ class TestEffectiveTablePrivileges:
                 allowed = grant_for(table, process).privileges()
                 for privilege in ALL_TABLE_PRIVILEGES:
                     expected = privilege in allowed
-                    actual = has_table(owner_cur, GROUP_ROLES[process], table, privilege)
+                    actual = has_table(owner_cur, roles.group(process), table, privilege)
                     if actual is not expected:
                         problems.append(
-                            f"{GROUP_ROLES[process]}.{table}.{privilege}: "
+                            f"{roles.group(process)}.{table}.{privilege}: "
                             f"ada={actual}, harus={expected}"
                         )
         assert problems == [], problems
 
-    def test_login_roles_inherit_exactly_the_same(self, owner_cur: psycopg.Cursor) -> None:
+    def test_login_roles_inherit_exactly_the_same(
+        self, owner_cur: psycopg.Cursor, roles: RoleNames
+    ) -> None:
         """Lapis yang sebenarnya dipakai proses: role LOGIN lewat keanggotaan grup."""
         problems = []
         for table in sorted(TABLE_MATRIX):
@@ -209,19 +218,21 @@ class TestEffectiveTablePrivileges:
                 allowed = grant_for(table, process).privileges()
                 for privilege in ALL_TABLE_PRIVILEGES:
                     expected = privilege in allowed
-                    actual = has_table(owner_cur, LOGIN_ROLES[process], table, privilege)
+                    actual = has_table(owner_cur, roles.login(process), table, privilege)
                     if actual is not expected:
                         problems.append(
-                            f"{LOGIN_ROLES[process]}.{table}.{privilege}: "
+                            f"{roles.login(process)}.{table}.{privilege}: "
                             f"ada={actual}, harus={expected}"
                         )
         assert problems == [], problems
 
-    def test_no_role_has_forbidden_privileges(self, owner_cur: psycopg.Cursor) -> None:
+    def test_no_role_has_forbidden_privileges(
+        self, owner_cur: psycopg.Cursor, roles: RoleNames
+    ) -> None:
         """ST-34: tidak ada DELETE, TRUNCATE, REFERENCES, atau TRIGGER di mana pun."""
         problems = []
         for table in sorted(all_matrix_tables()):
-            for role in ALL_APP_ROLES:
+            for role in all_app_roles(roles):
                 for privilege in FORBIDDEN_TABLE_PRIVILEGES:
                     if has_table(owner_cur, role, table, privilege):
                         problems.append(f"{role} punya {privilege} pada {table}")
@@ -231,13 +242,13 @@ class TestEffectiveTablePrivileges:
 class TestEffectiveColumnPrivileges:
     """ST-39 di tingkat kolom, memakai has_column_privilege."""
 
-    def test_update_columns_match_matrix(self, owner_cur: psycopg.Cursor) -> None:
+    def test_update_columns_match_matrix(self, owner_cur: psycopg.Cursor, roles: RoleNames) -> None:
         problems = []
         for table in sorted(TABLE_MATRIX):
             columns = columns_of(owner_cur, table)
             for process in PROCESSES:
                 grant = grant_for(table, process)
-                role = LOGIN_ROLES[process]
+                role = roles.login(process)
                 allowed = set(grant.update_columns or ())
                 for column in columns:
                     if grant.table_level_update:
@@ -253,7 +264,9 @@ class TestEffectiveColumnPrivileges:
                         )
         assert problems == [], problems
 
-    def test_select_is_never_granted_per_column(self, owner_cur: psycopg.Cursor) -> None:
+    def test_select_is_never_granted_per_column(
+        self, owner_cur: psycopg.Cursor, roles: RoleNames
+    ) -> None:
         """Matriks memberi SELECT di tingkat tabel saja.
 
         Role tanpa SELECT pada tabel tidak boleh punya SELECT pada kolom mana
@@ -264,20 +277,22 @@ class TestEffectiveColumnPrivileges:
             columns = columns_of(owner_cur, table)
             for process in PROCESSES:
                 expected = grant_for(table, process).select
-                role = LOGIN_ROLES[process]
+                role = roles.login(process)
                 for column in columns:
                     actual = has_column(owner_cur, role, table, column, "SELECT")
                     if actual is not expected:
                         problems.append(f"{role}: {table}.{column} SELECT ada={actual}")
         assert problems == [], problems
 
-    def test_insert_is_never_granted_per_column(self, owner_cur: psycopg.Cursor) -> None:
+    def test_insert_is_never_granted_per_column(
+        self, owner_cur: psycopg.Cursor, roles: RoleNames
+    ) -> None:
         problems = []
         for table in sorted(TABLE_MATRIX):
             columns = columns_of(owner_cur, table)
             for process in PROCESSES:
                 expected = grant_for(table, process).insert
-                role = LOGIN_ROLES[process]
+                role = roles.login(process)
                 for column in columns:
                     actual = has_column(owner_cur, role, table, column, "INSERT")
                     if actual is not expected:
@@ -286,7 +301,9 @@ class TestEffectiveColumnPrivileges:
 
 
 class TestEffectiveSequencePrivileges:
-    def test_sequence_privileges_match_matrix(self, owner_cur: psycopg.Cursor) -> None:
+    def test_sequence_privileges_match_matrix(
+        self, owner_cur: psycopg.Cursor, roles: RoleNames
+    ) -> None:
         """Hanya USAGE, hanya untuk proses yang terdaftar."""
         problems = []
         for sequence in sorted(SEQUENCE_MATRIX):
@@ -294,7 +311,7 @@ class TestEffectiveSequencePrivileges:
             for process in PROCESSES:
                 for privilege in ALL_SEQUENCE_PRIVILEGES:
                     expected = privilege == "USAGE" and process in owners
-                    for role in (GROUP_ROLES[process], LOGIN_ROLES[process]):
+                    for role in (roles.group(process), roles.login(process)):
                         actual = has_sequence(owner_cur, role, sequence, privilege)
                         if actual is not expected:
                             problems.append(
@@ -330,7 +347,7 @@ class TestNoPublicGrants:
         )
         assert rows == [], f"ada hak kolom untuk PUBLIC: {rows}"
 
-    def test_no_grant_option_was_handed_out(self, owner_url: str) -> None:
+    def test_no_grant_option_was_handed_out(self, owner_url: str, roles: RoleNames) -> None:
         """Role aplikasi tidak boleh bisa meneruskan haknya ke role lain."""
         rows = _query(
             owner_url,
@@ -339,16 +356,16 @@ class TestNoPublicGrants:
             "aclexplode(c.relacl) a "
             "WHERE n.nspname = 'public' AND a.is_grantable "
             "AND pg_get_userbyid(a.grantee) <> %s",
-            (OWNER_ROLE,),
+            (roles.owner,),
         )
         assert rows == [], f"ada hak dengan GRANT OPTION: {rows}"
 
 
 class TestOwnerOnlyTables:
-    def test_no_role_has_any_privilege(self, owner_cur: psycopg.Cursor) -> None:
+    def test_no_role_has_any_privilege(self, owner_cur: psycopg.Cursor, roles: RoleNames) -> None:
         problems = []
         for table in sorted(OWNER_ONLY_TABLES):
-            for role in ALL_APP_ROLES:
+            for role in all_app_roles(roles):
                 for privilege in ALL_TABLE_PRIVILEGES:
                     if has_table(owner_cur, role, table, privilege):
                         problems.append(f"{role} punya {privilege} pada {table}")
@@ -571,9 +588,9 @@ class TestSequenceUsageIsRequired:
             cur.execute(sql.SQL(template).format(sql.Identifier(group)))
 
     def test_insert_fails_without_usage_and_works_after_grant(
-        self, owner_url: str, owner_cur: psycopg.Cursor, process_conn
+        self, owner_url: str, owner_cur: psycopg.Cursor, process_conn, roles: RoleNames
     ) -> None:
-        role = LOGIN_ROLES["executor"]
+        role = roles.login("executor")
         insert = "INSERT INTO audit_log (actor, event, payload) VALUES ('executor', 'st43', '{}')"
 
         # 1. Keadaan produksi: INSERT berhasil.
@@ -599,7 +616,7 @@ class TestSequenceUsageIsRequired:
             conn.commit()
 
     def test_each_owning_process_has_usage_on_its_own_sequence(
-        self, owner_cur: psycopg.Cursor
+        self, owner_cur: psycopg.Cursor, roles: RoleNames
     ) -> None:
         pairs = [
             ("executor", "executions_id_seq"),
@@ -607,7 +624,7 @@ class TestSequenceUsageIsRequired:
             ("reconciler", "reconciliations_id_seq"),
         ]
         for process, sequence in pairs:
-            assert has_sequence(owner_cur, LOGIN_ROLES[process], sequence, "USAGE") is True
+            assert has_sequence(owner_cur, roles.login(process), sequence, "USAGE") is True
 
     def test_sequence_counter_cannot_be_moved_directly(self, process_conn) -> None:
         """USAGE memberi nextval, bukan setval: counter tidak bisa digeser."""

@@ -26,6 +26,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+
 from conftest_guard import (
     RECIPIENT_A,
     USDC,
@@ -33,7 +34,6 @@ from conftest_guard import (
     guard_url,
     sum_approved,
 )
-
 from payment_guard.decision_service import CheckPaymentInput, DecisionResult, check_payment
 from payment_guard.guard_service import GuardSession
 

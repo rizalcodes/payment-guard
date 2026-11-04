@@ -41,6 +41,46 @@ services:
       timeout: 3s
       retries: 20
 
+  # Cluster KEDUA, khusus tes integrasi. Tidak pernah jalan secara bawaan:
+  # ia berada di profile `test`, jadi `docker compose up -d` biasa tidak
+  # menyentuhnya.
+  #
+  #     docker compose --profile test up -d postgres_test
+  #
+  # Alasannya satu insiden nyata. Harness tes membuat dan menghapus role, dan
+  # role Postgres bersifat **cluster-wide**, bukan per database. Selama tes
+  # berjalan di cluster yang sama dengan database operator, satu run tes bisa
+  # menghapus role `*_app` atau menyetel ulang password-nya, dan `.env`
+  # operator berhenti cocok. Itu sudah terjadi.
+  #
+  # Dua cluster membuat kelas kesalahan itu hilang, bukan berkurang. Harness
+  # juga menolak URL yang nama databasenya tidak berakhiran `_test` atau yang
+  # portnya 5434; lihat `tests/integration/conftest.py`.
+  postgres_test:
+    profiles: ["test"]
+    image: postgres:16.10-alpine
+    container_name: payment-guard-postgres-test
+    # Tanpa `restart`: cluster tes tidak perlu hidup di luar sesi tes.
+    environment:
+      POSTGRES_DB: payment_guard_test
+      POSTGRES_USER: guard_admin
+      POSTGRES_PASSWORD: devonly_not_a_secret
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      # Host 5435. BUKAN 5434: port itu milik cluster operator, dan harness
+      # tes menolaknya secara eksplisit.
+      - "127.0.0.1:5435:5432"
+    volumes:
+      - payment-guard-pgdata-test:/var/lib/postgresql/data
+    command: ["postgres", "-c", "log_statement=none", "-c", "log_min_messages=warning"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guard_admin -d payment_guard_test"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
 volumes:
   payment-guard-pgdata:
     name: payment-guard-pgdata
+  payment-guard-pgdata-test:
+    name: payment-guard-pgdata-test

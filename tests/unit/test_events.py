@@ -71,7 +71,7 @@ class TestEnum:
             "execution_broadcast",
             "execution_confirmed",
             "execution_failed",
-            "execution_rejected_check",
+            "execution_rejected",
         }
 
     def test_later_milestone_events_are_absent(self) -> None:

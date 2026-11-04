@@ -198,12 +198,29 @@ skema lain. Sampai itu, rotasi dilakukan manual; lihat Runbook 8.5 pada
 ```bash
 uv run ruff check . && uv run ruff format --check .
 uv run pytest tests/unit          # tanpa database
-uv run pytest                     # termasuk integrasi; butuh docker compose up
+
+# Tes integrasi: cluster TES terpisah, bukan cluster Anda di 5434.
+docker compose --profile test up -d postgres_test
+cp .env.test.example .env.test    # berisi URL cluster tes; di-gitignore
+uv run pytest
 ```
 
-Tes integrasi hanya mau memakai Postgres dari compose project `payment-guard`
-di port 5434. Bila belum jalan, tes gagal dengan pesan yang menyebutkan
-perintahnya — ia tidak akan jatuh ke database lain.
+**Tes integrasi tidak bisa menyentuh cluster Anda, dan itu ditegakkan.** Harness
+menolak jalan kecuali nama databasenya berakhiran `_test`, hostnya loopback, dan
+portnya ditulis eksplisit serta **bukan 5434**. Tidak ada URL bawaan: ia hanya
+datang dari `PAYMENT_GUARD_TEST_ADMIN_DB_URL` atau `.env.test`, dan harness tidak
+pernah membaca `.env` maupun `.env.migrator`.
+
+Itu bukan kehati-hatian teoretis. Role Postgres bersifat **cluster-wide**, bukan
+per database, dan harness membuat serta menghapus role. Versi sebelumnya punya
+URL bawaan yang menunjuk tepat ke database operator; satu run tes cukup untuk
+menghapus role `*_app` dan membuat `.env` berhenti cocok. Nama role login di tes
+kini juga ber-awalan acak per tes (`t<8 hex>_guard_app`), sehingga dua run tidak
+bisa berebut nama.
+
+Role **grup** (`guard_rw` dan seterusnya) tetap tanpa awalan: namanya tertulis
+harfiah di `migrations/0002_roles.sql`, yang terkunci. Role itu NOLOGIN, tanpa
+password, dan tidak muncul di file env mana pun.
 
 ## Pre-commit
 

@@ -258,7 +258,7 @@ sequenceDiagram
   G-->>A: needs_human, decision_id
   H->>DB: probe lock guard:<agent_id> (peringatan bila Guard mati)
   H->>H: tampilkan detail + reason (blok tidak tepercaya) + drift mandate
-  H->>H: konfirmasi token 6 karakter terakhir decision_id
+  H->>H: konfirmasi token 6 karakter ACAK (dibangkitkan tiap prompt)
   H->>DB: BEGIN, lock agent:<agent_id>
   alt now >= expires_at
     H->>DB: expired (decided_at = expires_at), audit decision_expired
@@ -276,7 +276,11 @@ sequenceDiagram
 
 - **Kedaluwarsa lazy:** oleh job atau akses pertama (approve, reject, get_decision_status, daftar approvals). `decided_at` memakai `expires_at`. Waktu deteksi nyata di audit.
 - **Reject eksplisit** → `rejected_by_human (human_rejected)`, memicu cooldown.
-- **Token konfirmasi** = 6 karakter terakhir `decision_id`. Anti-refleks, bukan kontrol keamanan. `decision_id` dikembalikan ke agent di respons `check_payment`.
+- **Token konfirmasi** = 6 karakter **acak**, dibangkitkan ulang setiap kali prompt ditampilkan dan tidak pernah disimpan. Sumber acaknya CSPRNG (`secrets`). Alfabetnya Crockford base32 (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`): tanpa `I`, `L`, `O`, dan `U`, dan masukan dibaca dengan aturan Crockford sehingga `O` dibaca `0` serta `I` dan `L` dibaca `1` — operator yang salah lihat tetap berhasil, bukan ditolak.
+
+  > **Revisi, 4 November 2026.** Spesifikasi sebelumnya adalah "6 karakter terakhir `decision_id`". Itu diganti karena `decision_id` **dikembalikan ke agent** di respons `check_payment`, sehingga agent bisa menghitung sendiri token yang akan diminta ke operator lalu menyelipkannya ke `reason` sebagai bagian dari bujukan. Token acak menutup jalur itu seluruhnya.
+
+  Yang tidak berubah: ini tetap pengaman **anti-refleks** terhadap operator yang menyetujui tanpa membaca, bukan kontrol keamanan terhadap agent. Agent yang bisa menjalankan perintah di mesin operator bisa membaca layarnya, dan token apa pun tidak menolong di sana (Security v1.1 asumsi 2, RR-1, RR-9).
 
 ---
 

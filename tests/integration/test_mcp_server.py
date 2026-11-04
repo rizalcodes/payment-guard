@@ -18,6 +18,8 @@ from typing import Any
 
 import psycopg
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError as McpToolError
+
 from conftest_guard import (
     RECIPIENT_A,
     RECIPIENT_OUTSIDE,
@@ -25,8 +27,6 @@ from conftest_guard import (
     guard_url,
     insert_decision,
 )
-from mcp.server.fastmcp.exceptions import ToolError as McpToolError
-
 from payment_guard.guard_service import GuardSession
 from payment_guard.mcp_server import NOT_FOUND_RESPONSE, build_server, tool_names, tool_schemas
 

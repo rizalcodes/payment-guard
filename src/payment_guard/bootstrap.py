@@ -57,10 +57,11 @@ from payment_guard.db import MigrationError, connect
 from payment_guard.privileges import (
     APP_SCHEMA,
     GROUP_ROLES,
-    LOGIN_ROLES,
-    OWNER_ROLE,
     PROCESSES,
     SCHEMA_USAGE,
+    login_role,
+    owner_role,
+    require_role_prefix,
 )
 
 #: Panjang entropi password role, dalam byte sebelum pengkodean.
@@ -305,14 +306,16 @@ def _grant_membership(cur: psycopg.Cursor, member: str, group: str) -> None:
     cur.execute(sql.SQL("GRANT {} TO {}").format(sql.Identifier(group), sql.Identifier(member)))
 
 
-def _schema_privileges(cur: psycopg.Cursor) -> None:
+def _schema_privileges(cur: psycopg.Cursor, role_prefix: str) -> None:
     """Cabut hak PUBLIC lalu beri USAGE sesuai matriks. Security v1.1 E11, ST-40."""
     schema = sql.Identifier(APP_SCHEMA)
     cur.execute(sql.SQL("REVOKE ALL ON SCHEMA {} FROM PUBLIC").format(schema))
 
     # Migrator memiliki objek, jadi butuh CREATE selain USAGE.
     cur.execute(
-        sql.SQL("GRANT USAGE, CREATE ON SCHEMA {} TO {}").format(schema, sql.Identifier(OWNER_ROLE))
+        sql.SQL("GRANT USAGE, CREATE ON SCHEMA {} TO {}").format(
+            schema, sql.Identifier(owner_role(role_prefix))
+        )
     )
     for process in SCHEMA_USAGE:
         cur.execute(
@@ -328,6 +331,7 @@ def run_bootstrap_roles(
     migrator_env_path: Path,
     *,
     allow_remote_admin: bool = False,
+    role_prefix: str = "",
 ) -> BootstrapResult:
     """Jalankan bootstrap. Idempoten: jalan kedua tidak mengubah keadaan.
 
@@ -339,12 +343,24 @@ def run_bootstrap_roles(
     belum tercatat (password lama tidak bisa dibaca kembali dari Postgres,
     jadi satu-satunya cara memulihkan URL adalah menyetelnya ulang).
 
+    Args:
+        role_prefix: awalan untuk nama role **login** dan role pemilik objek.
+            Kosong di produksi, dan ``guard db bootstrap-roles`` tidak punya
+            flag untuk mengisinya. Ia ada untuk harness tes, supaya satu run
+            tes tidak bisa menyentuh role run lain maupun role operator di
+            cluster yang sama; lihat
+            :func:`payment_guard.privileges.require_role_prefix`. Nama role
+            **grup** tidak ikut ber-awalan, karena ``0002_roles.sql``
+            menuliskannya harfiah.
+
     Raises:
         MigrationError: bila ``admin_url`` menunjuk host non-loopback dan
             ``allow_remote_admin`` tidak disetel, atau bila role penyambung
             tidak punya CREATEROLE.
+        RolePrefixError: bila ``role_prefix`` bentuknya tidak sah.
     """
     require_loopback_admin(admin_url, allow_remote=allow_remote_admin)
+    require_role_prefix(role_prefix)
 
     result = BootstrapResult(env_path=env_path, migrator_env_path=migrator_env_path)
     runtime_env = read_env_file(env_path)
@@ -364,25 +380,26 @@ def run_bootstrap_roles(
 
         # 2. Role pemilik objek (migrator). Bukan superuser, tanpa CREATEROLE.
         #    URL-nya hidup di file terpisah, tidak pernah di .env runtime.
-        owner_existed = _role_exists(cur, OWNER_ROLE)
+        owner = owner_role(role_prefix)
+        owner_existed = _role_exists(cur, owner)
         if owner_existed and migrator_env.get(MIGRATOR_ENV_KEY):
-            result.login_roles_reused.append(OWNER_ROLE)
+            result.login_roles_reused.append(owner)
         else:
             owner_password = _new_password()
             if owner_existed:
-                _set_password(cur, OWNER_ROLE, owner_password)
-                result.login_roles_password_reset.append(OWNER_ROLE)
+                _set_password(cur, owner, owner_password)
+                result.login_roles_password_reset.append(owner)
             else:
-                _create_login_role(cur, OWNER_ROLE, owner_password)
-                result.login_roles_created.append(OWNER_ROLE)
-            migrator_updates[MIGRATOR_ENV_KEY] = build_url(admin_url, OWNER_ROLE, owner_password)
+                _create_login_role(cur, owner, owner_password)
+                result.login_roles_created.append(owner)
+            migrator_updates[MIGRATOR_ENV_KEY] = build_url(admin_url, owner, owner_password)
 
         # 3. Hak tingkat schema. Wewenang admin, bukan migrator.
-        _schema_privileges(cur)
+        _schema_privileges(cur, role_prefix)
 
         # 4. Role LOGIN per proses, anggota role grup masing-masing.
         for process in PROCESSES:
-            login = LOGIN_ROLES[process]
+            login = login_role(process, role_prefix)
             group = GROUP_ROLES[process]
             env_key = ENV_KEY_FOR_PROCESS[process]
             existed = _role_exists(cur, login)

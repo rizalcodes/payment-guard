@@ -58,10 +58,16 @@ src = ["src", "tests"]
 target-version = "py312"
 
 [tool.ruff.lint.isort]
-# `tests/fake_chain.py` dipakai tes unit dan tes integrasi. Tanpa baris ini
-# ruff menggolongkannya sebagai pustaka pihak ketiga dan mengurutkannya
-# bersama paket eksternal.
-known-first-party = ["payment_guard", "fake_chain"]
+# Pembantu tes yang hidup di `tests/` diimpor dengan nama datar (`fake_chain`,
+# `conftest`, ...). Tanpa baris ini ruff menggolongkannya sebagai pustaka pihak
+# ketiga dan mengurutkannya bersama paket eksternal.
+known-first-party = [
+    "payment_guard",
+    "fake_chain",
+    "conftest",
+    "conftest_guard",
+    "conftest_executor",
+]
 
 [tool.ruff.lint]
 select = [

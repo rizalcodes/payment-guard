@@ -15,6 +15,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
+from conftest import RoleNames
 from payment_guard.bootstrap import (
     ENV_KEY_FOR_PROCESS,
     MIGRATOR_ENV_KEY,
@@ -34,16 +35,25 @@ from payment_guard.privileges import (
 
 pytestmark = pytest.mark.integration
 
-ALL_ROLES = [*GROUP_ROLES.values(), *LOGIN_ROLES.values(), OWNER_ROLE]
+#: Pola nama role terkelola. Dipakai sebagai GANTI daftar nama statis:
+#: nama role login dan pemilik objek ber-awalan acak per tes (lihat
+#: `RoleNames` di conftest.py), jadi daftar statis akan selalu kosong.
+#:
+#: Polanya cukup sempit untuk tidak ikut menangkap `guard_admin` maupun
+#: role uji sementara seperti `peran_uji_lemah_*`. Role bawaan Postgres
+#: disaring terpisah di kueri: `pg_database_owner` juga berakhiran `_owner`.
+MANAGED_ROLE_REGEX = "(_rw|_app|_owner)$"
 
 
 def role_attributes(url: str) -> dict[str, tuple[bool, ...]]:
+    """Atribut semua role terkelola di cluster tes, apa pun awalannya."""
     with psycopg.connect(url) as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT rolname, rolcanlogin, rolsuper, rolcreaterole, rolcreatedb, "
             "rolinherit, rolreplication "
-            "FROM pg_roles WHERE rolname = ANY(%s) ORDER BY rolname",
-            (ALL_ROLES,),
+            "FROM pg_roles WHERE rolname ~ %s AND rolname NOT LIKE 'pg\\_%%' "
+            "ORDER BY rolname",
+            (MANAGED_ROLE_REGEX,),
         )
         return {row[0]: tuple(row[1:]) for row in cur.fetchall()}
 
@@ -82,11 +92,11 @@ class TestRolesCreated:
             assert can_replicate is False
 
     def test_login_roles_exist_and_are_not_privileged(
-        self, bootstrapped: dict[str, str], pristine_db: str
+        self, bootstrapped: dict[str, str], pristine_db: str, roles: RoleNames
     ) -> None:
         attrs = role_attributes(pristine_db)
         for process in PROCESSES:
-            name = LOGIN_ROLES[process]
+            name = roles.login(process)
             can_login, is_super, can_createrole, can_createdb, inherits, _ = attrs[name]
             assert can_login is True
             assert is_super is False
@@ -95,24 +105,26 @@ class TestRolesCreated:
             assert inherits is True, f"{name} harus INHERIT agar mewarisi hak role grup"
 
     def test_migrator_owner_is_not_superuser_and_cannot_create_roles(
-        self, bootstrapped: dict[str, str], pristine_db: str
+        self, bootstrapped: dict[str, str], pristine_db: str, roles: RoleNames
     ) -> None:
         """Arsitektur v1.1 3.1: pemilik objek bukan superuser."""
-        can_login, is_super, can_createrole, _, _, _ = role_attributes(pristine_db)[OWNER_ROLE]
+        can_login, is_super, can_createrole, _, _, _ = role_attributes(pristine_db)[roles.owner]
         assert can_login is True
         assert is_super is False
         assert can_createrole is False
 
     def test_each_login_role_is_member_of_its_group(
-        self, bootstrapped: dict[str, str], pristine_db: str
+        self, bootstrapped: dict[str, str], pristine_db: str, roles: RoleNames
     ) -> None:
         found = memberships(pristine_db)
-        expected = {(LOGIN_ROLES[p], GROUP_ROLES[p]) for p in PROCESSES}
+        expected = {(roles.login(p), roles.group(p)) for p in PROCESSES}
         assert expected <= found
 
-    def test_no_cross_membership(self, bootstrapped: dict[str, str], pristine_db: str) -> None:
+    def test_no_cross_membership(
+        self, bootstrapped: dict[str, str], pristine_db: str, roles: RoleNames
+    ) -> None:
         """guard_app tidak boleh jadi anggota executor_rw, dan seterusnya."""
-        expected = {(LOGIN_ROLES[p], GROUP_ROLES[p]) for p in PROCESSES}
+        expected = {(roles.login(p), roles.group(p)) for p in PROCESSES}
         assert memberships(pristine_db) == expected
 
 
@@ -145,27 +157,29 @@ class TestLoginBehaviour:
 
     @pytest.mark.parametrize("process", PROCESSES)
     def test_process_url_connects_as_the_right_role(
-        self, bootstrapped: dict[str, str], process: str
+        self, bootstrapped: dict[str, str], process: str, roles: RoleNames
     ) -> None:
         url = bootstrapped[ENV_KEY_FOR_PROCESS[process]]
         with psycopg.connect(url) as conn, conn.cursor() as cur:
             cur.execute("SELECT current_user")
             row = cur.fetchone()
         assert row is not None
-        assert row[0] == LOGIN_ROLES[process]
+        assert row[0] == roles.login(process)
 
-    def test_migrator_url_connects_as_owner(self, bootstrapped: dict[str, str]) -> None:
+    def test_migrator_url_connects_as_owner(
+        self, bootstrapped: dict[str, str], roles: RoleNames
+    ) -> None:
         with psycopg.connect(bootstrapped[MIGRATOR_ENV_KEY]) as conn, conn.cursor() as cur:
             cur.execute("SELECT current_user")
             row = cur.fetchone()
         assert row is not None
-        assert row[0] == OWNER_ROLE
+        assert row[0] == roles.owner
 
     def test_wrong_password_is_rejected(
-        self, bootstrapped: dict[str, str], pristine_db: str
+        self, bootstrapped: dict[str, str], pristine_db: str, roles: RoleNames
     ) -> None:
         """Password acak benar-benar dipasang, bukan kosong."""
-        url = build_url(pristine_db, LOGIN_ROLES["guard"], "password-yang-salah")
+        url = build_url(pristine_db, roles.login("guard"), "password-yang-salah")
         with pytest.raises(psycopg.OperationalError):
             psycopg.connect(url, connect_timeout=5)
 
@@ -204,10 +218,10 @@ class TestSchemaPrivileges:
         )
 
     def test_migrator_has_create_on_schema(
-        self, bootstrapped: dict[str, str], pristine_db: str
+        self, bootstrapped: dict[str, str], pristine_db: str, roles: RoleNames
     ) -> None:
         with psycopg.connect(pristine_db) as conn, conn.cursor() as cur:
-            cur.execute("SELECT has_schema_privilege(%s, 'public', 'CREATE')", (OWNER_ROLE,))
+            cur.execute("SELECT has_schema_privilege(%s, 'public', 'CREATE')", (roles.owner,))
             row = cur.fetchone()
         assert row is not None and row[0] is True
 
@@ -242,12 +256,12 @@ class TestIdempotence:
         assert sorted(result.login_roles_reused) == sorted([*LOGIN_ROLES.values(), OWNER_ROLE])
 
     def test_second_run_reports_roles_as_existing(
-        self, pristine_roles: str, env_file: Path, migrator_env_file: Path
+        self, pristine_db: str, env_file: Path, migrator_env_file: Path
     ) -> None:
-        first = run_bootstrap_roles(pristine_roles, env_file, migrator_env_file)
+        first = run_bootstrap_roles(pristine_db, env_file, migrator_env_file)
         assert sorted(first.group_roles_created) == sorted(GROUP_ROLES.values())
 
-        second = run_bootstrap_roles(pristine_roles, env_file, migrator_env_file)
+        second = run_bootstrap_roles(pristine_db, env_file, migrator_env_file)
         assert second.group_roles_created == []
         assert sorted(second.group_roles_existing) == sorted(GROUP_ROLES.values())
 
@@ -403,12 +417,12 @@ class TestCreateRoleRequirement:
         weak: tuple[str, str],
         env_file: Path,
         migrator_env_file: Path,
-        pristine_roles: str,
+        pristine_db: str,
     ) -> None:
         url, _ = weak
         with pytest.raises(MigrationError):
             run_bootstrap_roles(url, env_file, migrator_env_file)
-        assert role_attributes(pristine_roles) == {}
+        assert role_attributes(pristine_db) == {}
         assert not env_file.exists()
         assert not migrator_env_file.exists()
 
@@ -478,18 +492,18 @@ class TestRemoteAdminRefusal:
     """
 
     def test_loopback_url_is_accepted(
-        self, pristine_roles: str, env_file: Path, migrator_env_file: Path
+        self, pristine_db: str, env_file: Path, migrator_env_file: Path
     ) -> None:
-        assert "127.0.0.1" in pristine_roles
-        result = run_bootstrap_roles(pristine_roles, env_file, migrator_env_file)
+        assert "127.0.0.1" in pristine_db
+        result = run_bootstrap_roles(pristine_db, env_file, migrator_env_file)
         assert sorted(result.group_roles_created) == sorted(GROUP_ROLES.values())
 
     def test_allow_remote_admin_also_works_for_a_loopback_url(
-        self, pristine_roles: str, env_file: Path, migrator_env_file: Path
+        self, pristine_db: str, env_file: Path, migrator_env_file: Path
     ) -> None:
         """Flag melonggarkan pemeriksaan, bukan mengubah perilaku lainnya."""
         result = run_bootstrap_roles(
-            pristine_roles, env_file, migrator_env_file, allow_remote_admin=True
+            pristine_db, env_file, migrator_env_file, allow_remote_admin=True
         )
         assert sorted(result.group_roles_created) == sorted(GROUP_ROLES.values())
         assert set(read_env(env_file)) == set(ENV_KEY_FOR_PROCESS.values())

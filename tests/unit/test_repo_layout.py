@@ -88,6 +88,44 @@ class TestPythonVersion:
         assert pyproject["project"]["requires-python"] == "==3.12.*"
 
 
+class TestTestLayout:
+    """Tata letak tes itu sendiri, sejauh ia bisa membuat suite tidak jalan."""
+
+    def test_no_two_test_modules_share_a_basename(self) -> None:
+        """``uv run pytest`` mengumpulkan seluruh ``tests/`` sekaligus.
+
+        ``tests/unit`` dan ``tests/integration`` tidak punya ``__init__.py``,
+        jadi pytest mengimpor tiap berkas tes sebagai modul tingkat atas dengan
+        nama basename-nya. Dua berkas bernama sama akan menggagalkan
+        **pengumpulan**, bukan satu tes — seluruh suite berhenti sebelum
+        berjalan.
+
+        Penjaga ini ada karena hal itu benar-benar terjadi: M5 menambahkan
+        ``tests/integration/test_executor.py`` di samping
+        ``tests/unit/test_executor.py``, dan tidak tertangkap karena keduanya
+        hanya pernah dijalankan terpisah.
+        """
+        by_name: dict[str, list[str]] = {}
+        for path in sorted((ROOT / "tests").rglob("test_*.py")):
+            by_name.setdefault(path.name, []).append(str(path.relative_to(ROOT)).replace("\\", "/"))
+        bentrok = {name: paths for name, paths in by_name.items() if len(paths) > 1}
+        assert bentrok == {}, f"basename ganda: {bentrok}"
+
+    def test_the_guard_would_catch_a_collision(self) -> None:
+        """Penjaga untuk penjaga: ia memang membandingkan basename."""
+        contoh = {"test_x.py": ["tests/unit/test_x.py", "tests/integration/test_x.py"]}
+        assert {k: v for k, v in contoh.items() if len(v) > 1} == contoh
+
+    def test_test_directories_have_no_init_files(self) -> None:
+        """Kalau kelak ada ``__init__.py``, aturan di atas tidak lagi berlaku.
+
+        Tes ini bukan larangan; ia penanda. Menambah ``__init__.py`` adalah
+        pilihan yang sah, tapi ia mengubah cara pytest mengimpor dan membuat
+        impor datar seperti ``from conftest import ...`` berhenti bekerja.
+        """
+        assert list((ROOT / "tests").rglob("__init__.py")) == []
+
+
 class TestDependencies:
     def test_minimal_runtime_dependencies(self, pyproject: dict) -> None:
         names = [

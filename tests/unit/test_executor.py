@@ -291,8 +291,8 @@ class TestLockOrder:
             "lock_mandate_shared",
             "db_now",
             "baca_decisions",
-            "baca_active_mandates",
             "baca_executions",
+            "baca_active_mandates",
         ]
 
 
@@ -599,22 +599,26 @@ class TestCheckFourBActiveMandate:
         assert MANDATE_HASH in hasil.detail
         assert OTHER_MANDATE_HASH in hasil.detail
 
-    def test_it_is_checked_before_the_execution_table(
+    def test_the_execution_table_is_checked_first(
         self, keys: dict[str, Path], registry: dict
     ) -> None:
-        """Urutan brief M5: 4b sebelum 5.
+        """Cek 5 mendahului cek 4b: replay dilaporkan sebagai replay.
 
-        Tabel di PRD v2.1 bagian 9 menuliskannya terbalik. Himpunan envelope
-        yang lolos sama; yang berbeda hanya alasan yang dilaporkan ketika
-        keduanya gagal sekaligus, dan ``mandate_not_active`` adalah sinyal yang
-        lebih serius daripada duplikat.
+        Ketika keputusan sudah pernah dieksekusi **dan** mandate-nya sudah
+        berganti, keduanya benar. Yang harus tercatat adalah
+        ``already_executed``: upaya memakai ulang envelope yang sudah terpakai
+        adalah sinyal replay, dan melaporkannya sebagai ``mandate_not_active``
+        akan menyamarkannya menjadi keluhan tentang aturan.
+
+        Urutan terbalik akan menyembunyikan setiap replay sesudah pergantian
+        mandate pertama. Keputusan operator, 4 November 2026.
         """
         cursor = FakeCursor(
             active_hash=OTHER_MANDATE_HASH, execution=("confirmed", "0x" + "d" * 64)
         )
         hasil = expect_rejection(envelope_text(keys), registry, cursor)
-        assert hasil.reason == REASON_MANDATE_NOT_ACTIVE
-        assert "baca_executions" not in cursor.statements
+        assert hasil.reason == REASON_ALREADY_EXECUTED
+        assert "baca_active_mandates" not in cursor.statements
 
 
 # --------------------------------------------------------------------------- #

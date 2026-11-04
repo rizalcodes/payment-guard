@@ -16,7 +16,10 @@ disetujui orang lain.
 **Daftar cek urutannya tetap, dan gagal di mana pun berarti berhenti.** Tidak
 ada efek samping sampai cek 5 lolos: sebelum itu Executor hanya membaca.
 Alasan penolakannya daftar tertutup (:data:`REJECTION_REASONS`), dicatat ke
-``audit_log`` sebagai ``execution_rejected_check``.
+``audit_log`` sebagai ``execution_rejected``. Jenis cek yang gagal ada di
+payload, bukan di nama kejadian: nama kejadian yang mengkodekan jenis akan
+berarti satu nama baru setiap kali daftar cek bertambah, dan daftar kejadian
+berhenti bisa dipakai sebagai daftar.
 
 **Write-ahead mendahului jaringan.** Transaksi ditandatangani secara lokal,
 sehingga ``tx_hash``, ``nonce``, dan ``raw_tx`` sudah diketahui sebelum ada
@@ -128,8 +131,8 @@ REJECTION_REASONS: Final[tuple[str, ...]] = (
     REASON_NOT_APPROVED,
     REASON_EXPIRED,
     REASON_DECISION_MISMATCH,
-    REASON_MANDATE_NOT_ACTIVE,
     REASON_ALREADY_EXECUTED,
+    REASON_MANDATE_NOT_ACTIVE,
 )
 
 #: Sebab ``execution_failed``. Daftar tertutup, dan keduanya berarti "chain
@@ -390,12 +393,18 @@ def verify_and_plan(
     Karena itu fungsi ini harus dipanggil sebagai langkah pertama di dalam
     transaksi pemanggil.
 
-    Urutan cek mengikuti brief M5: 1, 2, 3 (tanpa database), lalu 3b, 4, 4b,
-    dan 5. Tabel di PRD v2.1 bagian 9 menuliskan 4b **sesudah** 5; himpunan
-    envelope yang lolos sama persis, yang berbeda hanya alasan yang dilaporkan
-    ketika dua cek gagal sekaligus. Urutan di sini melaporkan
-    ``mandate_not_active`` lebih dulu, yang merupakan sinyal yang lebih serius
-    daripada duplikat.
+    Urutan cek: 1, 2, 3 (tanpa database), lalu 3b, 4, 5, dan 4b — sama dengan
+    tabel di PRD v2.1 bagian 9.
+
+    Cek 5 mendahului cek 4b dengan sengaja, dan itu soal apa yang dilaporkan,
+    bukan apa yang lolos: himpunan envelope yang diterima sama untuk kedua
+    urutan. Upaya mengeksekusi ulang keputusan yang sudah pernah dieksekusi
+    adalah **sinyal replay**, dan ia harus tercatat sebagai
+    ``already_executed``. Kalau 4b lebih dulu, cukup satu pergantian mandate
+    sesudah eksekusi untuk membuat setiap upaya replay tercatat sebagai
+    ``mandate_not_active`` — yaitu keluhan tentang aturan, bukan tentang
+    pemakaian ulang kredensial. Yang kedua menyembunyikan yang pertama.
+    Keputusan operator, 4 November 2026.
 
     Raises:
         CheckRejected: pada cek pertama yang gagal.
@@ -413,8 +422,8 @@ def verify_and_plan(
         raise CheckRejected(REASON_EXPIRED, str(exc)) from None
 
     _require_identical_decision(cur, payload)
-    _require_active_mandate(cur, payload)
     _require_no_execution(cur, payload.decision_id)
+    _require_active_mandate(cur, payload)
 
     return ExecutionPlan(
         decision_id=payload.decision_id,
@@ -1085,7 +1094,7 @@ def _read_envelope(conn: psycopg.Connection, decision_id: str) -> str:
 
 
 def _audit_rejection(conn: psycopg.Connection, decision_id: str, reason: str) -> None:
-    """Catat ``execution_rejected_check`` di transaksinya sendiri.
+    """Catat ``execution_rejected`` di transaksinya sendiri.
 
     Transaksi pemeriksaan sudah di-rollback ketika penolakan terjadi, jadi
     catatannya ditulis sesudahnya. Payload memuat alasan dari daftar tertutup
@@ -1094,7 +1103,7 @@ def _audit_rejection(conn: psycopg.Connection, decision_id: str, reason: str) ->
     with conn.transaction(), conn.cursor() as cur:
         audit(
             cur,
-            Event.EXECUTION_REJECTED_CHECK,
+            Event.EXECUTION_REJECTED,
             {"decision_id": decision_id, "check": reason},
         )
 

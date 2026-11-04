@@ -27,6 +27,7 @@ from payment_guard.approvals_cli import (
     approve,
     confirm_with_token,
     make_token,
+    normalize_confirmation,
     reject,
     require_interactive,
     require_uuid,
@@ -136,9 +137,57 @@ class TestConfirmationToken:
     def test_length(self) -> None:
         assert len(make_token()) == CONFIRM_LENGTH == 6
 
-    def test_alphabet_has_no_confusable_characters(self) -> None:
-        for char in "ILO01":
-            assert char not in CONFIRM_ALPHABET, char
+    def test_alphabet_is_crockford_base32(self) -> None:
+        """Alfabetnya tepat 32 simbol Crockford, tanpa I, L, O, dan U."""
+        assert CONFIRM_ALPHABET == "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+        assert len(CONFIRM_ALPHABET) == 32
+        assert len(set(CONFIRM_ALPHABET)) == 32
+
+    @pytest.mark.parametrize("char", "ILOU")
+    def test_the_confusable_letters_are_absent(self, char: str) -> None:
+        assert char not in CONFIRM_ALPHABET
+
+    def test_every_token_uses_only_that_alphabet(self) -> None:
+        for _ in range(200):
+            assert set(make_token()) <= set(CONFIRM_ALPHABET)
+
+    @pytest.mark.parametrize(
+        "diketik,dibaca",
+        [
+            ("O", "0"),
+            ("o", "0"),
+            ("I", "1"),
+            ("i", "1"),
+            ("L", "1"),
+            ("l", "1"),
+            ("ABC", "ABC"),
+            ("  abc  ", "ABC"),
+            ("LOL", "101"),
+        ],
+    )
+    def test_crockford_reading_rules(self, diketik: str, dibaca: str) -> None:
+        """Operator yang salah lihat tetap berhasil, bukan ditolak.
+
+        ``0`` dan ``1`` ada di alfabet; ``O``, ``I``, dan ``L`` tidak. Jadi
+        memetakan yang kedua ke yang pertama tidak menambah tabrakan.
+        """
+        assert normalize_confirmation(diketik) == dibaca
+
+    def test_a_substituted_letter_is_accepted_when_retyped(self) -> None:
+        """Token yang memuat 0 diterima walau operator mengetik O."""
+        out = io.StringIO()
+        confirm_with_token(
+            ParrotStdin(out, ubah=lambda token: token.replace("0", "O").replace("1", "I")), out
+        )
+
+    def test_a_fresh_token_is_generated_for_every_prompt(self) -> None:
+        """Dibangkitkan ulang setiap prompt, bukan sekali lalu dipakai ulang."""
+        terlihat = []
+        for _ in range(20):
+            out = io.StringIO()
+            confirm_with_token(ParrotStdin(out), out)
+            terlihat.append(shown_token(out))
+        assert len(set(terlihat)) > 1, "token sama di setiap prompt"
 
     def test_tokens_differ(self) -> None:
         """Token tetap akan jadi refleks, dan refleks justru yang dihindari."""

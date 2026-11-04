@@ -219,10 +219,11 @@ Yang terjadi, berurutan:
    satu tidak cocok berarti berhenti sebelum apa pun dibangun.
 2. **Recovery.** Execution yang tertinggal dari percobaan sebelumnya diselesaikan
    lebih dulu. Ini idempoten dan biasanya tidak melakukan apa-apa.
-3. **Cek 1 sampai 6.** Tanda tangan, versi dan chain, parse ketat, kedaluwarsa
-   menurut jam **database**, kecocokan dengan baris `decisions`, mandate yang
-   masih aktif, dan belum adanya execution. Gagal di mana pun berarti berhenti
-   dan tercatat sebagai `execution_rejected_check`.
+3. **Cek 1 sampai 6**, urutannya 1, 2, 3, 3b, 4, 5, 4b: tanda tangan, versi dan
+   chain, parse ketat, kedaluwarsa menurut jam **database**, kecocokan dengan
+   baris `decisions`, belum adanya execution, lalu mandate yang masih aktif.
+   Gagal di mana pun berarti berhenti dan tercatat sebagai
+   `execution_rejected`, dengan jenis cek yang gagal di payload-nya.
 4. **Write-ahead.** Transaksi ditandatangani secara lokal, lalu `tx_hash`,
    `nonce`, dan `raw_tx` ditulis ke `executions` dengan status `signed` dan
    **di-commit** — sebelum ada apa pun yang terkirim ke jaringan.
@@ -313,7 +314,7 @@ Tidak ada `reason` dari agent di `audit_log` mana pun. Teks itu hanya hidup di
 | `address ... tidak cocok dengan kuncinya` | Berkas wallet tertukar atau diedit. |
 | `ditolak (expired)` | Envelope melewati `valid_until`. Minta persetujuan baru; envelope tidak bisa diperpanjang. |
 | `ditolak (mandate_not_active)` | Mandate berganti setelah persetujuan. Minta persetujuan baru di bawah aturan yang sekarang. |
-| `ditolak (already_executed)` | Keputusan sekali pakai, termasuk bila eksekusinya `failed`. Minta persetujuan baru. |
+| `ditolak (already_executed)` | Keputusan sekali pakai, termasuk bila eksekusinya `failed`. Minta persetujuan baru. Alasan ini menang atas `mandate_not_active` bila keduanya benar: upaya memakai ulang envelope adalah sinyal replay, dan itu yang perlu terlihat. |
 | `broadcast gagal: ...` | Barisnya tetap `signed`. Jalankan `guard recover`; byte yang sama disiarkan ulang. |
 
 Apa pun yang terjadi, **jangan** menghapus baris `executions` untuk "mencoba

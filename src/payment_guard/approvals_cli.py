@@ -78,10 +78,24 @@ from payment_guard.untrusted import render_untrusted
 #: "token" dengan nilai string sebagai rahasia yang ditanam di kode. Temuan
 #: palsu itu tidak dimatikan dengan ``noqa``, melainkan dihilangkan penyebabnya,
 #: supaya aturannya tetap ketat untuk rahasia yang sungguhan.
-CONFIRM_ALPHABET: Final = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+#: Alfabet Crockford base32: sepuluh digit dan dua puluh dua huruf.
+#:
+#: ``I``, ``L``, ``O``, dan ``U`` tidak ada. Tiga yang pertama karena mudah
+#: tertukar dengan ``1``, ``1``, dan ``0``; yang keempat karena Crockford
+#: membuangnya supaya token acak tidak membentuk kata yang tidak diinginkan.
+#:
+#: ``0`` dan ``1`` **tetap ada**, dan itu bukan kelalaian. Crockford menangani
+#: kebingungan itu di sisi pembacaan, bukan dengan memperkecil alfabet: lihat
+#: :func:`normalize_confirmation`, yang memetakan ``O`` ke ``0`` serta ``I``
+#: dan ``L`` ke ``1``. Hasilnya operator yang mengetik ``O`` tetap berhasil,
+#: bukan ditolak karena salah lihat.
+CONFIRM_ALPHABET: Final = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 #: Panjang token konfirmasi (Arsitektur v1.1 bagian 7).
 CONFIRM_LENGTH: Final = 6
+
+#: Pemetaan pembacaan Crockford, diterapkan pada masukan yang sudah huruf besar.
+_CONFIRM_SUBSTITUTIONS: Final[dict[str, str]] = {"O": "0", "I": "1", "L": "1"}
 
 #: ``guard_running`` ditulis ke audit sebagai string, bukan bool.
 #:
@@ -214,8 +228,40 @@ class _MandateContext:
 
 
 def make_token() -> str:
-    """Token konfirmasi enam karakter, dari sumber acak kriptografis."""
+    """Token konfirmasi enam karakter, dari sumber acak kriptografis.
+
+    Dibangkitkan **setiap kali** prompt ditampilkan, dan tidak pernah disimpan:
+    token yang tetap akan dihafal, dan hafalan adalah refleks — justru yang
+    hendak dihindari.
+
+    Token ini **bukan** turunan dari ``decision_id``. Arsitektur v1.1 bagian 7
+    sempat menetapkan "enam karakter terakhir ``decision_id``"; itu diganti
+    karena ``decision_id`` dikembalikan ke agent lewat jawaban
+    ``check_payment``, sehingga agent bisa menghitung sendiri token yang akan
+    diminta ke operator, lalu menyelipkannya ke ``reason`` sebagai bagian dari
+    bujukan. Token acak menutup jalur itu seluruhnya. Keputusan operator,
+    4 November 2026.
+
+    Yang tetap jujur: ini pengaman **anti-refleks** terhadap operator yang
+    menyetujui tanpa membaca, bukan kontrol keamanan terhadap agent. Agent yang
+    bisa menjalankan perintah di mesin operator bisa membaca layarnya, dan
+    token apa pun tidak menolong di sana (Security v1.1 asumsi 2, RR-1).
+    """
     return "".join(secrets.choice(CONFIRM_ALPHABET) for _ in range(CONFIRM_LENGTH))
+
+
+def normalize_confirmation(typed: str) -> str:
+    """Baca token yang diketik operator, dengan aturan pembacaan Crockford.
+
+    Huruf besar-kecil diabaikan, spasi di tepi dibuang, dan ``O`` dibaca ``0``
+    sementara ``I`` dan ``L`` dibaca ``1``. Ketiga huruf itu tidak pernah
+    muncul di token yang dibangkitkan, jadi memetakannya tidak menambah
+    tabrakan: ia hanya memaafkan salah lihat.
+    """
+    tegak = typed.strip().upper()
+    for salah, benar in _CONFIRM_SUBSTITUTIONS.items():
+        tegak = tegak.replace(salah, benar)
+    return tegak
 
 
 def require_interactive(stdin: TextIO) -> None:
@@ -243,7 +289,7 @@ def confirm_with_token(stdin: TextIO, out: TextIO) -> None:
     out.write("token> ")
     out.flush()
     typed = stdin.readline()
-    if not typed or typed.strip().upper() != token:
+    if not typed or normalize_confirmation(typed) != token:
         raise ApprovalError("token konfirmasi tidak cocok; tidak ada yang diubah")
 
 
