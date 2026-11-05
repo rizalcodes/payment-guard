@@ -472,18 +472,28 @@ pembayaran pertama.
 ### a. Catat alamat wallet Executor
 
 ```bash
-guard execute <decision_id>
+guard wallet
 ```
 
-Laporan startup-nya memuat baris:
+Keluarannya satu baris:
 
 ```
 wallet 0x<alamat-wallet-executor>
 ```
 
 Alamat itu **diturunkan dari berkas kunci** Executor, bukan dari `.env`. Catat
-apa adanya. (Perintahnya boleh gagal sesudah baris itu — misalnya karena
-keputusannya tidak ada; yang dibutuhkan hanya laporan startup-nya.)
+apa adanya.
+
+`guard wallet` hanya membaca satu berkas: tanpa koneksi database, tanpa
+jaringan, dan tanpa transaksi yang dibangun maupun disiarkan. Ia tidak punya
+argumen yang bisa mengubah itu.
+
+> **Jangan memakai `guard execute` untuk membaca alamat.** Laporan startup-nya
+> juga mencetak baris `wallet …`, dan versi awal checklist ini memang
+> menyuruh begitu — itu keliru. `guard execute` **menyiarkan transaksi** bila
+> seluruh ceknya lolos, dan ia tidak punya mode baca-saja. Memakainya untuk
+> membaca satu alamat berarti mempertaruhkan pembayaran sungguhan pada harapan
+> bahwa salah satu cek akan menolak.
 
 ### b. Catat alamat yang dipantau Watcher
 
@@ -510,15 +520,15 @@ Bandingkan **tanpa peka huruf besar/kecil**: explorer menampilkan alamat
 ber-checksum EIP-55, `.env` mungkin memuat bentuk itu, dan sistem menyimpannya
 lowercase. Ketiganya harus menunjuk alamat yang sama:
 
-1. yang dicetak `guard execute` (dari berkas kunci),
+1. yang dicetak `guard wallet` (dari berkas kunci),
 2. yang dicetak `guard watch` (dari `.env`),
 3. nilai `EXECUTOR_WALLET_ADDRESS` di `.env`.
 
 Untuk membandingkan tanpa menyalin dengan mata:
 
 ```bash
-# Ketik ulang kedua alamat dari laporan startup di atas.
-a=$(printf '%s' '<alamat-dari-guard-execute>' | tr 'A-F' 'a-f')
+# Ketik ulang kedua alamat dari keluaran di atas.
+a=$(printf '%s' '<alamat-dari-guard-wallet>' | tr 'A-F' 'a-f')
 b=$(printf '%s' '<alamat-dari-guard-watch>'   | tr 'A-F' 'a-f')
 [ "$a" = "$b" ] && echo COCOK || echo "TIDAK COCOK"
 ```

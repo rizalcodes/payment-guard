@@ -9,6 +9,36 @@ yang ditolak dan mengapa.
 
 ---
 
+## M6.3.1 — perintah baca terpisah untuk alamat wallet
+
+Perintah baca terpisah lebih aman daripada memakai perintah yang menyiarkan
+transaksi untuk membaca alamat. Disetujui CoS 6 Nov 2026.
+
+Checklist M6.3 langkah (a) menyuruh menjalankan `guard execute` untuk membaca
+alamat wallet dari laporan startup-nya. `guard execute` menyiarkan transaksi
+bila seluruh ceknya lolos, dan tidak punya mode baca-saja. Checklist itu
+bahkan menuliskan "perintahnya boleh gagal sesudah baris itu" — yaitu
+bersandar pada harapan bahwa salah satu cek akan menolak. Kalau seluruh cek
+lolos, yang justru keadaan normal untuk keputusan yang baru disetujui,
+pembayaran sungguhan terkirim.
+
+Tiga pilihan yang dipertimbangkan:
+
+| | Cara | Mengapa tidak / ya |
+|---|---|---|
+| A | Tambah `--dry-run` ke `guard execute` | Satu flag memisahkan baca dari menyiarkan di perintah yang sama. Salah ketik, flag yang hilang dari riwayat shell, atau `--dry-run` yang tidak ikut tersalin dari dokumen — semuanya menyiarkan. Jalur baca dan jalur bayar tidak boleh berbagi satu perintah. |
+| B | Baca `.env` dan berkas kunci dengan `jq`/`python` di runbook | Tidak ada perintah baru, tapi prosedurnya menyuruh operator membuka berkas kunci dengan alat umum — dan dari situ ke `cat` yang menampilkan `private_key` hanya satu salah ketik. |
+| **C** | **Perintah baru `guard wallet`, read-only** | Dipilih. Tidak ada jalan dari perintah ini ke penyiaran, bahkan dengan argumen yang salah. Ia juga tidak pernah mencetak field selain alamat. |
+
+Yang membuat C murah: tidak ada logika baru. `load_wallet` sudah ada dan sudah
+memeriksa bahwa `address` di berkas cocok dengan yang diturunkan dari
+kuncinya; `guard wallet` hanya memanggilnya dan mencetak satu field.
+
+Permukaannya dijaga sempit dengan sengaja: satu argumen, `--env-file`. Ada tes
+yang menolak `--yes`, `--broadcast`, `--execute`, `--force`, dan `--send`.
+Bukan karena seseorang akan menambahkannya hari ini, tapi karena perintah yang
+permukaannya tumbuh akan berhenti bisa dipercaya sebagai perintah baca.
+
 ## M6.3 — celah alamat wallet sebelum pembayaran pertama
 
 Celah alamat wallet sebelum pembayaran pertama: diterima, ditutup dengan

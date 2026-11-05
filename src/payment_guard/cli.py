@@ -231,6 +231,47 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
         return 1
 
 
+def _cmd_wallet(args: argparse.Namespace) -> int:
+    """Cetak alamat wallet Executor. Satu baris, tanpa menyentuh apa pun.
+
+    Tidak ada koneksi database, tidak ada RPC, tidak ada transaksi yang
+    dibangun maupun disiarkan. Ia membaca satu berkas dan menurunkan satu
+    alamat dari kuncinya.
+
+    Alasan perintah ini ada: sebelum M6.3.1, checklist operator menyuruh
+    menjalankan ``guard execute`` untuk **membaca** alamat wallet dari laporan
+    startup-nya. ``guard execute`` menyiarkan transaksi bila seluruh ceknya
+    lolos, dan ia tidak punya mode baca-saja. Memakai perintah yang
+    membelanjakan uang untuk membaca satu alamat adalah kekeliruan yang hanya
+    perlu terjadi sekali.
+    """
+    # Lazy: modul chain menarik web3 dan eth-account, yang mahal diimpor.
+    # Keduanya tidak membuka koneksi apa pun saat diimpor maupun saat
+    # menurunkan alamat dari kunci.
+    from payment_guard.chain import ChainError, load_wallet
+    from payment_guard.config import load_wallet_key_path
+
+    try:
+        path = load_wallet_key_path(args.env_file, repo_root=_repo_root())
+    except GuardConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        wallet = load_wallet(path)
+    except ChainError as exc:
+        # Pesan `ChainError` dari `load_wallet` menyebut path dan alasannya,
+        # dan tidak pernah bahan kuncinya; lihat docstring-nya.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    # Satu baris, dan hanya alamatnya. Bentuknya sama dengan baris yang
+    # dicetak laporan startup Executor, supaya keduanya bisa dibandingkan
+    # tanpa menafsirkan apa pun.
+    print(f"wallet {wallet.address}")
+    return 0
+
+
 def _cmd_verify(args: argparse.Namespace) -> int:
     outcome = verify_envelope_file(args.envelope, args.pubkey, args.mandate)
     print(outcome.render())
@@ -463,6 +504,30 @@ def build_parser() -> argparse.ArgumentParser:
             "Memakai RECONCILER_DB_URL saja; tidak ada RPC_URL."
         ),
     )
+
+    # --- wallet: baca satu berkas, cetak satu alamat. Tidak lebih. ---
+    #
+    # SENGAJA tanpa argumen selain `--env-file`. Tidak ada `--yes`, tidak ada
+    # `--broadcast`, tidak ada mode lain: perintah yang hanya bisa melakukan
+    # satu hal tidak bisa disuruh melakukan hal lain, dan itulah seluruh
+    # gunanya dibanding membaca alamat dari laporan startup `guard execute`.
+    wallet_parser = sub.add_parser(
+        "wallet",
+        help=(
+            "cetak alamat wallet Executor dari berkas kuncinya; "
+            "tanpa database, tanpa jaringan, tanpa transaksi"
+        ),
+    )
+    wallet_parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help=(
+            f"file konfigurasi runtime (default: {RUNTIME_ENV_FILENAME} di akar repo). "
+            "Hanya EXECUTOR_KEY_PATH yang dibaca."
+        ),
+    )
+    wallet_parser.set_defaults(handler=_cmd_wallet)
 
     # --- verify: hanya kunci publik, tanpa database dan tanpa jaringan ---
     verify_parser = sub.add_parser(

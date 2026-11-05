@@ -887,6 +887,38 @@ def load_reconciler_config(env_file: Path) -> ReconcilerConfig:
     )
 
 
+def load_wallet_key_path(env_file: Path, *, repo_root: Path) -> Path:
+    """Path berkas kunci wallet Executor saja, tanpa konfigurasi lain.
+
+    Dipakai ``guard wallet``, yang hanya mencetak alamat turunan. Ia **tidak**
+    memakai :func:`load_executor_config`, dan itu bukan penghematan: pemuat itu
+    menuntut ``EXECUTOR_DB_URL`` dan memvalidasi ``RPC_URL``, jadi
+    ``guard wallet`` akan gagal karena database yang belum di-bootstrap atau
+    endpoint yang belum diisi — padahal ia tidak menyentuh keduanya. Perintah
+    baca yang gagal karena hal yang tidak dipakainya akan mendorong orang
+    memakai perintah lain yang "kebetulan" juga mencetak alamat, dan perintah
+    itu menyiarkan transaksi.
+
+    Pemeriksaannya sama dengan yang dilakukan pemuat Executor untuk field ini:
+    berkasnya harus ada, dan harus di **luar** akar repo.
+
+    Raises:
+        GuardConfigError: bila variabelnya kosong, berkasnya tidak ada, atau
+            berkasnya berada di dalam repo.
+    """
+    var = EXECUTOR_ENV_VARS["wallet_key_path"]
+    from_file = read_env_file(env_file)
+    raw = (os.environ.get(var) or from_file.get(var) or "").strip()
+    if not raw:
+        raise GuardConfigError(
+            f"{var} belum diisi. Isi di {env_file.name} dengan path berkas kunci "
+            "wallet Executor, di luar akar repo."
+        )
+    path = _require_existing_file(var, raw, env_file)
+    _require_outside_repo(var, path, repo_root)
+    return path
+
+
 def _require_address(var: str, raw: str) -> str:
     """Alamat ternormalisasi lowercase, atau :class:`GuardConfigError`."""
     try:

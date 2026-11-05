@@ -39,6 +39,52 @@ bagian 2). Lihat `docs/decisions.md`.
 
 ---
 
+## M6.3.1 — `guard wallet` (read-only), dan koreksi atas checklist M6.3
+
+Belum ditag.
+
+**Koreksi.** Langkah (a) checklist M6.3 sebelumnya memakai `guard execute`,
+dikoreksi ke `guard wallet` sebelum dipakai operator.
+
+Itu kekeliruan saya di M6.3. `guard execute` **menyiarkan transaksi** bila
+seluruh ceknya lolos, dan ia tidak punya mode baca-saja — tidak ada
+`--dry-run`, tidak ada `--read-only`, dan `run_execute` memanggil
+`execute_decision` tepat setelah `start_executor`. Checklist itu menyuruh
+operator menjalankannya hanya untuk membaca satu baris dari laporan
+startup-nya, dengan catatan "perintahnya boleh gagal sesudah baris itu".
+Artinya ia bersandar pada harapan bahwa salah satu cek akan menolak. Kalau
+seluruh cek lolos — yang justru keadaan normal untuk keputusan yang baru
+disetujui — pembayaran sungguhan terkirim.
+
+Tidak ada yang pernah menjalankannya: checklist itu ditulis kemarin dan belum
+dipakai. Tapi ia sudah ter-commit, dan itu cukup.
+
+**Perintah baru: `guard wallet`.** Read-only. Membaca `EXECUTOR_KEY_PATH`,
+menurunkan alamatnya lewat `load_wallet` yang sudah ada, mencetak satu baris
+`wallet 0x…`, lalu keluar. Tanpa koneksi database, tanpa RPC, tanpa transaksi
+yang dibangun maupun disiarkan.
+
+Ia **tidak** memakai `load_executor_config`, dan itu bukan penghematan:
+pemuat itu menuntut `EXECUTOR_DB_URL` dan memvalidasi `RPC_URL`, jadi
+`guard wallet` akan gagal karena database yang belum di-bootstrap — dan
+perintah baca yang gagal karena hal yang tidak dipakainya akan mendorong orang
+kembali memakai `guard execute`. Pemuat sempit `load_wallet_key_path`
+ditambahkan untuk itu, dengan pemeriksaan yang sama (berkas ada, di luar repo).
+
+Permukaannya sengaja sekecil mungkin: satu argumen, `--env-file`. Tidak ada
+`--yes`, tidak ada `--broadcast`. Perintah yang hanya bisa melakukan satu hal
+tidak bisa disuruh melakukan hal lain.
+
+25 tes unit, termasuk dua yang membuktikan ia tidak menyentuh apa pun dengan
+memasang `psycopg.connect` dan `Web3` yang **gagal bila dipanggil** —
+pengganti yang hanya mencatat pemanggilan akan lulus selama tidak ada yang
+memeriksa catatannya.
+
+Dua kemunculan `guard execute` yang tersisa di runbook (bagian 4 dan 5) adalah
+rujukan ke perintah itu sebagai perintah **tulis**, dan tetap benar.
+
+---
+
 ## M6.3 — checklist operator untuk celah alamat wallet
 
 Belum ditag.

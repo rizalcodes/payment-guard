@@ -154,6 +154,7 @@ jaringan beserta sumber verifikasinya, ada di
 | `guard recover` | operator | `.env` | Selesaikan execution `signed` atau `broadcast` yang tertinggal |
 | `guard watch` | operator, proses panjang | `.env` | Pindai log `Transfer` USDC dari wallet Executor menjadi `settlements` |
 | `guard reconcile` | operator | `.env` | Cocokkan `settlements` dengan `executions` dan `decisions`; satu siklus |
+| `guard wallet` | operator | `.env` | Cetak alamat wallet Executor dari berkas kuncinya. Tanpa database, tanpa jaringan, tanpa transaksi |
 | `guard verify` | operator | — | Periksa envelope dengan kunci publik saja |
 
 `approvals` memakai `APPROVER_DB_URL` dari `.env`, bukan URL Guard: hanya role
@@ -182,6 +183,7 @@ Flag per perintah:
 | `recover` | `--env-file` |
 | `watch` | `--loop`, `--cycles N`, `--from-block BLOK`, `--env-file` |
 | `reconcile` | `--env-file` |
+| `wallet` | `--env-file` |
 | `verify` | `<envelope>` (posisional), `--pubkey`, `--mandate` |
 
 `execute` dan `recover` memakai `EXECUTOR_DB_URL`, `EXECUTOR_KEY_PATH`, dan
