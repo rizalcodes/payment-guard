@@ -13,8 +13,49 @@ apa yang terjadi pada tag dan commit.
 Hal yang **sengaja** belum dikerjakan, dengan alasannya. Dihapus dari daftar
 ini hanya ketika benar-benar selesai.
 
-*Kosong.* Utang satu-satunya — B3, cek alamat wallet saat start — ditutup di
-M6.2; catatannya di bawah dibiarkan sebagai riwayat.
+### Celah alamat wallet sebelum pembayaran pertama — DITUTUP dengan checklist
+
+**Ditutup dengan prosedur, bukan dengan kode.** Disetujui CoS 6 Nov 2026.
+
+Penjaga saat start dari M6.2 membandingkan `EXECUTOR_WALLET_ADDRESS` dengan
+`from_addr` di `executions`. Sebelum pembayaran pertama tabel itu kosong, jadi
+penjaganya melewatkan pemeriksaan — dengan sengaja, karena menolak start di
+sana berarti Watcher tidak bisa dijalankan sebelum pembayaran pertama.
+
+Yang menutupnya adalah checklist operator di `docs/runbook.md` bagian 10:
+bandingkan alamat yang dicetak `guard execute` (dari berkas kunci) dengan yang
+dicetak `guard watch` (dari `.env`), tanpa peka huruf besar/kecil, sekali
+sebelum pembayaran pertama.
+
+**Ini prosedur manusia, dan itu perlu disebut jujur.** Prosedur bisa dilewati,
+dan tidak ada yang akan menghentikan operator yang melewatinya. Yang menahan
+sesudah pembayaran pertama adalah penjaga saat start; yang melaporkan
+belakangan adalah `executed_not_settled` di Reconciler. Keduanya tidak menutup
+jendela sebelum pembayaran pertama.
+
+Tidak ditutup dengan kode karena satu-satunya sumber lain untuk alamat itu
+adalah berkas kunci Executor, dan Watcher tidak boleh membacanya (Arsitektur
+bagian 2). Lihat `docs/decisions.md`.
+
+---
+
+## M6.3 — checklist operator untuk celah alamat wallet
+
+Belum ditag.
+
+Tidak ada perubahan perilaku. `guard watch` dan `guard execute` **sudah**
+mencetak alamatnya masing-masing sejak M6 dan M5; yang kurang adalah prosedur
+yang menyuruh operator membandingkannya, dan satu tes yang menjaga baris
+Watcher itu tetap ada.
+
+- `docs/runbook.md` bagian 10 baru: checklist enam langkah, dengan placeholder
+  — tidak ada alamat asli yang bisa disalin begitu saja.
+- Satu kelas tes baru (`TestStartupPrintsTheMonitoredWallet`, 3 tes): baris
+  startup memuat alamat dari **konfigurasi**, bukan nilai turunan, dan tidak
+  memuat apa pun berbentuk `0x` + 64 hex.
+- `docs/decisions.md` dan bagian "Utang terbuka" di atas.
+
+Migrasi, matriks hak, PRD, dan Arsitektur tidak disentuh.
 
 ---
 

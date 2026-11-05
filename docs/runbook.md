@@ -454,3 +454,99 @@ Watcher menolak start dengan pesan yang menyebut dua alamat: yang diharapkan
    catat bahwa pembayaran dari wallet lama tidak akan terpantau.
 4. Kejadiannya ada di `audit_log` sebagai `alarm_watcher_wallet_mismatch`,
    lengkap dengan kedua alamat. Baris itu ditulis sebelum Watcher keluar.
+
+---
+
+## 10. Checklist sebelum pembayaran pertama
+
+Penjaga alamat wallet di bagian 9 membandingkan `EXECUTOR_WALLET_ADDRESS`
+dengan `from_addr` di `executions`. **Sebelum pembayaran pertama, tabel itu
+kosong**, jadi tidak ada apa pun untuk dibandingkan dan penjaganya melewatkan
+pemeriksaan — dengan sengaja: menolak start di sana berarti Watcher tidak bisa
+dijalankan sebelum pembayaran pertama, padahal justru pembayaran pertama yang
+ingin dilihatnya.
+
+Celah itu ditutup oleh checklist ini, bukan oleh kode. Lakukan sekali, sebelum
+pembayaran pertama.
+
+### a. Catat alamat wallet Executor
+
+```bash
+guard execute <decision_id>
+```
+
+Laporan startup-nya memuat baris:
+
+```
+wallet 0x<alamat-wallet-executor>
+```
+
+Alamat itu **diturunkan dari berkas kunci** Executor, bukan dari `.env`. Catat
+apa adanya. (Perintahnya boleh gagal sesudah baris itu — misalnya karena
+keputusannya tidak ada; yang dibutuhkan hanya laporan startup-nya.)
+
+### b. Catat alamat yang dipantau Watcher
+
+```bash
+guard watch --cycles 1 --from-block <blok-awal>
+```
+
+Laporan startup-nya memuat:
+
+```
+watcher siap: chain 84532, USDC 0x<alamat-usdc> (6 desimal),
+memantau transfer dari 0x<alamat-yang-dipantau>
+```
+
+Alamat itu dibaca dari **`EXECUTOR_WALLET_ADDRESS` di `.env`**. Dua sumber yang
+berbeda — berkas kunci dan konfigurasi — dan itulah yang membuat
+perbandingannya berarti.
+
+Blok awal diambil dari bagian 8.
+
+### c. Bandingkan ketiganya
+
+Bandingkan **tanpa peka huruf besar/kecil**: explorer menampilkan alamat
+ber-checksum EIP-55, `.env` mungkin memuat bentuk itu, dan sistem menyimpannya
+lowercase. Ketiganya harus menunjuk alamat yang sama:
+
+1. yang dicetak `guard execute` (dari berkas kunci),
+2. yang dicetak `guard watch` (dari `.env`),
+3. nilai `EXECUTOR_WALLET_ADDRESS` di `.env`.
+
+Untuk membandingkan tanpa menyalin dengan mata:
+
+```bash
+# Ketik ulang kedua alamat dari laporan startup di atas.
+a=$(printf '%s' '<alamat-dari-guard-execute>' | tr 'A-F' 'a-f')
+b=$(printf '%s' '<alamat-dari-guard-watch>'   | tr 'A-F' 'a-f')
+[ "$a" = "$b" ] && echo COCOK || echo "TIDAK COCOK"
+```
+
+### d. Kalau tidak sama: JANGAN lanjut
+
+Perbaiki `EXECUTOR_WALLET_ADDRESS` di `.env` lebih dulu, lalu ulangi dari (a).
+Jangan mengirim pembayaran sambil berpikir akan diperbaiki nanti: pembayaran
+yang dikirim sebelum alamatnya benar tidak akan terpantau, dan Watcher tidak
+bisa memundurkan kursornya untuk menemukannya (bagian 8.4).
+
+Alamat yang perlu diperbaiki selalu yang di `.env`. Yang **tidak** boleh
+diubah adalah berkas kunci — alamatnya diturunkan dari kuncinya, dan
+mengubahnya berarti wallet lain.
+
+### e. Kalau sama: boleh lanjut
+
+Lanjutkan ke pembayaran pertama.
+
+### f. Setelah pembayaran pertama
+
+Checklist ini tidak perlu diulang. Dua lapis mengambil alih:
+
+- **Penjaga saat start** (bagian 9) akan menolak alamat yang salah, karena
+  `executions` sudah punya baris untuk dibandingkan.
+- **Reconciler** menandai `executed_not_settled` bila pembayaran yang sudah
+  disiarkan tidak pernah punya settlement `final` setelah batas waktunya —
+  yang persis gejalanya kalau Watcher memantau wallet yang salah.
+
+Lapis kedua itu melaporkan belakangan, bukan mencegah. Itu sebabnya checklist
+ini ada.

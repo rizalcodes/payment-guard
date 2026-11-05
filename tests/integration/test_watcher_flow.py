@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 import io
+import re
 from pathlib import Path
 from typing import Any
 
@@ -1856,6 +1857,69 @@ class TestOnlyOneWatcherPerChain:
         close_runtime(first)
         second = open_watcher(watcher_config, client=chain)
         close_runtime(second)
+
+
+class TestStartupPrintsTheMonitoredWallet:
+    """Baris startup ``guard watch`` menyebut alamat yang dipantau.
+
+    Barisnya sudah ada sejak M6, tapi tidak ada tes yang menjaganya. Sejak
+    M6.3 ia **load-bearing**: checklist operator di ``docs/runbook.md`` bagian
+    10 menyuruh membaca angka itu dan membandingkannya dengan alamat yang
+    dicetak ``guard execute``, karena penjaga saat start baru bekerja setelah
+    ada eksekusi pertama. Baris yang hilang akan membuat checklist itu
+    menunjuk sesuatu yang tidak ada, tanpa satu pun tes gagal.
+
+    Padanannya untuk Executor sudah dijaga di
+    ``test_execution_flow.py`` (``TEST_WALLET_ADDRESS in keluaran``).
+    """
+
+    def test_the_configured_address_is_printed(
+        self, watcher_config: WatcherConfig, chain: FakeChain
+    ) -> None:
+        out = io.StringIO()
+        runtime = start_watcher(watcher_config, client=chain, out=out)
+        close_runtime(runtime)
+        keluaran = out.getvalue()
+        assert watcher_config.wallet_address in keluaran
+        assert "memantau transfer dari" in keluaran
+
+    def test_it_prints_the_config_value_not_something_derived(
+        self, watcher_config: WatcherConfig, chain: FakeChain
+    ) -> None:
+        """Yang dicetak harus ``EXECUTOR_WALLET_ADDRESS``, bukan nilai lain.
+
+        Itu yang membuat perbandingan manual di checklist berarti: Executor
+        mencetak alamat yang **diturunkan dari berkas kunci**, Watcher
+        mencetak alamat dari **konfigurasi**. Dua sumber berbeda; kalau
+        keduanya dicetak dari sumber yang sama, membandingkannya tidak
+        membuktikan apa pun.
+        """
+        lain = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
+        out = io.StringIO()
+        runtime = start_watcher(
+            dataclasses.replace(watcher_config, wallet_address=lain), client=chain, out=out
+        )
+        close_runtime(runtime)
+        assert lain in out.getvalue()
+
+    def test_no_private_key_shape_reaches_stdout(
+        self, watcher_config: WatcherConfig, chain: FakeChain
+    ) -> None:
+        """Alamat publik boleh dicetak; apa pun berbentuk kunci tidak.
+
+        Bentuk yang dicari adalah ``0x`` + 64 hex, yaitu bentuk bahan kunci
+        wallet. Watcher memang tidak pernah membaca berkas kunci, jadi tes ini
+        menjaga sesuatu yang seharusnya tidak mungkin — dan itu justru
+        gunanya: kalau suatu hari ia membacanya, kegagalannya muncul di sini.
+        """
+        out = io.StringIO()
+        runtime = start_watcher(watcher_config, client=chain, out=out)
+        close_runtime(runtime)
+        keluaran = out.getvalue()
+        assert TEST_WALLET_SEED not in keluaran
+        assert re.search(r"0x[0-9a-fA-F]{64}", keluaran) is None, keluaran
+        assert "devonly_not_a_secret" not in keluaran
+        assert "postgresql://" not in keluaran
 
 
 class TestStartupChecks:

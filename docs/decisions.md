@@ -9,6 +9,39 @@ yang ditolak dan mengapa.
 
 ---
 
+## M6.3 — celah alamat wallet sebelum pembayaran pertama
+
+Celah alamat wallet sebelum pembayaran pertama: diterima, ditutup dengan
+checklist operator (runbook). Disetujui CoS 6 Nov 2026.
+
+Penjaga saat start (M6.2) membandingkan `EXECUTOR_WALLET_ADDRESS` dengan
+`from_addr` di `executions`. Sebelum pembayaran pertama tabel itu kosong, jadi
+penjaganya melewatkan pemeriksaan. Itu bukan kelalaian: menolak start ketika
+belum ada eksekusi berarti Watcher tidak bisa dijalankan sebelum pembayaran
+pertama, padahal justru pembayaran pertama yang ingin dilihatnya.
+
+Yang **tidak** dilakukan: menambahkan sumber ketiga untuk alamat itu supaya
+bisa dibandingkan otomatis. Satu-satunya sumber lain yang ada adalah berkas
+kunci Executor, dan Watcher tidak boleh membacanya (Arsitektur bagian 2
+menaruh kedua kunci di kolom yang tidak boleh dipakai Watcher). Menambah
+sumber ketiga yang hanya ada supaya bisa diverifikasi berarti satu nilai lagi
+yang bisa diisi salah tanpa ada yang memeriksanya.
+
+Yang dilakukan: checklist operator di `docs/runbook.md` bagian 10, sekali
+sebelum pembayaran pertama. Ia bersandar pada dua baris yang **sudah** dicetak
+sejak M6 — `guard execute` mencetak alamat yang diturunkan dari berkas kunci,
+`guard watch` mencetak alamat dari konfigurasi — jadi tidak ada kode baru yang
+perlu ditulis untuk menutupnya.
+
+Keterbatasannya ditulis jujur di runbook: checklist adalah prosedur manusia,
+dan prosedur manusia bisa dilewati. Yang menahannya sesudah pembayaran pertama
+adalah penjaga saat start; yang melaporkannya belakangan adalah
+`executed_not_settled` di Reconciler.
+
+Satu tes ditambahkan meski tidak ada kode yang berubah: baris startup Watcher
+kini **load-bearing** karena checklist menyuruh membacanya, dan sampai M6.3
+tidak ada tes yang menjaganya. Padanannya untuk Executor sudah dijaga sejak M5.
+
 ## M6.2 — Watcher mendapat satu kolom di `executions`
 
 Keputusan CoS, opsi A, 5 Nov 2026. `watcher_rw` mendapat `SELECT (from_addr)`
