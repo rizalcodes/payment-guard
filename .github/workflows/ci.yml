@@ -72,7 +72,9 @@ jobs:
             src/payment_guard/chain.py \
             src/payment_guard/decision_service.py \
             src/payment_guard/executor.py \
-            src/payment_guard/approvals_cli.py
+            src/payment_guard/approvals_cli.py \
+            src/payment_guard/watcher.py \
+            src/payment_guard/reconciler.py
 
       - name: docs/schema.md sesuai migrations/
         run: uv run --no-sync python scripts/generate_schema_doc.py --check

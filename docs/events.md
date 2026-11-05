@@ -40,6 +40,12 @@ Aturan yang berlaku untuk seluruh tabel:
 | `execution_confirmed` | `executor` | Receipt diterima dengan `status = 1` | `decision_id`, `tx_hash`, `nonce`, `block_number` |
 | `execution_failed` | `executor` | Receipt revert, atau nonce dipakai transaksi lain. **Bukan** timeout | `decision_id`, `tx_hash`, `nonce`, `cause`, dan `block_number` bila ada receipt |
 | `execution_rejected` | `executor` | Salah satu cek Executor gagal; tidak ada transaksi yang dibangun | `decision_id`, `check` |
+| `settlement_finalized` | `watcher` | Melewati kedalaman konfirmasi dan hash bloknya masih kanonik | `settlement_id`, `tx_hash`, `log_index`, `block_number`, `block_hash` |
+| `settlement_moved` | `watcher` | Hash blok berubah tapi transaksinya masih ada: baris yang sama dipindah | sama seperti di atas, plus `new_block_number` |
+| `settlement_reorged` | `watcher` | Hash blok berubah **dan** transaksinya hilang. Baris tidak dihapus | sama seperti di atas, plus `previous_status` |
+| `settlement_restored` | `watcher` | Transaksi yang sudah `reorged` muncul lagi di blok lain | sama seperti di atas, plus `new_block_number` |
+| `alarm_final_settlement_reorged` | `watcher` | Baris yang sudah `final` ter-reorg di dalam jendela mundur K. **Alarm** | sama seperti di atas, plus `previous_status` |
+| `reconciliation_state_changed` | `reconciler` | State rekonsiliasi satu subjek berubah | `subject_type`, `subject_id`, `state`, `detail`, dan `previous_state` bila ada |
 
 ## Catatan per kelompok
 
@@ -107,8 +113,49 @@ ulang kredensial hilang di balik keluhan tentang aturan.
 Himpunan envelope yang **lolos** sama untuk kedua urutan; yang berbeda hanya
 alasan yang dilaporkan. Keputusan operator, 4 November 2026.
 
-### Kejadian milestone berikutnya belum ada
+### Kejadian Watcher semuanya `watcher`, dan tidak ada untuk `pending`
 
-`settlement_*`, `reconciliation_*`, dan `alarm_*` sengaja belum dibuat. Enum
-yang memuat nama yang belum pernah ditulis tidak bisa dibedakan dari enum yang
-memuat nama yang salah ejaannya.
+Lima kejadian `settlement_*` dan `alarm_*` hanya bisa ditulis `watcher`.
+Reconciler membaca hasilnya tapi tidak boleh menuliskannya: satu penulis per
+fakta (Arsitektur v1.1 prinsip 2). Tidak ada manusia di jalur ini sama sekali
+— Watcher melaporkan apa yang dilihatnya di chain.
+
+Yang sengaja **tidak** ada adalah kejadian untuk INSERT settlement `pending`.
+Arsitektur bagian 10 menuliskan langkah itu tanpa audit, dan memang
+seharusnya: setiap transfer dari wallet Executor menghasilkan satu baris, jadi
+mencatatnya lagi di `audit_log` hanya menduplikasi `settlements` dengan tabel
+yang tidak bisa di-UPDATE. Yang perlu jejak adalah **perubahan** keadaan.
+
+Nama-nama itu diambil apa adanya dari tabel state machine di PRD v2 bagian 10
+dan diagram sequence Arsitektur bagian 10. Tidak ada nama baru yang dikarang
+di M6.
+
+### `reconciliation_state_changed`, dan mengapa state ada di payload
+
+Satu nama kejadian untuk semua state, dengan state-nya di `payload["state"]`,
+dari daftar tertutup `payment_guard.reconciler.RECONCILIATION_STATES`:
+
+`matched`, `unmatched_onchain`, `mismatch`, `executed_not_settled`, `expired`,
+`invalidated`.
+
+Alasannya sama dengan `execution_rejected`: nama yang mengkodekan state akan
+berarti satu nama baru setiap kali daftar state bertambah, dan enum `Event`
+berhenti bisa dipakai sebagai daftar. Arsitektur bagian 11 juga sudah
+menuliskannya begitu.
+
+Baris audit hanya ditulis ketika state-nya **berubah**. `guard reconcile`
+dijalankan berulang, dan `audit_log` yang dipenuhi "masih cocok" setiap lima
+menit berhenti bisa dibaca sebagai bukti.
+
+### Payload settlement memuat identitas on-chain, bukan jumlah
+
+`settlement_*` mencatat `tx_hash`, `log_index`, `block_number`, dan
+`block_hash` — yaitu hal yang bisa dibuka orang lain di explorer dan
+diperiksa ulang. Jumlahnya tidak ikut: ia ada di `settlements.amount_base`,
+dan menyalinnya ke audit berarti dua tempat yang bisa berbeda.
+
+`reconciliation_state_changed` adalah pengecualiannya: `detail`-nya memuat
+jumlah yang **diharapkan** dan yang **terlihat** ketika keduanya berbeda,
+karena di situlah seluruh isi temuannya. Keduanya ditulis sebagai string,
+bukan `int`: base units bisa melampaui 2^53, dan payload audit tidak pernah
+melewatkan angka lewat `float`.

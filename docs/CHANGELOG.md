@@ -8,6 +8,48 @@ apa yang terjadi pada tag dan commit.
 
 ---
 
+## M6 — Watcher dan Reconciler, **mock-tested, belum live**
+
+Belum ditag. Tag `m6` hanya setelah tes live dan bukti on-chain ada.
+
+Dua modul baru: `watcher.py` menulis `settlements` dan `watcher_state` dari log
+`Transfer` USDC; `reconciler.py` mencocokkan `settlements` dengan `executions`
+dan `decisions` dan menulis `reconciliations`. Dua perintah baru: `guard watch`
+dan `guard reconcile`. Enam kejadian baru di `events.py`, semuanya nama yang
+sudah ada di PRD v2 bagian 10 dan 11 — tidak ada yang dikarang.
+
+**Yang sudah terbukti:** 49 tes integrasi terhadap Postgres 16 di cluster tes,
+dengan chain tiruan. Transfer cocok, transfer dengan jumlah atau penerima
+berbeda, transfer tanpa execution, blok yang diproses dua kali, kedalaman
+konfirmasi di bawah dan tepat di batas, keempat transisi reorg termasuk alarm
+`final -> reorged`, kursor yang mundur, execution tanpa settlement setelah
+batas waktu, dan GRANT yang menolak Watcher membaca `executions` maupun
+Reconciler menulis `executions`.
+
+**Yang belum terbukti:** apa pun terhadap Base Sepolia sungguhan. Tidak ada
+satu pun `eth_getLogs` yang pernah dikirim ke node nyata dari repo ini. Bentuk
+log yang diasumsikan `decode_transfer_log` diuji terhadap log yang **kami**
+susun, dan known-answer `topic0` ERC-20 adalah satu-satunya hal di jalur itu
+yang diverifikasi ke sumber luar. Yang paling mungkin berbeda di chain nyata:
+tipe yang dikembalikan web3 untuk `topics` dan `data`, dan perilaku node publik
+pada rentang `eth_getLogs` yang lebar.
+
+**Satu kekeliruan yang ditemukan tes, dan layak dicatat.** Rekonsiliasi semula
+membandingkan `settlements.to_addr` dengan `executions.to_addr`. Keduanya
+terdengar seperti hal yang sama dan bukan: pada transfer ERC-20, tujuan
+**transaksinya** adalah kontrak token, dan penerima pembayaran ada di dalam
+calldata. `executions.to_addr` karena itu selalu berisi alamat kontrak USDC.
+Perbandingan itu melaporkan **setiap** pembayaran yang benar sebagai
+`mismatch` — alarm yang selalu berbunyi, yang sama dengan tidak ada alarm.
+Penerima sekarang dibandingkan dengan `decisions.recipient`.
+
+Tiga variabel konfigurasi baru yang **tidak** ada di tabel Arsitektur v1.1
+bagian 2.1: `EXECUTOR_WALLET_ADDRESS`, `WATCHER_INTERVAL_SECONDS`, dan
+`RECONCILE_DEADLINE_SECONDS`. Alasan masing-masing ada di `docs/decisions.md`.
+PRD dan Arsitektur tidak diubah.
+
+---
+
 ## m5.1 — satu tes merah di dalam tag
 
 `m5.1` punya satu tes merah (`test_only_example_env_files_are_tracked`) karena

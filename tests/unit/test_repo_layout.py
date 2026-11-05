@@ -9,6 +9,7 @@ tidak hilang tanpa sengaja.
 
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -396,6 +397,48 @@ class TestContinuousIntegration:
         return "\n".join(
             baris for baris in self.workflow().splitlines() if not baris.strip().startswith("#")
         )
+
+    def mypy_modules_from(self, text: str) -> list[str]:
+        """Modul yang disebut sebuah daftar ``mypy --strict``, terurut."""
+        return sorted(set(re.findall(r"src/payment_guard/(\w+\.py)", text)))
+
+    def test_ci_and_pre_commit_check_the_same_modules(self) -> None:
+        """Dua daftar modul ``--strict`` yang ditulis terpisah akan menyimpang.
+
+        Hook pre-commit berjalan di mesin pengembang, langkah CI berjalan di
+        runner, dan keduanya menyebut daftar modulnya sendiri. Modul yang
+        ditambahkan ke satu daftar saja akan lolos di satu tempat dan tetap
+        tidak diperiksa di tempat lain — dan yang tidak diperiksa adalah yang
+        akhirnya salah.
+        """
+        hook = (ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+        dari_ci = self.mypy_modules_from(self.effective())
+        dari_hook = self.mypy_modules_from(hook)
+        assert dari_ci == dari_hook, f"CI: {dari_ci}\nhook: {dari_hook}"
+
+    def test_the_strict_list_covers_money_and_network_modules(self) -> None:
+        """Modul yang menyentuh uang atau jaringan wajib di bawah ``--strict``.
+
+        Daftarnya tidak harus memuat seluruh ``src/``: yang dijaga adalah
+        berkas yang memang sudah bersih, supaya langkah ini menolak regresi
+        alih-alih mengeluh tentang hal yang belum pernah rapi.
+        """
+        wajib = {
+            "money.py",
+            "chain.py",
+            "rules.py",
+            "executor.py",
+            "decision_service.py",
+            "watcher.py",
+            "reconciler.py",
+        }
+        terdaftar = set(self.mypy_modules_from(self.effective()))
+        assert wajib <= terdaftar, sorted(wajib - terdaftar)
+
+    def test_every_listed_module_exists(self) -> None:
+        """Daftar yang menyebut berkas yang sudah tidak ada akan gagal di CI."""
+        for name in self.mypy_modules_from(self.effective()):
+            assert (ROOT / "src" / "payment_guard" / name).is_file(), name
 
     def test_the_test_job_never_uses_the_operator_port(self) -> None:
         """5434 adalah cluster operator; CI memakai 5435 seperti harness lokal."""

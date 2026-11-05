@@ -46,7 +46,7 @@ from eth_account import Account
 from eth_account.signers.local import LocalAccount
 from eth_typing import ChecksumAddress
 from web3 import Web3
-from web3.exceptions import TransactionNotFound, Web3Exception
+from web3.exceptions import BlockNotFound, TransactionNotFound, Web3Exception
 from web3.types import TxParams
 
 from payment_guard.addresses import AddressError, normalize_address, to_checksum_address
@@ -63,6 +63,14 @@ from payment_guard.money import BaseUnits
 #: ``decimals`` untuk pemeriksaan start.
 TRANSFER_SIGNATURE: Final = "transfer(address,uint256)"
 DECIMALS_SIGNATURE: Final = "decimals()"
+
+#: Tanda tangan event ERC-20 ``Transfer``, yang dipantau Watcher.
+#:
+#: Bentuknya **tanpa** nama parameter dan tanpa spasi: itulah bentuk yang
+#: di-keccak untuk menjadi ``topic0``. ``Transfer(address from, address to,
+#: uint256 value)`` akan memberi hash yang berbeda dan tidak pernah cocok
+#: dengan satu log pun.
+TRANSFER_EVENT_SIGNATURE: Final = "Transfer(address,address,uint256)"
 
 #: Lebar satu word ABI, dalam byte.
 WORD_BYTES: Final = 32
@@ -148,6 +156,20 @@ def selector_of(signature: str) -> bytes:
 #: bisa dicocokkan dengan kontrak ERC-20 mana pun di explorer.
 TRANSFER_SELECTOR: Final = selector_of(TRANSFER_SIGNATURE)
 DECIMALS_SELECTOR: Final = selector_of(DECIMALS_SIGNATURE)
+
+#: ``topic0`` event ``Transfer``: keccak256 penuh, bukan empat byte pertama.
+#:
+#: Topic adalah satu word utuh; memotongnya seperti selector fungsi akan
+#: menghasilkan filter yang tidak pernah cocok. Nilainya diuji known-answer
+#: terhadap ``0xddf252ad...``, topic yang sama di setiap kontrak ERC-20.
+TRANSFER_EVENT_TOPIC: Final = keccak256(TRANSFER_EVENT_SIGNATURE.encode("ascii"))
+
+#: Jumlah topic yang WAJIB dimiliki log ``Transfer``: topic0, from, to.
+#:
+#: ``value`` tidak di-index, jadi ia ada di ``data`` dan bukan di topic. Log
+#: dengan jumlah topic lain bukan ``Transfer`` ERC-20 standar, dan Watcher
+#: menolaknya alih-alih menebak posisi field.
+TRANSFER_TOPIC_COUNT: Final = 3
 
 
 def encode_transfer(recipient: str, amount_base: BaseUnits) -> bytes:
@@ -326,6 +348,38 @@ class Fees:
 
 
 @dataclass(frozen=True)
+class TransferLog:
+    """Satu log ``Transfer`` USDC, sudah didekode dan divalidasi.
+
+    Bentuknya sengaja sama dengan kolom ``settlements`` di ``0001_init.sql``:
+    modul ini yang mengubah jawaban node menjadi nilai yang bisa dipercaya,
+    sehingga :mod:`payment_guard.watcher` tidak pernah menyentuh dict mentah
+    dari web3. Alamat sudah lowercase ternormalisasi dan hash sudah dicek
+    bentuknya, jadi CHECK di database tidak bisa dilanggar oleh log yang aneh.
+
+    ``amount_base`` bertipe :data:`payment_guard.money.BaseUnits`, dan nilainya
+    boleh **0**: ERC-20 mengizinkan transfer bernilai nol, dan ``settlements``
+    mencerminkan apa yang ada di chain (``CHECK (amount_base >= 0)``), bukan
+    apa yang kami izinkan (``executions`` memakai ``> 0``). Karena itu ia tidak
+    dibuat lewat :func:`payment_guard.money.base_units`, yang menolak nol.
+    """
+
+    chain_id: int
+    tx_hash: str
+    log_index: int
+    block_number: int
+    block_hash: str
+    from_addr: str
+    to_addr: str
+    amount_base: BaseUnits
+
+    @property
+    def unique_key(self) -> tuple[int, str, int]:
+        """Kunci ``UNIQUE (chain_id, tx_hash, log_index)`` di ``settlements``."""
+        return (self.chain_id, self.tx_hash, self.log_index)
+
+
+@dataclass(frozen=True)
 class Receipt:
     """Bagian receipt yang dipakai Executor, dan tidak lebih."""
 
@@ -421,6 +475,21 @@ class ChainClient(Protocol):
     def send_raw_transaction(self, raw_tx: bytes) -> str: ...
 
     def receipt(self, tx_hash: str) -> Receipt | None: ...
+
+    # --- Dibaca Watcher saja (M6). Semuanya read-only. ---
+
+    def latest_block(self) -> int: ...
+
+    def block_hash(self, block_number: int) -> str | None: ...
+
+    def transfer_logs(
+        self,
+        token: str,
+        *,
+        from_addr: str,
+        first_block: int,
+        last_block: int,
+    ) -> tuple[TransferLog, ...]: ...
 
 
 class Web3Client:
@@ -533,6 +602,91 @@ class Web3Client:
             block_number=int(cast(int, receipt["blockNumber"])),
         )
 
+    # ----------------------------------------------------------------------- #
+    # Dibaca Watcher saja (M6)
+    # ----------------------------------------------------------------------- #
+
+    def latest_block(self) -> int:
+        return int(self._call("eth_blockNumber", lambda: self._web3.eth.block_number))
+
+    def block_hash(self, block_number: int) -> str | None:
+        """Hash kanonik blok ``block_number``, atau ``None`` bila belum ada.
+
+        ``None`` berarti node belum punya blok setinggi itu — bukan kegagalan.
+        Nilai inilah yang membedakan reorg dari "belum sampai": blok yang hash
+        tersimpannya tidak sama dengan hash kanonik sudah berpindah rantai.
+        """
+        _require_block_number(block_number)
+
+        def ask() -> object | None:
+            try:
+                return self._web3.eth.get_block(block_number)
+            except BlockNotFound:
+                return None
+
+        found = self._call("eth_getBlockByNumber", ask)
+        if found is None:
+            return None
+        block = cast(Mapping[str, object], found)
+        return _normalize_block_hash(block["hash"])
+
+    def transfer_logs(
+        self,
+        token: str,
+        *,
+        from_addr: str,
+        first_block: int,
+        last_block: int,
+    ) -> tuple[TransferLog, ...]:
+        """Log ``Transfer`` kontrak ``token`` dengan ``from`` = ``from_addr``.
+
+        Penyaringan dilakukan **node**, lewat ``address`` dan ``topics``, bukan
+        oleh kami setelah log diterima: rentang blok di Base bisa memuat
+        ratusan ribu Transfer USDC, dan menyaring di sisi kami berarti menarik
+        semuanya lewat jaringan untuk membuang hampir semuanya.
+
+        ``topics = [topic0, from, None]`` — ``to`` dibiarkan terbuka dengan
+        sengaja. Pemantauannya per PRD v2 bagian 10 adalah per **pengirim**,
+        yaitu wallet Executor, karena transfer dari wallet itu ke tujuan yang
+        tidak kami kenal justru temuan yang paling penting (``unmatched_onchain``
+        di PRD v2 bagian 11). Menyaring per ``to`` akan membuat transfer semacam
+        itu tidak pernah terlihat.
+
+        Raises:
+            ChainError: bila rentang bloknya tidak sah, alamatnya tidak sah,
+                atau ada log yang tidak berbentuk ``Transfer`` ERC-20.
+        """
+        _require_block_number(first_block)
+        _require_block_number(last_block)
+        if last_block < first_block:
+            raise ChainError(
+                f"rentang blok tidak sah: {first_block}..{last_block} berakhir sebelum mulai"
+            )
+        try:
+            token_address = normalize_address(token)
+            sender = normalize_address(from_addr)
+        except AddressError as exc:
+            raise ChainError(f"alamat untuk eth_getLogs tidak sah: {exc}") from None
+
+        criteria = {
+            "address": _checksummed(token_address),
+            "fromBlock": first_block,
+            "toBlock": last_block,
+            "topics": [
+                "0x" + TRANSFER_EVENT_TOPIC.hex(),
+                "0x" + _encode_address(sender).hex(),
+                None,
+            ],
+        }
+        raw = self._call(
+            "eth_getLogs",
+            lambda: self._web3.eth.get_logs(cast(Any, criteria)),
+        )
+        chain = self.chain_id()
+        return tuple(
+            decode_transfer_log(cast(Mapping[str, object], item), chain_id=chain) for item in raw
+        )
+
     def _call(self, what: str, action: Callable[[], T]) -> T:
         """Jalankan satu panggilan RPC dengan batas percobaan dan jeda.
 
@@ -617,19 +771,20 @@ class StartupReport:
     warnings: tuple[str, ...]
 
 
-def check_startup(
+def check_chain_and_token(
     client: ChainClient,
     *,
     expected_chain_id: int,
     usdc_address: str,
-    wallet_address: str,
-    minimum_balance_wei: int,
-) -> StartupReport:
-    """Periksa chain id, ``decimals()``, dan saldo gas sebelum bekerja.
+) -> tuple[int, int]:
+    """Periksa chain id RPC dan ``decimals()`` token. Kembalikan keduanya.
 
-    Chain id yang salah dan ``decimals()`` yang bukan 6 **menggagalkan** start:
-    keduanya berarti setiap angka sesudahnya punya arti lain. Saldo gas yang
-    kurang hanya peringatan.
+    Dua pemeriksaan yang sama dibutuhkan Executor **dan** Watcher, dan
+    keduanya menggagalkan start: chain yang salah berarti setiap hash menunjuk
+    jaringan lain, dan ``decimals()`` yang bukan 6 berarti setiap angka punya
+    arti lain. Yang membedakan keduanya adalah apa yang **tidak** diperiksa
+    Watcher: ia tidak punya wallet dan tidak mengirim apa pun, jadi saldo gas
+    bukan urusannya.
 
     Raises:
         ChainError: bila chain id tidak cocok atau ``decimals()`` bukan
@@ -649,6 +804,30 @@ def check_startup(
             f"{REQUIRED_DECIMALS}. Seluruh sistem menghitung base units USDC "
             "dengan 6 desimal, jadi jumlahnya akan salah secara diam-diam."
         )
+    return seen_chain_id, decimals
+
+
+def check_startup(
+    client: ChainClient,
+    *,
+    expected_chain_id: int,
+    usdc_address: str,
+    wallet_address: str,
+    minimum_balance_wei: int,
+) -> StartupReport:
+    """Periksa chain id, ``decimals()``, dan saldo gas sebelum bekerja.
+
+    Chain id yang salah dan ``decimals()`` yang bukan 6 **menggagalkan** start:
+    keduanya berarti setiap angka sesudahnya punya arti lain. Saldo gas yang
+    kurang hanya peringatan.
+
+    Raises:
+        ChainError: bila chain id tidak cocok atau ``decimals()`` bukan
+            :data:`REQUIRED_DECIMALS`.
+    """
+    seen_chain_id, decimals = check_chain_and_token(
+        client, expected_chain_id=expected_chain_id, usdc_address=usdc_address
+    )
 
     balance = client.eth_balance(wallet_address)
     warnings: list[str] = []
@@ -693,6 +872,132 @@ def _normalize_tx_hash(value: object) -> str:
     if TX_HASH_PATTERN.match(text) is None:
         raise ChainError("hash transaksi tidak berbentuk '0x' + 64 hex")
     return text
+
+
+def _normalize_block_hash(value: object) -> str:
+    """Hash blok sebagai ``0x`` + 64 hex kecil.
+
+    Bentuknya identik dengan hash transaksi — 32 byte — dan CHECK
+    ``block_hash ~ '^0x[0-9a-f]{64}$'`` di ``settlements`` sama persis dengan
+    yang ada di ``executions``, jadi normalisasinya dipakai ulang. Namanya
+    tetap terpisah supaya pesan errornya menyebut hal yang benar: "hash
+    transaksi tidak berbentuk..." untuk hash blok akan menyesatkan orang yang
+    membacanya di jam tiga pagi.
+    """
+    try:
+        return _normalize_tx_hash(value)
+    except ChainError:
+        raise ChainError("hash blok tidak berbentuk '0x' + 64 hex") from None
+
+
+def _require_block_number(value: object) -> int:
+    """Nomor blok sebagai ``int`` tak negatif.
+
+    ``bool`` ditolak lebih dulu: ia turunan ``int``, dan ``True`` akan lolos
+    menjadi blok 1. Nilai ini masuk ke ``eth_getLogs`` dan ke kolom
+    ``BIGINT CHECK (block_number >= 0)``, jadi keduanya harus benar.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ChainError(f"nomor blok harus int, bukan {type(value).__name__}")
+    if value < 0:
+        raise ChainError(f"nomor blok tidak boleh negatif, dapat {value}")
+    return value
+
+
+def decode_transfer_log(log: Mapping[str, object], *, chain_id: int) -> TransferLog:
+    """Ubah satu log ``eth_getLogs`` mentah menjadi :class:`TransferLog`.
+
+    Semua yang bisa salah diperiksa di sini, dan tidak ada yang ditebak. Log
+    dari node adalah masukan tak terpercaya seperti masukan lain: ia menentukan
+    baris yang ditulis ke ``settlements``, dan baris yang salah di situ berarti
+    rekonsiliasi yang salah.
+
+    ``value`` dibaca dari ``data``, bukan dari topic: ia tidak di-index di
+    ERC-20. ``from`` dan ``to`` dibaca dari topic 1 dan 2, dan dinormalisasi
+    lowercase supaya pembandingan dengan ``executions.to_addr`` adalah
+    perbandingan string biasa, bukan perbandingan yang bergantung pada
+    checksum.
+
+    Raises:
+        ChainError: bila jumlah topic salah, panjang ``data`` bukan satu word,
+            alamatnya tidak sah, atau log masih ``pending`` (tanpa blok).
+    """
+    topics = log.get("topics")
+    if not isinstance(topics, list | tuple) or len(topics) != TRANSFER_TOPIC_COUNT:
+        count = len(topics) if isinstance(topics, list | tuple) else "bukan daftar"
+        raise ChainError(
+            f"log Transfer harus punya {TRANSFER_TOPIC_COUNT} topic, dapat {count}. "
+            "Filter eth_getLogs mungkin salah, atau kontraknya bukan ERC-20 standar."
+        )
+    if _topic_bytes(topics[0]) != TRANSFER_EVENT_TOPIC:
+        raise ChainError(
+            "topic0 log bukan Transfer(address,address,uint256); filter node tidak dipatuhi"
+        )
+
+    block_number = log.get("blockNumber")
+    if block_number is None or log.get("blockHash") is None:
+        raise ChainError(
+            "log masih pending (tanpa blok). Watcher hanya memproses blok yang sudah "
+            "melewati kedalaman konfirmasi, jadi log tanpa blok tidak boleh sampai ke sini."
+        )
+    log_index = log.get("logIndex")
+    if log_index is None:
+        raise ChainError("log tanpa logIndex tidak bisa dijadikan kunci unik settlement")
+
+    return TransferLog(
+        chain_id=chain_id,
+        tx_hash=_normalize_tx_hash(log["transactionHash"]),
+        log_index=_require_log_index(log_index),
+        block_number=_require_block_number(int(cast(int, block_number))),
+        block_hash=_normalize_block_hash(log["blockHash"]),
+        from_addr=_address_from_topic(topics[1], "from"),
+        to_addr=_address_from_topic(topics[2], "to"),
+        # Tanpa `base_units()`: transfer bernilai nol sah di ERC-20, dan
+        # `settlements` mencatat apa yang terjadi di chain.
+        amount_base=BaseUnits(decode_uint256(_topic_bytes(log.get("data")))),
+    )
+
+
+def _require_log_index(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ChainError(f"logIndex harus int, bukan {type(value).__name__}")
+    if value < 0:
+        raise ChainError(f"logIndex tidak boleh negatif, dapat {value}")
+    return value
+
+
+def _topic_bytes(value: object) -> bytes:
+    """Satu topic atau field ``data`` sebagai byte mentah."""
+    if isinstance(value, bytes | bytearray | memoryview):
+        return bytes(value)
+    if isinstance(value, str):
+        text = value[2:] if value.startswith("0x") else value
+        try:
+            return bytes.fromhex(text)
+        except ValueError:
+            raise ChainError("topic atau data log bukan hex yang sah") from None
+    raise ChainError(f"topic atau data log harus bytes atau str, bukan {type(value).__name__}")
+
+
+def _address_from_topic(value: object, label: str) -> str:
+    """Alamat dari satu topic: 12 byte nol lalu 20 byte alamat.
+
+    Byte padding diperiksa, tidak dilewati. Topic yang 12 byte pertamanya
+    bukan nol bukan alamat yang di-pad — ia sesuatu yang lain, dan membaca 20
+    byte terakhirnya akan memberi alamat yang terlihat masuk akal.
+    """
+    raw = _topic_bytes(value)
+    if len(raw) != WORD_BYTES:
+        raise ChainError(f"topic {label} harus {WORD_BYTES} byte, dapat {len(raw)} byte")
+    padding = WORD_BYTES - ADDRESS_BYTES
+    if raw[:padding] != b"\x00" * padding:
+        raise ChainError(
+            f"topic {label} bukan alamat yang di-pad: {padding} byte awalnya bukan nol"
+        )
+    try:
+        return normalize_address("0x" + raw[padding:].hex())
+    except AddressError as exc:
+        raise ChainError(f"alamat {label} di log tidak sah: {exc}") from None
 
 
 def _first_line(exc: BaseException) -> str:

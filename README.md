@@ -138,7 +138,7 @@ Panduan demo satu pembayaran dari ujung ke ujung, termasuk faucet dan alamat
 jaringan beserta sumber verifikasinya, ada di
 [scripts/demo_execute.md](scripts/demo_execute.md).
 
-## Perintah yang tersedia sampai M5
+## Perintah yang tersedia sampai M6
 
 | Perintah | Dijalankan sebagai | Membaca | Guna |
 |---|---|---|---|
@@ -152,6 +152,8 @@ jaringan beserta sumber verifikasinya, ada di
 | `guard approvals reject` | operator, interaktif | `.env` | Tolak satu keputusan; memicu cooldown |
 | `guard execute` | host agent / operator | `.env` | Eksekusi satu keputusan approved: cek 1–6, write-ahead, broadcast |
 | `guard recover` | operator | `.env` | Selesaikan execution `signed` atau `broadcast` yang tertinggal |
+| `guard watch` | operator, proses panjang | `.env` | Pindai log `Transfer` USDC dari wallet Executor menjadi `settlements` |
+| `guard reconcile` | operator | `.env` | Cocokkan `settlements` dengan `executions` dan `decisions`; satu siklus |
 | `guard verify` | operator | — | Periksa envelope dengan kunci publik saja |
 
 `approvals` memakai `APPROVER_DB_URL` dari `.env`, bukan URL Guard: hanya role
@@ -178,6 +180,8 @@ Flag per perintah:
 | `approvals reject` | `<decision_id>` (posisional), `--env-file` |
 | `execute` | `<decision_id>` (posisional), `--env-file` |
 | `recover` | `--env-file` |
+| `watch` | `--loop`, `--cycles N`, `--from-block BLOK`, `--env-file` |
+| `reconcile` | `--env-file` |
 | `verify` | `<envelope>` (posisional), `--pubkey`, `--mandate` |
 
 `execute` dan `recover` memakai `EXECUTOR_DB_URL`, `EXECUTOR_KEY_PATH`, dan
@@ -185,8 +189,21 @@ Flag per perintah:
 berbayar, karena kunci API biasa diletakkan di path atau query-nya; Executor
 tidak pernah mencetaknya utuh, hanya skema dan host-nya.
 
-`guard --version` ada di tingkat atas. Perintah runtime lainnya (`watch`,
-`reconcile`) menyusul di milestone berikutnya.
+`watch` memakai `WATCHER_DB_URL`, `RPC_URL`, dan `EXECUTOR_WALLET_ADDRESS` —
+alamat wallet Executor, **bukan** kuncinya. Watcher tidak pernah membaca berkas
+kunci dan tidak punya hak baca ke `decisions` maupun `executions`: pencocokan
+adalah pekerjaan Reconciler, dan proses yang bisa membaca keduanya sekaligus
+adalah proses yang bisa, suatu hari, "memperbaiki" salah satunya.
+
+`reconcile` memakai `RECONCILER_DB_URL` saja — tidak ada `RPC_URL`. Ia
+membandingkan tabel dengan tabel, dan **hanya mencatat**: GRANT-nya tidak
+memberi UPDATE pada `decisions` maupun `executions`. Kode keluarnya 1 bila ada
+alarm, supaya ia bisa dijalankan dari cron.
+
+Keduanya **read-only terhadap chain** dan belum pernah dijalankan terhadap Base
+Sepolia sungguhan; lihat [docs/CHANGELOG.md](docs/CHANGELOG.md) bagian M6.
+
+`guard --version` ada di tingkat atas.
 
 Rotasi password otomatis **belum diimplementasi**. Rencananya
 `guard db bootstrap-roles --rotate-passwords`, ditinjau di M9 bersama perubahan

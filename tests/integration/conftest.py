@@ -434,5 +434,7 @@ def migrated(bootstrapped: dict[str, str]) -> dict[str, str]:
 # Fixture per milestone hidup di berkas sendiri supaya conftest ini tetap
 # terbaca. Impor bintang dipakai dengan sengaja: pytest hanya menemukan
 # fixture yang ada di namespace conftest.
+from conftest_watcher import *  # noqa: E402, F403
+
 from conftest_executor import *  # noqa: E402, F403
 from conftest_guard import *  # noqa: E402, F403

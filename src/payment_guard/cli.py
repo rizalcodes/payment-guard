@@ -181,6 +181,56 @@ def _cmd_recover(args: argparse.Namespace) -> int:
         return 1
 
 
+def _cmd_watch(args: argparse.Namespace) -> int:
+    # Lazy seperti `execute`: modul ini menarik web3, yang mahal diimpor.
+    from payment_guard.chain import ChainError
+    from payment_guard.config import load_watcher_config
+    from payment_guard.watcher import WatcherError, run_watch
+
+    try:
+        config = load_watcher_config(args.env_file)
+    except GuardConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        return run_watch(
+            config,
+            loop=args.loop,
+            cycles=args.cycles,
+            from_block=args.from_block,
+            out=sys.stdout,
+        )
+    except KeyboardInterrupt:
+        # `guard watch --loop` dihentikan operator dengan Ctrl-C, dan itu jalur
+        # normal, bukan kegagalan. Koneksi dan lock sesinya sudah dilepas oleh
+        # `finally` di run_watch.
+        print("dihentikan", file=sys.stderr)
+        return 0
+    except (ChainError, WatcherError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _cmd_reconcile(args: argparse.Namespace) -> int:
+    # Tanpa impor chain sama sekali: Reconciler membandingkan tabel dengan
+    # tabel dan tidak pernah bertanya ke RPC.
+    from payment_guard.config import load_reconciler_config
+    from payment_guard.reconciler import ReconcilerError, run_reconcile
+
+    try:
+        config = load_reconciler_config(args.env_file)
+    except GuardConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        return run_reconcile(config, out=sys.stdout)
+    except ReconcilerError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
 def _cmd_verify(args: argparse.Namespace) -> int:
     outcome = verify_envelope_file(args.envelope, args.pubkey, args.mandate)
     print(outcome.render())
@@ -350,6 +400,69 @@ def build_parser() -> argparse.ArgumentParser:
                 "Memakai EXECUTOR_DB_URL, EXECUTOR_KEY_PATH, dan RPC_URL."
             ),
         )
+
+    # --- watch dan reconcile: keduanya read-only terhadap chain (M6) ---
+    #
+    # `watch` membaca log dan menulis `settlements`; ia tidak pernah
+    # menandatangani, tidak pernah menyiarkan, dan tidak punya hak baca ke
+    # `decisions` maupun `executions`. `reconcile` tidak menyentuh chain sama
+    # sekali: ia membandingkan tabel dengan tabel.
+    watch_parser = sub.add_parser(
+        "watch",
+        help="pindai log Transfer USDC dari wallet Executor menjadi settlements",
+    )
+    watch_parser.add_argument(
+        "--loop",
+        action="store_true",
+        help=(
+            "jalankan terus dengan jeda WATCHER_INTERVAL_SECONDS. "
+            "Tanpa ini, satu siklus lalu keluar."
+        ),
+    )
+    watch_parser.add_argument(
+        "--cycles",
+        type=int,
+        default=None,
+        metavar="N",
+        help="batasi jumlah siklus (dipakai operator untuk mencoba, dan oleh tes)",
+    )
+    watch_parser.add_argument(
+        "--from-block",
+        type=int,
+        default=None,
+        metavar="BLOK",
+        help=(
+            "blok awal, HANYA bila belum ada kursor di watcher_state. Kursor yang "
+            "sudah ada tidak pernah dipindahkan ke depan oleh flag ini: itu akan "
+            "melewatkan blok dalam diam. Lihat docs/runbook.md bagian 8."
+        ),
+    )
+    watch_parser.set_defaults(handler=_cmd_watch)
+
+    reconcile_parser = sub.add_parser(
+        "reconcile",
+        help="cocokkan settlements dengan executions dan decisions; satu siklus",
+    )
+    reconcile_parser.set_defaults(handler=_cmd_reconcile)
+
+    watch_parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help=(
+            f"file konfigurasi runtime (default: {RUNTIME_ENV_FILENAME} di akar repo). "
+            "Memakai WATCHER_DB_URL, RPC_URL, dan EXECUTOR_WALLET_ADDRESS."
+        ),
+    )
+    reconcile_parser.add_argument(
+        "--env-file",
+        type=Path,
+        default=None,
+        help=(
+            f"file konfigurasi runtime (default: {RUNTIME_ENV_FILENAME} di akar repo). "
+            "Memakai RECONCILER_DB_URL saja; tidak ada RPC_URL."
+        ),
+    )
 
     # --- verify: hanya kunci publik, tanpa database dan tanpa jaringan ---
     verify_parser = sub.add_parser(

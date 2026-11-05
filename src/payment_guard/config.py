@@ -559,6 +559,306 @@ def load_executor_config(env_file: Path, *, repo_root: Path) -> ExecutorConfig:
     )
 
 
+# --------------------------------------------------------------------------- #
+# Watcher dan Reconciler (M6)
+# --------------------------------------------------------------------------- #
+
+#: Variabel Watcher. Arsitektur v1.1 bagian 2.1 menyebut ``RPC_URL``,
+#: ``WATCHER_DB_URL``, ``CHAIN_ID``, ``USDC_ADDRESS``, ``CONFIRMATIONS``,
+#: ``SCAN_BATCH_SIZE``, dan ``REORG_LOOKBACK``.
+#:
+#: Dua variabel di bawah **tidak** ada di tabel itu, dan itu disengaja serta
+#: dicatat (``docs/decisions.md``, M6):
+#:
+#: * ``EXECUTOR_WALLET_ADDRESS`` — PRD v2 bagian 10 mewajibkan Watcher
+#:   menyaring ``from = alamat wallet Executor``, tetapi tabel konfigurasi
+#:   tidak punya cara bagi Watcher untuk mengetahui alamat itu. Ia **tidak**
+#:   boleh membaca berkas kunci wallet (Arsitektur bagian 2: "Kedua key" ada di
+#:   kolom yang tidak boleh dipakai Watcher), dan ia tidak punya SELECT pada
+#:   ``executions`` (matriks bagian 3.3). Alamat adalah informasi publik; yang
+#:   rahasia adalah kuncinya. Jadi alamatnya dikonfigurasi, tanpa default:
+#:   default apa pun di sini berarti memantau wallet yang salah dalam diam.
+#: * ``WATCHER_INTERVAL_SECONDS`` — jeda antar siklus untuk ``guard watch``
+#:   sebagai proses panjang. Dokumen menyebut Watcher "proses panjang" tanpa
+#:   menyebut jedanya.
+WATCHER_ENV_VARS: Final[dict[str, str]] = {
+    "db_url": "WATCHER_DB_URL",
+    "rpc_url": "RPC_URL",
+    "chain_id": "CHAIN_ID",
+    "usdc_address": "USDC_ADDRESS",
+    "wallet_address": "EXECUTOR_WALLET_ADDRESS",
+    "confirmations": "CONFIRMATIONS",
+    "scan_batch_size": "SCAN_BATCH_SIZE",
+    "reorg_lookback": "REORG_LOOKBACK",
+    "interval_seconds": "WATCHER_INTERVAL_SECONDS",
+    "lock_timeout_ms": "WATCHER_LOCK_TIMEOUT_MS",
+}
+
+#: Variabel Reconciler. Arsitektur bagian 2.1 hanya menyebut
+#: ``RECONCILER_DB_URL``: Reconciler tidak menyentuh chain sama sekali, ia
+#: membandingkan tabel dengan tabel.
+#:
+#: ``RECONCILE_DEADLINE_SECONDS`` tidak ada di tabel itu. PRD v2 bagian 11
+#: menulis "setelah batas waktu" tanpa angka, dan batas itu harus punya nilai
+#: sebelum ``executed_not_settled`` bisa diputuskan. Lihat ``docs/decisions.md``.
+RECONCILER_ENV_VARS: Final[dict[str, str]] = {
+    "db_url": "RECONCILER_DB_URL",
+    "chain_id": "CHAIN_ID",
+    "deadline_seconds": "RECONCILE_DEADLINE_SECONDS",
+    "lock_timeout_ms": "RECONCILER_LOCK_TIMEOUT_MS",
+}
+
+#: Kedalaman konfirmasi sebelum settlement boleh menjadi ``final``.
+#:
+#: 12 adalah nilai di Arsitektur bagian 2.1. Batas bawahnya **1**, bukan 0:
+#: nol berarti blok terakhir langsung dianggap final, dan itu menghapus satu-
+#: satunya hal yang membuat status ``final`` berarti apa pun.
+DEFAULT_CONFIRMATIONS: Final = 12
+CONFIRMATIONS_MIN: Final = 1
+CONFIRMATIONS_MAX: Final = 1000
+
+#: Lebar satu rentang ``eth_getLogs``. Node publik menolak rentang besar.
+DEFAULT_SCAN_BATCH_SIZE: Final = 2000
+SCAN_BATCH_SIZE_MIN: Final = 1
+SCAN_BATCH_SIZE_MAX: Final = 10_000
+
+#: Jendela mundur K untuk memeriksa ulang baris yang sudah ``final``.
+#:
+#: Harus lebih besar dari ``CONFIRMATIONS``, kalau tidak jendelanya tidak
+#: pernah memuat satu pun baris final dan transisi ``final -> reorged`` menjadi
+#: kode mati. Pemeriksaannya ada di :func:`load_watcher_config`.
+DEFAULT_REORG_LOOKBACK: Final = 64
+REORG_LOOKBACK_MIN: Final = 1
+REORG_LOOKBACK_MAX: Final = 100_000
+
+#: Jeda antar siklus ``guard watch --loop``, dalam detik.
+DEFAULT_WATCHER_INTERVAL_SECONDS: Final = 15
+WATCHER_INTERVAL_SECONDS_MIN: Final = 1
+WATCHER_INTERVAL_SECONDS_MAX: Final = 3600
+
+#: Berapa lama execution yang sudah disiarkan boleh belum punya settlement
+#: ``final`` sebelum dicatat ``executed_not_settled``.
+#:
+#: Satu jam. Pendek berarti alarm palsu setiap kali chain melambat; panjang
+#: berarti pembayaran yang benar-benar hilang baru terlihat besok. Nilainya
+#: dikonfigurasi justru karena tidak ada angka yang benar untuk semua orang.
+DEFAULT_RECONCILE_DEADLINE_SECONDS: Final = 3600
+RECONCILE_DEADLINE_SECONDS_MIN: Final = 60
+RECONCILE_DEADLINE_SECONDS_MAX: Final = 7 * 24 * 3600
+
+
+@dataclass(frozen=True)
+class WatcherConfig:
+    """Konfigurasi satu proses Watcher, sudah divalidasi.
+
+    Tidak punya atribut untuk kunci apa pun. Watcher membaca chain dan menulis
+    ``settlements``; ia tidak menandatangani dan tidak menyiarkan, jadi tidak
+    ada alasan baginya memegang bahan kunci (Arsitektur v1.1 bagian 2).
+    """
+
+    db_url: str
+    rpc_url: str
+    chain_id: int
+    usdc_address: str
+    wallet_address: str
+    confirmations: int
+    scan_batch_size: int
+    reorg_lookback: int
+    interval_seconds: int
+    lock_timeout_ms: int
+
+
+@dataclass(frozen=True)
+class ReconcilerConfig:
+    """Konfigurasi satu siklus Reconciler, sudah divalidasi.
+
+    Tanpa ``rpc_url``: Reconciler membandingkan ``settlements`` dengan
+    ``executions`` dan ``decisions``, dan ketiganya ada di database. Bertanya
+    ke chain di sini akan berarti dua sumber kebenaran untuk hal yang sama
+    (Arsitektur v1.1 prinsip 2).
+    """
+
+    db_url: str
+    chain_id: int
+    deadline_seconds: int
+    lock_timeout_ms: int
+
+
+def load_watcher_config(env_file: Path) -> WatcherConfig:
+    """Muat dan validasi konfigurasi Watcher dari environment lalu ``env_file``.
+
+    Raises:
+        GuardConfigError: pada pelanggaran pertama yang ditemukan.
+    """
+    from_file = read_env_file(env_file)
+
+    def value_of(field: str) -> str:
+        var = WATCHER_ENV_VARS[field]
+        return (os.environ.get(var) or from_file.get(var) or "").strip()
+
+    db_url = value_of("db_url")
+    if not db_url:
+        raise GuardConfigError(
+            f"{WATCHER_ENV_VARS['db_url']} belum diisi. Jalankan "
+            f"`guard db bootstrap-roles` lebih dulu, atau isi di {env_file.name}."
+        )
+
+    rpc_url = value_of("rpc_url") or DEFAULT_RPC_URL
+    if not rpc_url.startswith(RPC_URL_SCHEMES):
+        raise GuardConfigError(
+            f"{WATCHER_ENV_VARS['rpc_url']} harus dimulai dengan salah satu dari: "
+            f"{', '.join(RPC_URL_SCHEMES)}"
+        )
+
+    expected_chain_id = chain_id_for(BASE_SEPOLIA)
+    chain_id = _require_bounded_int(
+        WATCHER_ENV_VARS["chain_id"],
+        value_of("chain_id"),
+        default=expected_chain_id,
+        minimum=1,
+        maximum=_CHAIN_ID_MAX,
+    )
+    if chain_id != expected_chain_id:
+        raise GuardConfigError(
+            f"{WATCHER_ENV_VARS['chain_id']} harus {expected_chain_id} "
+            f"({BASE_SEPOLIA}), dapat {chain_id}. v1 hanya mendukung satu chain; "
+            "lihat payment_guard.chains."
+        )
+
+    usdc_address = _require_address(
+        WATCHER_ENV_VARS["usdc_address"], value_of("usdc_address") or DEFAULT_USDC_ADDRESS
+    )
+
+    raw_wallet = value_of("wallet_address")
+    if not raw_wallet:
+        raise GuardConfigError(
+            f"{WATCHER_ENV_VARS['wallet_address']} belum diisi. Watcher menyaring log "
+            "Transfer per pengirim (PRD v2 bagian 10), jadi ia harus tahu alamat wallet "
+            "Executor. Isi alamatnya — bukan kuncinya; Watcher tidak pernah membaca "
+            "berkas kunci."
+        )
+    wallet_address = _require_address(WATCHER_ENV_VARS["wallet_address"], raw_wallet)
+    if wallet_address == usdc_address:
+        raise GuardConfigError(
+            f"{WATCHER_ENV_VARS['wallet_address']} sama dengan "
+            f"{WATCHER_ENV_VARS['usdc_address']}; salah satu salah diisi"
+        )
+
+    confirmations = _require_bounded_int(
+        WATCHER_ENV_VARS["confirmations"],
+        value_of("confirmations"),
+        default=DEFAULT_CONFIRMATIONS,
+        minimum=CONFIRMATIONS_MIN,
+        maximum=CONFIRMATIONS_MAX,
+    )
+    reorg_lookback = _require_bounded_int(
+        WATCHER_ENV_VARS["reorg_lookback"],
+        value_of("reorg_lookback"),
+        default=DEFAULT_REORG_LOOKBACK,
+        minimum=REORG_LOOKBACK_MIN,
+        maximum=REORG_LOOKBACK_MAX,
+    )
+    if reorg_lookback <= confirmations:
+        raise GuardConfigError(
+            f"{WATCHER_ENV_VARS['reorg_lookback']} ({reorg_lookback}) harus lebih besar "
+            f"dari {WATCHER_ENV_VARS['confirmations']} ({confirmations}). Jendela yang "
+            "tidak melampaui kedalaman konfirmasi tidak pernah memuat baris final, jadi "
+            "reorg yang lebih dalam dari kedalaman konfirmasi tidak akan pernah terlihat."
+        )
+
+    return WatcherConfig(
+        db_url=db_url,
+        rpc_url=rpc_url,
+        chain_id=chain_id,
+        usdc_address=usdc_address,
+        wallet_address=wallet_address,
+        confirmations=confirmations,
+        scan_batch_size=_require_bounded_int(
+            WATCHER_ENV_VARS["scan_batch_size"],
+            value_of("scan_batch_size"),
+            default=DEFAULT_SCAN_BATCH_SIZE,
+            minimum=SCAN_BATCH_SIZE_MIN,
+            maximum=SCAN_BATCH_SIZE_MAX,
+        ),
+        reorg_lookback=reorg_lookback,
+        interval_seconds=_require_bounded_int(
+            WATCHER_ENV_VARS["interval_seconds"],
+            value_of("interval_seconds"),
+            default=DEFAULT_WATCHER_INTERVAL_SECONDS,
+            minimum=WATCHER_INTERVAL_SECONDS_MIN,
+            maximum=WATCHER_INTERVAL_SECONDS_MAX,
+        ),
+        lock_timeout_ms=_require_bounded_int(
+            WATCHER_ENV_VARS["lock_timeout_ms"],
+            value_of("lock_timeout_ms"),
+            default=DEFAULT_LOCK_TIMEOUT_MS,
+            minimum=LOCK_TIMEOUT_MS_MIN,
+            maximum=LOCK_TIMEOUT_MS_MAX,
+        ),
+    )
+
+
+def load_reconciler_config(env_file: Path) -> ReconcilerConfig:
+    """Muat dan validasi konfigurasi Reconciler.
+
+    Raises:
+        GuardConfigError: pada pelanggaran pertama yang ditemukan.
+    """
+    from_file = read_env_file(env_file)
+
+    def value_of(field: str) -> str:
+        var = RECONCILER_ENV_VARS[field]
+        return (os.environ.get(var) or from_file.get(var) or "").strip()
+
+    db_url = value_of("db_url")
+    if not db_url:
+        raise GuardConfigError(
+            f"{RECONCILER_ENV_VARS['db_url']} belum diisi. Jalankan "
+            f"`guard db bootstrap-roles` lebih dulu, atau isi di {env_file.name}."
+        )
+
+    expected_chain_id = chain_id_for(BASE_SEPOLIA)
+    chain_id = _require_bounded_int(
+        RECONCILER_ENV_VARS["chain_id"],
+        value_of("chain_id"),
+        default=expected_chain_id,
+        minimum=1,
+        maximum=_CHAIN_ID_MAX,
+    )
+    if chain_id != expected_chain_id:
+        raise GuardConfigError(
+            f"{RECONCILER_ENV_VARS['chain_id']} harus {expected_chain_id} "
+            f"({BASE_SEPOLIA}), dapat {chain_id}"
+        )
+
+    return ReconcilerConfig(
+        db_url=db_url,
+        chain_id=chain_id,
+        deadline_seconds=_require_bounded_int(
+            RECONCILER_ENV_VARS["deadline_seconds"],
+            value_of("deadline_seconds"),
+            default=DEFAULT_RECONCILE_DEADLINE_SECONDS,
+            minimum=RECONCILE_DEADLINE_SECONDS_MIN,
+            maximum=RECONCILE_DEADLINE_SECONDS_MAX,
+        ),
+        lock_timeout_ms=_require_bounded_int(
+            RECONCILER_ENV_VARS["lock_timeout_ms"],
+            value_of("lock_timeout_ms"),
+            default=DEFAULT_LOCK_TIMEOUT_MS,
+            minimum=LOCK_TIMEOUT_MS_MIN,
+            maximum=LOCK_TIMEOUT_MS_MAX,
+        ),
+    )
+
+
+def _require_address(var: str, raw: str) -> str:
+    """Alamat ternormalisasi lowercase, atau :class:`GuardConfigError`."""
+    try:
+        return normalize_address(raw)
+    except AddressError as exc:
+        raise GuardConfigError(f"{var} tidak sah: {exc}") from None
+
+
 def _require_existing_file(var: str, raw: str, env_file: Path) -> Path:
     """Pastikan nilai ``var`` menunjuk berkas yang ada dan bisa dibaca.
 

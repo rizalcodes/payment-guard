@@ -27,8 +27,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
-from payment_guard.chain import ChainError, Fees, Receipt
+from payment_guard.chain import ChainError, Fees, Receipt, TransferLog
 from payment_guard.hashing import keccak256
+from payment_guard.money import BaseUnits
 
 #: Seed uji publik: akun pertama Hardhat. Bukan dana nyata, bukan rahasia.
 TEST_WALLET_SEED: Final = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
@@ -64,6 +65,17 @@ def tx_hash_of(raw_tx: bytes) -> str:
     return "0x" + keccak256(bytes(raw_tx)).hex()
 
 
+def fake_hash(label: str) -> str:
+    """Hash 32 byte yang bisa diulang, dari ``label``.
+
+    Dipakai untuk hash blok di tes: ia memenuhi CHECK
+    ``'^0x[0-9a-f]{64}$'`` dan label yang sama selalu memberi hash yang sama,
+    jadi tes bisa menulis ``fake_hash("blok-7")`` dan ``fake_hash("blok-7-v2")``
+    untuk membedakan rantai sebelum dan sesudah reorg.
+    """
+    return "0x" + keccak256(label.encode()).hex()
+
+
 @dataclass
 class FakeChain:
     """Klien chain dalam memori.
@@ -93,6 +105,21 @@ class FakeChain:
     send_failure: str | None = None
     #: Bila terisi, ``receipt`` melempar :class:`ChainError`.
     receipt_failure: str | None = None
+
+    # -- Keadaan rantai untuk Watcher (M6) --------------------------------- #
+
+    #: Nomor blok terakhir yang "ada" di tiruan ini.
+    latest_block_value: int = 0
+    #: ``block_number -> block_hash`` kanonik. Nomor di luar peta ini, tapi
+    #: masih ``<= latest_block_value``, mendapat hash turunan yang stabil.
+    block_hashes: dict[int, str] = field(default_factory=dict)
+    #: Semua log ``Transfer`` yang ada di rantai, dalam urutan apa pun.
+    #: ``transfer_logs`` yang menyaringnya, sama seperti node.
+    logs: list[TransferLog] = field(default_factory=list)
+    #: Bila terisi, ``transfer_logs`` melempar :class:`ChainError`.
+    logs_failure: str | None = None
+    #: Rentang blok yang pernah diminta, untuk memeriksa batch dan kursor.
+    log_ranges: list[tuple[int, int]] = field(default_factory=list)
 
     # -- ChainClient ------------------------------------------------------- #
 
@@ -137,7 +164,127 @@ class FakeChain:
             raise ChainError(self.receipt_failure)
         return self.receipts.get(tx_hash)
 
+    def latest_block(self) -> int:
+        self.calls.append("latest_block")
+        return self.latest_block_value
+
+    def block_hash(self, block_number: int) -> str | None:
+        """Hash kanonik blok itu, atau ``None`` bila belum ada.
+
+        Blok yang tidak disebut di :attr:`block_hashes` mendapat hash turunan
+        yang stabil, supaya tes yang tidak peduli hash tidak perlu mengisi
+        peta blok sama sekali. Tes reorg mengisinya dengan sengaja.
+        """
+        self.calls.append("block_hash")
+        if block_number > self.latest_block_value or block_number < 0:
+            return None
+        return self.block_hashes.get(block_number, fake_hash(f"blok-{block_number}"))
+
+    def transfer_logs(
+        self,
+        token: str,
+        *,
+        from_addr: str,
+        first_block: int,
+        last_block: int,
+    ) -> tuple[TransferLog, ...]:
+        """Saring seperti node: per pengirim dan per rentang blok.
+
+        Penyaringannya ada di sini, bukan di pemanggil, justru karena itu yang
+        dilakukan node sungguhan. Tiruan yang mengembalikan semua log akan
+        membuat tes lulus walau Watcher lupa memasang filter.
+        """
+        self.calls.append("transfer_logs")
+        if self.logs_failure is not None:
+            raise ChainError(self.logs_failure)
+        self.log_ranges.append((first_block, last_block))
+        return tuple(
+            log
+            for log in self.logs
+            if log.from_addr == from_addr and first_block <= log.block_number <= last_block
+        )
+
     # -- Pembantu tes ------------------------------------------------------ #
+
+    def add_transfer(
+        self,
+        *,
+        tx_hash: str,
+        to_addr: str,
+        amount_base: int,
+        block_number: int,
+        log_index: int = 0,
+        from_addr: str = TEST_WALLET_ADDRESS,
+        block_hash: str | None = None,
+        confirm: bool = True,
+    ) -> TransferLog:
+        """Taruh satu log ``Transfer`` di rantai tiruan.
+
+        Secara bawaan ia juga memberi transaksinya receipt dan memajukan
+        ``latest_block_value`` sampai blok itu: log yang ada di blok yang
+        "belum terjadi" adalah keadaan yang tidak mungkin di chain, dan tes
+        yang membuatnya akan menguji hal yang tidak pernah terjadi.
+        """
+        resolved_hash = block_hash or fake_hash(f"blok-{block_number}")
+        self.block_hashes.setdefault(block_number, resolved_hash)
+        self.latest_block_value = max(self.latest_block_value, block_number)
+        log = TransferLog(
+            chain_id=self.chain_id_value,
+            tx_hash=tx_hash,
+            log_index=log_index,
+            block_number=block_number,
+            block_hash=resolved_hash,
+            from_addr=from_addr,
+            to_addr=to_addr,
+            amount_base=BaseUnits(amount_base),
+        )
+        self.logs.append(log)
+        if confirm:
+            self.receipts[tx_hash] = Receipt(tx_hash=tx_hash, status=1, block_number=block_number)
+        return log
+
+    def advance_to(self, block_number: int) -> None:
+        """Majukan kepala rantai ke ``block_number``."""
+        self.latest_block_value = max(self.latest_block_value, block_number)
+
+    def reorg_block(self, block_number: int, *, label: str | None = None) -> str:
+        """Ganti hash kanonik blok ``block_number``: rantainya berubah.
+
+        Receipt dan log TIDAK diubah di sini. Itu disengaja: reorg yang
+        memindahkan transaksi dan reorg yang menghilangkannya adalah dua
+        keadaan berbeda di PRD v2 bagian 10, dan tes harus bisa membuat
+        keduanya. Pakai :meth:`drop_transaction` atau :meth:`move_transaction`
+        untuk menentukan yang mana.
+        """
+        new_hash = fake_hash(label or f"blok-{block_number}-setelah-reorg")
+        self.block_hashes[block_number] = new_hash
+        return new_hash
+
+    def drop_transaction(self, tx_hash: str) -> None:
+        """Hilangkan receipt-nya: transaksinya tidak ada di rantai baru."""
+        self.receipts.pop(tx_hash, None)
+        self.logs = [log for log in self.logs if log.tx_hash != tx_hash]
+
+    def move_transaction(self, tx_hash: str, *, to_block: int) -> None:
+        """Pindahkan transaksinya ke blok lain, seperti reorg yang menata ulang."""
+        self.block_hashes.setdefault(to_block, fake_hash(f"blok-{to_block}"))
+        self.latest_block_value = max(self.latest_block_value, to_block)
+        self.receipts[tx_hash] = Receipt(tx_hash=tx_hash, status=1, block_number=to_block)
+        self.logs = [
+            TransferLog(
+                chain_id=log.chain_id,
+                tx_hash=log.tx_hash,
+                log_index=log.log_index,
+                block_number=to_block,
+                block_hash=self.block_hashes[to_block],
+                from_addr=log.from_addr,
+                to_addr=log.to_addr,
+                amount_base=log.amount_base,
+            )
+            if log.tx_hash == tx_hash
+            else log
+            for log in self.logs
+        ]
 
     def confirm(self, tx_hash: str, *, block_number: int = DEFAULT_BLOCK_NUMBER) -> Receipt:
         """Beri ``tx_hash`` receipt yang berhasil."""

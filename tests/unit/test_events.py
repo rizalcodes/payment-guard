@@ -72,20 +72,55 @@ class TestEnum:
             "execution_confirmed",
             "execution_failed",
             "execution_rejected",
+            # M6
+            "settlement_finalized",
+            "settlement_moved",
+            "settlement_reorged",
+            "settlement_restored",
+            "alarm_final_settlement_reorged",
+            "reconciliation_state_changed",
         }
 
-    def test_later_milestone_events_are_absent(self) -> None:
-        """Nama yang belum pernah ditulis tidak boleh ada di enum.
+    def test_every_event_has_a_caller_in_src(self) -> None:
+        """Setiap kejadian di enum harus benar-benar ditulis oleh sebuah modul.
 
-        Enum yang memuat nama yang belum dipakai tidak bisa dibedakan dari
-        enum yang memuat nama yang salah ejaannya.
+        Ini versi tegak dari aturan yang sebelumnya diuji sebagai "kejadian
+        milestone berikutnya belum ada": enum yang memuat nama yang belum
+        pernah ditulis tidak bisa dibedakan dari enum yang memuat nama yang
+        salah ejaannya. Daftar nama milestone berikutnya akan basi setiap
+        milestone; aturannya tidak.
+
+        Yang dicari adalah ``Event.NAMA`` sebagai atribut, bukan string:
+        ``test_no_module_hardcodes_an_event_name`` sudah melarang stringnya.
         """
-        for later in (
-            "settlement_finalized",
-            "reconciliation_state_changed",
-            "alarm_final_settlement_reorged",
-        ):
-            assert later not in known_events()
+        referenced: set[str] = set()
+        for path in sorted(SRC.rglob("*.py")):
+            if path.name == "events.py":
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Attribute)
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == "Event"
+                ):
+                    referenced.add(node.attr)
+
+        tanpa_pemanggil = sorted(event.value for event in Event if event.name not in referenced)
+        assert tanpa_pemanggil == [], tanpa_pemanggil
+
+    def test_that_caller_check_would_catch_an_unused_event(self) -> None:
+        """Penjaga: pemeriksa di atas bukan tes kosong."""
+        planted = ast.parse("audit(cur, Event.DECISION_MADE, {})")
+        found = {
+            node.attr
+            for node in ast.walk(planted)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "Event"
+        }
+        assert found == {"DECISION_MADE"}
+        assert "SETTLEMENT_FINALIZED" not in found
 
     def test_values_are_plain_strings(self) -> None:
         assert Event.DECISION_MADE == "decision_made"

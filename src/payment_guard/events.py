@@ -8,11 +8,13 @@ bukti yang nama kejadiannya diketik ulang di sepuluh tempat akan punya sebelas
 ejaan. Satu enum berarti ``docs/events.md`` di M9 bisa dibuat dari kode, dan
 CHECK ``event`` di database bisa ditambahkan tanpa menemukan kejutan.
 
-Hanya kejadian yang sudah dipakai yang ada di sini. Kejadian milestone lain
-(``settlement_*``, ``reconciliation_*``, ``alarm_*``) sengaja **belum**
-dibuat: enum yang memuat nama yang belum pernah ditulis tidak bisa dibedakan
-dari enum yang memuat nama yang salah. ``execution_*`` masuk di M5 karena di
-situlah Executor mulai menulisnya.
+Hanya kejadian yang sudah dipakai yang ada di sini: enum yang memuat nama yang
+belum pernah ditulis tidak bisa dibedakan dari enum yang memuat nama yang
+salah. ``execution_*`` masuk di M5 karena di situlah Executor mulai
+menulisnya, dan ``settlement_*``, ``alarm_*``, serta
+``reconciliation_state_changed`` masuk di M6 karena di situlah Watcher dan
+Reconciler mulai menulisnya. Semuanya punya pemanggil dan tesnya; ada tes yang
+menolak kejadian tanpa pemanggil di ``src/``.
 """
 
 from __future__ import annotations
@@ -85,6 +87,49 @@ class Event(StrEnum):
     #: daftar. Keputusan operator, 4 November 2026.
     EXECUTION_REJECTED = "execution_rejected"
 
+    # --- M6: Watcher (PRD v2 bagian 10, Arsitektur v1.1 bagian 10) ---
+    #
+    # Lima nama di bawah diambil apa adanya dari tabel state machine di PRD v2
+    # bagian 10 dan dari diagram sequence Arsitektur bagian 10. Tidak ada nama
+    # baru yang dikarang di M6.
+    #
+    # Yang sengaja TIDAK ada: kejadian untuk INSERT settlement `pending`.
+    # Arsitektur bagian 10 menuliskan langkah itu sebagai "INSERT settlement
+    # pending ON CONFLICT DO NOTHING, naikkan last_scanned, COMMIT" tanpa
+    # audit, dan memang begitu seharusnya: setiap transfer dari wallet
+    # Executor akan menghasilkan satu baris, jadi mencatatnya lagi di
+    # `audit_log` hanya menduplikasi `settlements` dengan tabel yang tidak bisa
+    # di-UPDATE. Yang perlu jejak adalah **perubahan** keadaan.
+    #: Settlement melewati kedalaman konfirmasi dan hash bloknya masih kanonik.
+    SETTLEMENT_FINALIZED = "settlement_finalized"
+    #: Hash blok berubah tapi transaksinya masih ada: baris yang sama dipindah
+    #: ke blok baru. Kunci uniknya tidak berubah, jadi tidak ada baris ganda.
+    SETTLEMENT_MOVED = "settlement_moved"
+    #: Hash blok berubah **dan** transaksinya hilang. Baris tidak dihapus:
+    #: yang pernah terlihat di chain tetap tercatat pernah terlihat.
+    SETTLEMENT_REORGED = "settlement_reorged"
+    #: Transaksi yang sudah ``reorged`` muncul lagi di blok lain.
+    SETTLEMENT_RESTORED = "settlement_restored"
+    #: Baris yang sudah ``final`` ternyata ter-reorg di dalam jendela mundur K.
+    #:
+    #: Inilah satu-satunya kejadian M6 yang berawalan ``alarm_``, dan awalan
+    #: itu bukan hiasan: ``final`` adalah janji yang kami buat ke rekonsiliasi,
+    #: dan transisi ini adalah janji itu dibatalkan. Rekonsiliasinya menjadi
+    #: ``invalidated`` (PRD v2 bagian 11).
+    ALARM_FINAL_SETTLEMENT_REORGED = "alarm_final_settlement_reorged"
+
+    # --- M6: Reconciler (PRD v2 bagian 11, Arsitektur v1.1 bagian 11) ---
+    #: State rekonsiliasi satu subjek berubah.
+    #:
+    #: Satu nama untuk semua state, bukan satu nama per state. Arsitektur
+    #: bagian 11 menuliskannya begitu ("Setiap perubahan state ditulis ke
+    #: ``audit_log`` (``reconciliation_state_changed``)"), dan alasannya sama
+    #: dengan ``execution_rejected`` di M5: state-nya ada di payload, dari
+    #: daftar tertutup :data:`payment_guard.reconciler.RECONCILIATION_STATES`.
+    #: Nama yang mengkodekan state berarti satu nama baru setiap kali daftar
+    #: state bertambah, dan enum ini berhenti bisa dipakai sebagai daftar.
+    RECONCILIATION_STATE_CHANGED = "reconciliation_state_changed"
+
 
 #: Actor yang sah untuk tiap kejadian.
 #:
@@ -118,6 +163,16 @@ EVENT_ACTORS: Final[dict[Event, frozenset[Actor]]] = {
     Event.EXECUTION_CONFIRMED: frozenset({Actor.EXECUTOR}),
     Event.EXECUTION_FAILED: frozenset({Actor.EXECUTOR}),
     Event.EXECUTION_REJECTED: frozenset({Actor.EXECUTOR}),
+    # Kejadian M6 Watcher semuanya `watcher`, dan hanya itu. Tidak ada manusia
+    # di jalur ini sama sekali: Watcher melaporkan apa yang dilihatnya di
+    # chain. Reconciler tidak boleh menulisnya meski ia membaca hasilnya —
+    # satu penulis per fakta (Arsitektur v1.1 prinsip 2).
+    Event.SETTLEMENT_FINALIZED: frozenset({Actor.WATCHER}),
+    Event.SETTLEMENT_MOVED: frozenset({Actor.WATCHER}),
+    Event.SETTLEMENT_REORGED: frozenset({Actor.WATCHER}),
+    Event.SETTLEMENT_RESTORED: frozenset({Actor.WATCHER}),
+    Event.ALARM_FINAL_SETTLEMENT_REORGED: frozenset({Actor.WATCHER}),
+    Event.RECONCILIATION_STATE_CHANGED: frozenset({Actor.RECONCILER}),
 }
 
 #: Kunci payload yang ditolak, apa pun isinya.

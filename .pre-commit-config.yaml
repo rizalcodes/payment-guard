@@ -41,6 +41,8 @@ repos:
           - src/payment_guard/decision_service.py
           - src/payment_guard/executor.py
           - src/payment_guard/approvals_cli.py
+          - src/payment_guard/watcher.py
+          - src/payment_guard/reconciler.py
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
