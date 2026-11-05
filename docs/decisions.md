@@ -89,13 +89,22 @@ lewat jendela itu dan lewat `reorged -> pending`, dan semuanya punya tes.
 Yang hilang: pembayaran terlihat beberapa detik lebih lambat. Di Base dengan
 blok 2 detik dan `CONFIRMATIONS=12`, sekitar 24 detik.
 
-## M6 — Reconciler lebih awal dari peta jalan, tanpa lock
+## M6 — Reconciler lebih awal dari peta jalan: disetujui
 
-Peta jalan di PRD v2 bagian 15 menaruh Reconciler di **M7**, bukan M6. Brief
-memintanya di M6. Peta jalan adalah rencana, bukan aturan perilaku, dan tidak
-ada satu pun aturan Reconciler di PRD bagian 11 yang dilanggar dengan
-mengerjakannya lebih awal — jadi dikerjakan, dan dicatat di sini. PRD tidak
-diubah.
+Reconciler digeser ke M6 oleh pelaksana; disetujui CoS 5 Nov 2026.
+
+Peta jalan di PRD v2.1 §14 sudah direvisi: M6 = Watcher dan Reconciler inti,
+M7 = sisanya. PRD v2 §14 tidak disunting — ia dokumen yang ditutup, dan kepala
+PRD v2.1 sudah menyatakan bagian yang direvisi menggantikan pendahulunya. Jadi
+tidak ada dua peta jalan yang bertentangan: ada satu yang berlaku dan satu yang
+sudah digantikan, dan §14 v2.1 kini menyebutnya eksplisit.
+
+## M6 — Reconciler tanpa lock
+
+Catatan awal entri ini menyebut "PRD v2 bagian 15" sebagai tempat peta jalan.
+Itu salah: peta jalan PRD v2 ada di **bagian 14** ("Struktur repo & milestone"),
+dan bagian 15 adalah "Definition of Done". Dikoreksi 5 Nov 2026 bersama revisi
+peta jalan di atas.
 
 Reconciler **tidak mengambil lock**. Tabel lock di Arsitektur v1.1 bagian 4
 adalah daftar tertutup dan tidak punya namespace untuknya;

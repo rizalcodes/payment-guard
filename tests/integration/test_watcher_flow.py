@@ -39,6 +39,7 @@ from conftest_executor import (
 )
 from conftest_guard import RECIPIENT_A, RECIPIENT_B, USDC
 from fake_chain import TEST_WALLET_ADDRESS, FakeChain
+from payment_guard.chain import ChainError
 from payment_guard.config import ExecutorConfig, ReconcilerConfig, WatcherConfig
 from payment_guard.executor import execute_decision, open_runtime
 from payment_guard.reconciler import (
@@ -59,6 +60,7 @@ from payment_guard.watcher import (
     STATUS_REORGED,
     WatcherError,
     close_runtime,
+    run_watch,
     scan_once,
     start_watcher,
 )
@@ -115,13 +117,23 @@ def watch(
     chain: FakeChain,
     *,
     cycles: int = 1,
-    from_block: int | None = None,
+    from_block: int | None = 0,
+    out: io.StringIO | None = None,
 ) -> list[Any]:
-    """Jalankan ``cycles`` siklus Watcher pada runtime yang sama."""
+    """Jalankan ``cycles`` siklus Watcher pada runtime yang sama.
+
+    ``from_block`` default **0**, dan nolnya eksplisit. Sejak M6.1 Watcher
+    menolak start tanpa kursor dan tanpa ``--from-block``; nol bukan nilai
+    terlarang, yang terlarang adalah nol yang tersirat. Rantai tiruan di berkas
+    ini pendek, jadi 0 adalah blok awal yang benar untuknya.
+
+    ``from_block`` hanya diberikan pada siklus pertama, sama seperti
+    :func:`payment_guard.watcher.run_watch`.
+    """
     runtime = open_watcher(config, client=chain)
     try:
         return [
-            scan_once(runtime, from_block=from_block if index == 0 else None)
+            scan_once(runtime, from_block=from_block if index == 0 else None, out=out)
             for index in range(cycles)
         ]
     finally:
@@ -1177,6 +1189,342 @@ class TestTheCursor:
         assert value < 4000
 
 
+class TestFromBlockIsRequiredOnce:
+    """M6.1: tanpa kursor dan tanpa ``--from-block``, Watcher berhenti.
+
+    M6 memakai 0 sebagai default. Itu salah untuk Base Sepolia: dari genesis
+    sampai kepala rantai ada puluhan juta blok, jadi kursornya praktis tidak
+    pernah sampai ke pembayaran hari ini — dan Watcher yang terlihat jalan tapi
+    tidak akan pernah tiba lebih buruk daripada Watcher yang menolak start.
+    """
+
+    def test_it_refuses_and_names_the_flag(
+        self, watcher_config: WatcherConfig, chain: FakeChain, executor_db: str
+    ) -> None:
+        chain.advance_to(100)
+        assert cursor_value(executor_db) is None
+        runtime = open_watcher(watcher_config, client=chain)
+        try:
+            with pytest.raises(WatcherError, match="--from-block"):
+                scan_once(runtime, from_block=None)
+        finally:
+            close_runtime(runtime)
+
+    def test_the_refusal_writes_nothing(
+        self, watcher_config: WatcherConfig, chain: FakeChain, executor_db: str
+    ) -> None:
+        """Berhenti berarti berhenti: tidak ada kursor dan tidak ada settlement."""
+        chain.add_transfer(
+            tx_hash=FOREIGN_TX, to_addr=RECIPIENT_B, amount_base=5 * USDC, block_number=BLOCK
+        )
+        deep_enough(chain)
+        runtime = open_watcher(watcher_config, client=chain)
+        try:
+            with pytest.raises(WatcherError):
+                scan_once(runtime, from_block=None)
+        finally:
+            close_runtime(runtime)
+
+        assert cursor_value(executor_db) is None
+        assert settlement_rows(executor_db) == []
+
+    def test_run_watch_propagates_it_and_releases_the_lock(
+        self, watcher_config: WatcherConfig, chain: FakeChain
+    ) -> None:
+        """``run_watch`` melempar; ``cli._cmd_watch`` yang mengubahnya jadi exit 1.
+
+        Yang diperiksa di sini juga: lock sesinya dilepas walau siklusnya
+        gagal. Tanpa itu, satu kesalahan pemakaian flag akan membuat Watcher
+        berikutnya ditolak sampai prosesnya dimatikan.
+        """
+        chain.advance_to(100)
+        out = io.StringIO()
+        with pytest.raises(WatcherError, match="--from-block"):
+            run_watch(watcher_config, client=chain, out=out)
+
+        kedua = open_watcher(watcher_config, client=chain)
+        close_runtime(kedua)
+
+    def test_the_cli_catches_it(self) -> None:
+        """``_cmd_watch`` menangkap ``WatcherError`` dan mengembalikan 1."""
+        import inspect
+
+        from payment_guard import cli
+
+        sumber = inspect.getsource(cli._cmd_watch)
+        assert "WatcherError" in sumber
+        assert "return 1" in sumber
+
+    def test_an_existing_cursor_ignores_the_flag_and_warns(
+        self, watcher_config: WatcherConfig, chain: FakeChain, executor_db: str
+    ) -> None:
+        """Diabaikan **dan** diberitahukan. Diam-diam diabaikan sama buruknya."""
+        chain.advance_to(5000)
+        set_cursor(executor_db, 10)
+        out = io.StringIO()
+        reports = watch(watcher_config, chain, from_block=4000, out=out)
+
+        assert reports[0].from_block_ignored == 4000
+        assert reports[0].first_block == 11
+        keluaran = out.getvalue()
+        assert "PERINGATAN" in keluaran
+        assert "DIABAIKAN" in keluaran
+        assert "runbook.md" in keluaran
+
+    def test_the_cursor_is_untouched_by_the_ignored_flag(
+        self, watcher_config: WatcherConfig, chain: FakeChain, executor_db: str
+    ) -> None:
+        """Kursor maju dari tempatnya sendiri, bukan melompat ke ``--from-block``."""
+        chain.advance_to(5000)
+        set_cursor(executor_db, 10)
+        watch(watcher_config, chain, from_block=4000)
+        assert cursor_value(executor_db) == 10 + watcher_config.scan_batch_size
+
+    def test_no_warning_when_the_flag_is_not_given(
+        self, watcher_config: WatcherConfig, chain: FakeChain, executor_db: str
+    ) -> None:
+        chain.advance_to(5000)
+        set_cursor(executor_db, 10)
+        out = io.StringIO()
+        reports = watch(watcher_config, chain, from_block=None, out=out)
+        assert reports[0].from_block_ignored is None
+        assert "PERINGATAN" not in out.getvalue()
+
+
+class TestChunkedGetLogs:
+    """Node publik menolak rentang lebar; rentangnya dibagi dua sampai diterima."""
+
+    def seeded_chain(self, *, blocks: tuple[int, ...] = (5, 700, 1500)) -> FakeChain:
+        """Rantai dengan transfer di beberapa blok yang berjauhan.
+
+        Berjauhan dengan sengaja: rentang yang dipecah harus tetap mencakup
+        semuanya, dan transfer yang berdekatan tidak akan membuktikan itu.
+        """
+        chain = FakeChain()
+        for index, block in enumerate(blocks):
+            chain.add_transfer(
+                tx_hash="0x" + f"{index + 1:02x}" * 32,
+                to_addr=RECIPIENT_B,
+                amount_base=(index + 1) * USDC,
+                block_number=block,
+            )
+        chain.advance_to(max(blocks) + TEST_CONFIRMATIONS)
+        return chain
+
+    def test_a_narrow_node_still_scans_every_block(
+        self, watcher_config: WatcherConfig, executor_db: str
+    ) -> None:
+        """Node hanya menerima 100 blok sekali minta; tidak ada yang terlewat."""
+        chain = self.seeded_chain()
+        chain.max_log_range = 100
+        lebar = dataclasses.replace(watcher_config, scan_batch_size=2000)
+
+        reports = watch(lebar, chain, from_block=0)
+
+        assert reports[0].ranges_fetched > 1
+        assert reports[0].range_shrinks > 0
+        assert len(settlement_rows(executor_db)) == 3
+
+    def test_the_width_actually_shrinks_by_halving(
+        self, watcher_config: WatcherConfig, executor_db: str
+    ) -> None:
+        chain = self.seeded_chain()
+        chain.max_log_range = 100
+        lebar = dataclasses.replace(watcher_config, scan_batch_size=1000)
+
+        watch(lebar, chain, from_block=0)
+
+        diminta = chain.log_range_widths
+        assert diminta[0] == 1000
+        # 1000 -> 500 -> 250 -> 125 -> 62, dan 62 diterima.
+        assert diminta[:5] == [1000, 500, 250, 125, 62]
+
+    def test_the_cursor_advances_per_range(
+        self, watcher_config: WatcherConfig, executor_db: str
+    ) -> None:
+        """Aturan batch M6 tidak berubah: satu rentang, satu transaksi."""
+        chain = self.seeded_chain()
+        chain.max_log_range = 100
+        lebar = dataclasses.replace(watcher_config, scan_batch_size=500)
+
+        reports = watch(lebar, chain, from_block=0)
+
+        assert cursor_value(executor_db) == reports[0].last_block
+        assert reports[0].last_block == 499
+
+    def test_rescanning_the_same_ranges_is_idempotent(
+        self, watcher_config: WatcherConfig, executor_db: str
+    ) -> None:
+        chain = self.seeded_chain()
+        chain.max_log_range = 100
+        lebar = dataclasses.replace(watcher_config, scan_batch_size=2000)
+
+        watch(lebar, chain, from_block=0)
+        jumlah = len(settlement_rows(executor_db))
+        set_cursor(executor_db, 0)
+        watch(lebar, chain, from_block=0)
+
+        assert len(settlement_rows(executor_db)) == jumlah == 3
+
+    def test_a_non_range_error_is_raised_as_is(
+        self, watcher_config: WatcherConfig, executor_db: str
+    ) -> None:
+        """Tidak diubah menjadi percobaan ulang.
+
+        Node yang menolak karena filter salah akan menolak hal yang sama
+        dengan rentang separuh — hanya lebih lambat, dan pesan akhirnya akan
+        menyalahkan lebar rentang untuk masalah yang bukan itu.
+        """
+        chain = self.seeded_chain()
+        chain.logs_failure = "invalid topic filter"
+
+        runtime = open_watcher(watcher_config, client=chain)
+        try:
+            with pytest.raises(ChainError, match="invalid topic filter"):
+                scan_once(runtime, from_block=0)
+        finally:
+            close_runtime(runtime)
+
+        assert chain.log_range_widths == [watcher_config.scan_batch_size], "ada retry"
+        assert cursor_value(executor_db) is None
+
+    def test_a_node_that_refuses_even_the_floor_stops_clearly(
+        self, watcher_config: WatcherConfig, executor_db: str
+    ) -> None:
+        """Di lebar 10 blok, penolakan hampir pasti bukan soal rentang."""
+        chain = self.seeded_chain()
+        chain.max_log_range = 1
+
+        runtime = open_watcher(watcher_config, client=chain)
+        try:
+            with pytest.raises(WatcherError, match="lantainya"):
+                scan_once(runtime, from_block=0)
+        finally:
+            close_runtime(runtime)
+
+        assert cursor_value(executor_db) is None
+
+    def test_the_attempt_limit_stops_without_advancing_the_cursor(
+        self, watcher_config: WatcherConfig, executor_db: str
+    ) -> None:
+        """Batas percobaan tercapai: berhenti, dan kursor tidak maju."""
+        chain = self.seeded_chain()
+        chain.max_log_range = 20
+        sempit = dataclasses.replace(watcher_config, scan_batch_size=1000, scan_max_attempts=2)
+
+        runtime = open_watcher(sempit, client=chain)
+        try:
+            with pytest.raises(WatcherError, match="2 percobaan"):
+                scan_once(runtime, from_block=0)
+        finally:
+            close_runtime(runtime)
+
+        assert cursor_value(executor_db) is None
+        assert settlement_rows(executor_db) == []
+
+    def test_a_failure_mid_scan_keeps_the_ranges_already_stored(
+        self, watcher_config: WatcherConfig, executor_db: str
+    ) -> None:
+        """Rentang yang sudah tersimpan tetap tersimpan, kursornya tetap maju.
+
+        Yang penting bukan bahwa seluruh siklus atomik — ia tidak, dan tidak
+        perlu. Yang penting adalah tidak ada blok yang ditandai sudah dipindai
+        padahal log-nya belum tersimpan, dan tidak ada blok yang terlewat.
+        """
+        chain = self.seeded_chain(blocks=(5, 700))
+        chain.max_log_range = 100
+        lebar = dataclasses.replace(watcher_config, scan_batch_size=1000)
+
+        # Rentang pertama berhasil, lalu node mulai menolak dengan error yang
+        # bukan soal rentang.
+        runtime = open_watcher(lebar, client=chain)
+        try:
+            asli = chain.transfer_logs
+            panggilan = {"n": 0}
+
+            def sekali_lalu_gagal(*args: Any, **kwargs: Any) -> Any:
+                panggilan["n"] += 1
+                if panggilan["n"] > 5:
+                    raise ChainError("unauthorized: bad api key")
+                return asli(*args, **kwargs)
+
+            chain.transfer_logs = sekali_lalu_gagal  # type: ignore[method-assign]
+            with pytest.raises(ChainError, match="unauthorized"):
+                scan_once(runtime, from_block=0)
+        finally:
+            close_runtime(runtime)
+
+        maju = cursor_value(executor_db)
+        assert maju is not None, "rentang yang berhasil harus sudah tersimpan"
+        assert maju < 999, "kursor tidak boleh melewati rentang yang gagal"
+        # Tidak ada blok yang terlewat: semua yang di bawah kursor sudah dipindai.
+        for row in settlement_rows(executor_db):
+            assert row["block_number"] <= maju
+
+
+@pytest.mark.skip(
+    reason=(
+        "menunggu keputusan CoS: cek alamat wallet saat start (B3) butuh SELECT "
+        "pada executions, yang tidak dimiliki watcher_rw. Opsi A: tambah grant "
+        "lewat migrasi 0003. Opsi B: pindahkan cek ke Reconciler, yang sudah "
+        "punya SELECT pada keduanya. Tidak dikerjakan sampai diputuskan."
+    )
+)
+class TestWalletAddressGuardAtStartup:
+    """B3, TERTAHAN. Tes ini mendokumentasikan perilaku yang **diminta**, bukan yang ada.
+
+    Yang diminta: Watcher membandingkan ``EXECUTOR_WALLET_ADDRESS`` dengan
+    ``from_addr`` di ``executions`` dan menolak start bila ada yang berbeda.
+
+    Kenapa tertahan: itu butuh SELECT pada ``executions``, dan matriks hak di
+    ``0002_roles.sql`` tidak memberikannya ke ``watcher_rw`` — bukan karena
+    kelalaian, tapi supaya proses yang menulis ``settlements`` tidak juga bisa
+    membaca keputusan yang mengizinkannya (Arsitektur v1.1 bagian 3.3).
+    Menambah grant berarti melonggarkan pemisahan yang justru paling ingin
+    dijaga di seluruh proyek ini, dan itu bukan keputusan pelaksana.
+
+    Tes ini dibiarkan ``skip`` dengan sengaja, bukan dihapus: ia catatan utang
+    yang muncul di setiap laporan pytest, bukan di berkas yang bisa terlupa.
+    """
+
+    def test_a_mismatched_wallet_refuses_to_start(self) -> None:
+        raise AssertionError("belum diimplementasi; lihat alasan skip di kelas ini")
+
+    def test_a_matching_wallet_starts_normally(self) -> None:
+        raise AssertionError("belum diimplementasi; lihat alasan skip di kelas ini")
+
+    def test_an_empty_executions_table_does_not_block_startup(self) -> None:
+        raise AssertionError("belum diimplementasi; lihat alasan skip di kelas ini")
+
+
+class TestTheWatcherStillCannotReadExecutions:
+    """Penjaga untuk B3: selama tertahan, grant-nya tidak boleh berubah.
+
+    Kalau suatu hari seseorang menambahkan SELECT pada ``executions`` ke
+    ``watcher_rw`` tanpa keputusan, tes ini yang menangkapnya — dan ia berada
+    di berkas yang sama dengan tes yang di-skip di atas, supaya keduanya
+    terbaca bersama.
+    """
+
+    def test_the_matrix_gives_the_watcher_nothing_on_executions(self) -> None:
+        from payment_guard.privileges import TABLE_MATRIX
+
+        assert "watcher" not in TABLE_MATRIX["executions"]
+
+    def test_the_matrix_gives_the_watcher_nothing_on_decisions(self) -> None:
+        from payment_guard.privileges import TABLE_MATRIX
+
+        assert "watcher" not in TABLE_MATRIX["decisions"]
+
+    def test_there_is_no_third_migration(self) -> None:
+        """B3 tidak boleh diselesaikan diam-diam lewat migrasi baru."""
+        from pathlib import Path
+
+        akar = Path(__file__).resolve().parents[2]
+        migrasi = sorted(p.name for p in (akar / "migrations").glob("*.sql"))
+        assert migrasi == ["0001_init.sql", "0002_roles.sql"], migrasi
+
+
 class TestOnlyOneWatcherPerChain:
     def test_a_second_watcher_is_refused(
         self, watcher_config: WatcherConfig, chain: FakeChain
@@ -1256,8 +1604,23 @@ class TestTheWatcherNeverLeaksSecrets:
         out = io.StringIO()
         runtime = start_watcher(watcher_config, client=chain, out=out)
         try:
-            scan_once(runtime, out=out)
+            scan_once(runtime, from_block=0, out=out)
         finally:
             close_runtime(runtime)
         assert "devonly_not_a_secret" not in out.getvalue()
         assert "postgresql://" not in out.getvalue()
+
+    def test_the_from_block_refusal_does_not_leak_the_url_either(
+        self, watcher_config: WatcherConfig, chain: FakeChain
+    ) -> None:
+        """Jalur gagal juga jalur yang pesannya dibaca operator."""
+        chain.advance_to(100)
+        runtime = open_watcher(watcher_config, client=chain)
+        try:
+            with pytest.raises(WatcherError) as info:
+                scan_once(runtime, from_block=None)
+        finally:
+            close_runtime(runtime)
+        pesan = str(info.value)
+        assert "devonly_not_a_secret" not in pesan
+        assert "postgresql://" not in pesan

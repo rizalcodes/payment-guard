@@ -118,6 +118,16 @@ class FakeChain:
     logs: list[TransferLog] = field(default_factory=list)
     #: Bila terisi, ``transfer_logs`` melempar :class:`ChainError`.
     logs_failure: str | None = None
+    #: Bila terisi, rentang yang lebih lebar dari ini ditolak dengan pesan yang
+    #: berbunyi seperti penolakan node publik sungguhan.
+    #:
+    #: Node publik tidak punya kode error standar untuk ini; masing-masing
+    #: menuliskannya sendiri. Pesan di bawah meniru bentuk yang paling umum,
+    #: dan Watcher mengenalinya lewat pencocokan kata
+    #: (``payment_guard.watcher.RANGE_REJECTION_MARKERS``).
+    max_log_range: int | None = None
+    #: Lebar rentang yang pernah diminta, untuk memeriksa pengecilannya.
+    log_range_widths: list[int] = field(default_factory=list)
     #: Rentang blok yang pernah diminta, untuk memeriksa batch dan kursor.
     log_ranges: list[tuple[int, int]] = field(default_factory=list)
 
@@ -195,8 +205,15 @@ class FakeChain:
         membuat tes lulus walau Watcher lupa memasang filter.
         """
         self.calls.append("transfer_logs")
+        width = last_block - first_block + 1
+        self.log_range_widths.append(width)
         if self.logs_failure is not None:
             raise ChainError(self.logs_failure)
+        if self.max_log_range is not None and width > self.max_log_range:
+            raise ChainError(
+                f"eth_getLogs ditolak 127.0.0.1: query returned more than 10000 results; "
+                f"block range too large ({width} blok, batas {self.max_log_range})"
+            )
         self.log_ranges.append((first_block, last_block))
         return tuple(
             log

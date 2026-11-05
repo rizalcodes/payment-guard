@@ -234,6 +234,60 @@ class TestTheReleaseRule:
         assert "untracked" in teks
 
 
+class TestTheWatcherSeedingProcedure:
+    """Runbook bagian 8 harus memuat prosedur `--from-block`, bukan hanya menyebutnya.
+
+    Bantuan `guard watch --from-block` dan pesan error Watcher keduanya merujuk
+    "docs/runbook.md bagian 8". Rujukan ke bagian yang tidak ada lebih buruk
+    daripada tidak merujuk apa pun: ia membuat operator mencari sesuatu yang
+    tidak pernah ditulis.
+    """
+
+    def runbook(self) -> str:
+        return (ROOT / "docs" / "runbook.md").read_text(encoding="utf-8")
+
+    def test_the_section_exists(self) -> None:
+        assert "## 8. Menyemai `watcher_state` dan `--from-block`" in self.runbook()
+
+    def test_it_states_both_cursor_states(self) -> None:
+        teks = self.runbook()
+        assert "DIABAIKAN" in teks
+        assert "WAJIB" in teks
+        assert "last_scanned + 1" in teks
+
+    def test_it_refuses_zero_for_live_use(self) -> None:
+        """Nol adalah jawaban yang terlihat aman dan tidak aman."""
+        teks = self.runbook()
+        assert "**Bukan 0.**" in teks
+        assert "500" in teks
+
+    def test_it_explains_how_to_find_the_funding_block(self) -> None:
+        teks = self.runbook()
+        assert "sepolia.basescan.org" in teks
+        assert "Block" in teks
+
+    def test_it_says_the_cursor_never_rewinds_on_its_own(self) -> None:
+        teks = self.runbook()
+        assert "tidak pernah mundur otomatis" in teks
+
+    def test_it_gives_the_delete_as_a_deliberate_operator_action(self) -> None:
+        """Dengan perintahnya, dan dengan syaratnya: Watcher dihentikan dulu."""
+        teks = self.runbook()
+        assert "DELETE FROM watcher_state WHERE chain_id" in teks
+        assert "tindakan sadar\noperator" in teks or "tindakan sadar operator" in teks
+
+    def test_it_warns_against_deleting_settlements(self) -> None:
+        teks = self.runbook()
+        assert "Jangan** menghapus baris `settlements`" in teks
+
+    def test_the_code_points_at_this_section(self) -> None:
+        """Dua arah: bagiannya ada, dan kode benar-benar merujuknya."""
+        watcher = (ROOT / "src" / "payment_guard" / "watcher.py").read_text(encoding="utf-8")
+        cli = (ROOT / "src" / "payment_guard" / "cli.py").read_text(encoding="utf-8")
+        assert "runbook.md" in watcher
+        assert "runbook.md" in cli
+
+
 class TestTheDecisionLog:
     """``docs/decisions.md`` memuat keputusan nonce M6.0.1, kata per kata.
 

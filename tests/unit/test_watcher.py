@@ -41,6 +41,7 @@ from payment_guard.watcher import (
     ScanReport,
     WatcherError,
     _initial_block,
+    _is_range_rejection,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -140,9 +141,24 @@ class TestInitialBlock:
         """Kursor 0 bukan 'belum ada': blok 0 sudah dipindai, lanjut ke 1."""
         assert _initial_block(0, from_block=None, safe_head=100) == 1
 
-    def test_without_a_cursor_it_starts_at_genesis(self) -> None:
-        """Lambat, tapi tidak pernah melewatkan apa pun dalam diam."""
-        assert _initial_block(NO_BLOCK_SCANNED, from_block=None, safe_head=100) == 0
+    def test_without_a_cursor_and_without_from_block_it_refuses(self) -> None:
+        """Tidak ada default. M6 memakai 0; itu salah untuk Base Sepolia.
+
+        Dari genesis sampai kepala rantai ada puluhan juta blok, jadi kursornya
+        praktis tidak pernah sampai — dan Watcher yang terlihat jalan tapi
+        tidak akan pernah mencapai pembayaran hari ini lebih buruk daripada
+        Watcher yang menolak start. Angka yang benar hanya diketahui operator.
+        """
+        with pytest.raises(WatcherError, match="--from-block"):
+            _initial_block(NO_BLOCK_SCANNED, from_block=None, safe_head=100)
+
+    def test_the_refusal_names_the_runbook(self) -> None:
+        """Pesan yang menyebut flag tanpa prosedurnya hanya memindahkan pertanyaan."""
+        with pytest.raises(WatcherError) as info:
+            _initial_block(NO_BLOCK_SCANNED, from_block=None, safe_head=100)
+        pesan = str(info.value)
+        assert "runbook.md" in pesan
+        assert "bukan 0" in pesan
 
     def test_from_block_only_applies_without_a_cursor(self) -> None:
         """Memindahkan kursor yang sudah berjalan ke depan akan melewatkan blok.
@@ -162,6 +178,93 @@ class TestInitialBlock:
     def test_a_negative_from_block_is_refused(self) -> None:
         with pytest.raises(WatcherError, match="tidak boleh negatif"):
             _initial_block(NO_BLOCK_SCANNED, from_block=-1, safe_head=100)
+
+    def test_zero_is_accepted_when_the_operator_says_it(self) -> None:
+        """Nol bukan nilai terlarang — yang terlarang adalah nol **tersirat**.
+
+        Operator yang memang ingin memindai dari genesis boleh, dan di tes
+        itulah nilai yang dipakai karena rantai tiruannya pendek.
+        """
+        assert _initial_block(NO_BLOCK_SCANNED, from_block=0, safe_head=100) == 0
+
+
+class TestRangeRejectionDetection:
+    """Hanya penolakan tentang lebar rentang yang boleh memicu pengecilan.
+
+    Arah kesalahan di sini penting: pencocokan yang terlalu longgar akan
+    membuat kegagalan lain disalahartikan sebagai soal rentang, dicoba ulang
+    dengan rentang lebih kecil, lalu tetap gagal — hanya lebih lambat dan
+    dengan pesan akhir yang menyalahkan hal yang bukan penyebabnya.
+    """
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "query returned more than 10000 results",
+            "block range too large",
+            "eth_getLogs is limited to 2000 blocks",
+            "requested range exceeds maximum",
+            "QUERY RETURNED MORE THAN 10000 RESULTS",
+        ],
+    )
+    def test_real_world_rejection_shapes_are_recognized(self, message: str) -> None:
+        assert _is_range_rejection(message)
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "connection refused",
+            "invalid topic filter",
+            "method eth_getLogs not supported",
+            "unauthorized: bad api key",
+            "execution reverted",
+        ],
+    )
+    def test_other_failures_are_not_mistaken_for_it(self, message: str) -> None:
+        assert not _is_range_rejection(message)
+
+    def test_the_markers_are_written_down_not_buried(self) -> None:
+        """Daftarnya melonggarkan penanganan error, jadi ia harus bisa dibaca."""
+        assert set(watcher.RANGE_REJECTION_MARKERS) == {
+            "range",
+            "too large",
+            "more than",
+            "limit",
+        }
+
+    def test_the_floor_is_ten_blocks(self) -> None:
+        from payment_guard.config import SCAN_BATCH_SIZE_MIN, SCAN_RANGE_FLOOR
+
+        assert SCAN_RANGE_FLOOR == 10
+        # Lebar rentang tidak boleh bisa disetel di bawah lantainya, kalau
+        # tidak lantai itu tidak pernah tercapai.
+        assert SCAN_BATCH_SIZE_MIN == SCAN_RANGE_FLOOR
+
+    def test_the_initial_range_is_a_thousand(self) -> None:
+        from payment_guard.config import DEFAULT_SCAN_BATCH_SIZE
+
+        assert DEFAULT_SCAN_BATCH_SIZE == 1000
+
+    def test_the_attempt_limit_can_reach_the_floor(self) -> None:
+        """Dari 1000 ke 10 butuh tujuh pembagian; batasnya harus melampauinya.
+
+        Batas yang lebih kecil dari jumlah pembagian yang diperlukan akan
+        membuat Watcher berhenti dengan pesan "batas percobaan tercapai"
+        padahal rentang yang bisa diterima node belum pernah dicoba.
+        """
+        from payment_guard.config import (
+            DEFAULT_SCAN_BATCH_SIZE,
+            DEFAULT_SCAN_MAX_ATTEMPTS,
+            SCAN_RANGE_FLOOR,
+        )
+
+        width = DEFAULT_SCAN_BATCH_SIZE
+        halvings = 0
+        while width > SCAN_RANGE_FLOOR:
+            width = max(SCAN_RANGE_FLOOR, width // 2)
+            halvings += 1
+        assert halvings == 7
+        assert DEFAULT_SCAN_MAX_ATTEMPTS > halvings
 
 
 # --------------------------------------------------------------------------- #

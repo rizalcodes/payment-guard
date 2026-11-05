@@ -26,6 +26,7 @@
 | 14 | Tampilan approval | `reason` di blok kutipan tidak tepercaya, sanitasi daftar-izin, token konfirmasi anti-refleks. |
 | 15 | Estimasi | M0 +0,5 hari. Total 10–12 hari tetap (hari 12 buffer). |
 | 16 | Nama field snapshot | `latest_triggering_denial` menggantikan `latest_denial_at` (PRD v2 §14) karena penyaringan pemicu cooldown dilakukan pemanggil. |
+| 17 | Peta jalan M6/M7 (revisi 5 Nov 2026) | M6 = Watcher **dan** Reconciler inti; M7 = sisanya (laporan/CLI rekonsiliasi, bukti on-chain, tes ketahanan reorg). Menggantikan baris M6/M7 di §14 versi sebelumnya dan di PRD v2 §14. Alasannya di `docs/decisions.md`. |
 
 ---
 
@@ -194,6 +195,11 @@ Tes unit dan integrasi dari v2, ditambah:
 
 ## 14. Milestone (revisi)
 
+Bagian ini **menggantikan** PRD v2 bagian 14 ("Struktur repo & milestone")
+sepenuhnya, sesuai aturan di kepala dokumen ini. Baris M6 dan M7 di PRD v2
+sudah tidak berlaku; yang berlaku adalah tabel di bawah. PRD v2 tidak disunting
+dengan sengaja — ia dokumen yang ditutup, dan revisi berjalan lewat berkas ini.
+
 | Hari | Milestone | Tambahan v2.1 |
 |---|---|---|
 | 1 | M0 Scaffold | Runner migrasi, `0002_roles.sql`, `bootstrap-roles`, tes hak akses, notice handler, pin Python dan Postgres 16. |
@@ -202,8 +208,8 @@ Tes unit dan integrasi dari v2, ditambah:
 | 4 | M3 Decision service + MCP | Lock sesi di koneksi dedikasi, heartbeat, `active_mandates`. |
 | 5 | M4 Human approval | Probe, drift warning, layar K2. |
 | 6 | M5 Executor | Cek 1–5, 4b, lock shared, recovery. Faucet dan RPC sudah siap. |
-| 7 | M6 Watcher | Verifikasi USDC tiga sumber, `decimals()`. |
-| 8 | M7 Reorg + Reconciler | — |
+| 7 | **M6 Watcher + Reconciler inti** | Verifikasi USDC tiga sumber, `decimals()`. Watcher: `pending → final`, idempotensi lewat `UNIQUE (chain_id, tx_hash, log_index)`, filter wallet Executor per **pengirim**, kursor `watcher_state`, state machine bagian 10 lengkap termasuk alarm `final → reorged`. Reconciler: `reconcile_once` dan keenam state bagian 11, satu baris per subjek, audit hanya saat state berubah. Keduanya diuji dengan RPC tiruan. |
+| 8 | **M7 Sisa Watcher/Reconciler** | Laporan dan CLI rekonsiliasi (`guard reconcile --report` sebagai mode tersendiri). **Bukti on-chain** untuk `unmatched_onchain` dan `mismatch` — keduanya sudah diimplementasi dan diuji mock di M6, yang belum ada adalah buktinya terhadap Base Sepolia sungguhan. Tes ketahanan reorg terhadap node sungguhan, dan `eth_getLogs` terhadap node publik pada rentang lebar. Tag `m6` hanya setelah bukti itu ada. |
 | 9–10 | M8 Eval | Dua model, adapter, budget. |
 | 11 | M9 Polish | README, `docs/events.md` sinkron, CHECK event dipertimbangkan. |
 | 12 | Buffer | — |

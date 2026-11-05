@@ -1,7 +1,24 @@
-# Payment Guard — Arsitektur v1.1
+# Payment Guard — Arsitektur v1.2
 
 > Pendamping PRD v2.1 dan Security v1.1. Sumber kebenaran skema: `0001_init.sql` dan `0002_roles.sql`.
 > Status: reference implementation, testnet only. Penulis: Chief of Strategy, 30 Okt 2026.
+> Revisi v1.2: 5 Nov 2026.
+
+**Nama berkasnya tetap `Architecture_v1.1.md`.** Nomor bagian tidak berubah di v1.2,
+dan docstring di seluruh `src/` serta `tests/` merujuk dokumen ini sebagai
+"Arsitektur v1.1 bagian N". Rujukan itu tetap sah: yang naik adalah versi
+dokumen, bukan penomorannya. Mengganti nama berkas akan memutus daftar dokumen
+tertutup di `tests/unit/test_repo_layout.py` dan ratusan rujukan di docstring
+tanpa satu pun tes gagal.
+
+---
+
+## 0. Changelog
+
+| Versi | Tanggal | Perubahan |
+|---|---|---|
+| v1.2 | 5 Nov 2026 | Bagian 2.1: tiga variabel env yang ditambahkan M6 (`EXECUTOR_WALLET_ADDRESS`, `WATCHER_INTERVAL_SECONDS`, `RECONCILE_DEADLINE_SECONDS`) didokumentasikan. Tidak ada perubahan perilaku, penomoran bagian, maupun matriks hak. |
+| v1.1 | 30 Okt 2026 | Versi awal dokumen ini, pendamping PRD v2.1. |
 
 ---
 
@@ -51,7 +68,37 @@
 | `EXECUTOR_KEY_PATH` | Executor | **ya** |
 | `CHAIN_ID` (84532), `USDC_ADDRESS` | Executor, Watcher | tidak (diverifikasi) |
 | `CONFIRMATIONS` (12), `SCAN_BATCH_SIZE`, `REORG_LOOKBACK` (64) | Watcher | tidak |
+| `EXECUTOR_WALLET_ADDRESS` | Watcher | tidak (alamat publik) |
+| `WATCHER_INTERVAL_SECONDS` (15) | Watcher | tidak |
+| `RECONCILE_DEADLINE_SECONDS` (3600) | Reconciler | tidak |
 | `EVAL_API_KEY` | Eval runner | **ya** |
+
+**Tiga variabel yang ditambahkan M6.** Ketiganya tidak ada di tabel ini sampai
+v1.2, dan ketiganya **bukan** rahasia.
+
+| Variabel | Fungsi | Dibaca oleh | Rahasia |
+|---|---|---|---|
+| `EXECUTOR_WALLET_ADDRESS` | Alamat wallet Executor yang dipantau Watcher. Bagian 10 mewajibkan penyaringan log `Transfer` per **pengirim**, jadi Watcher harus tahu alamat ini. Tanpa default: default apa pun berarti memantau wallet yang salah dalam diam. | Watcher | **Tidak.** Alamat adalah informasi publik; yang rahasia adalah kuncinya (`EXECUTOR_KEY_PATH`). |
+| `WATCHER_INTERVAL_SECONDS` | Jeda antar siklus `guard watch --loop`. Batas 1..3600, default 15. | Watcher | Tidak |
+| `RECONCILE_DEADLINE_SECONDS` | Berapa lama execution yang sudah disiarkan boleh belum punya settlement `final` sebelum dicatat `executed_not_settled` (bagian 11). Batas 60..604800, default 3600. | Reconciler | Tidak |
+
+`EXECUTOR_WALLET_ADDRESS` adalah **alamat, bukan kunci**, dan pemisahan itu
+yang membuat Watcher tetap berada di luar daftar proses yang memegang bahan
+kunci (bagian 2): ia butuh tahu wallet mana yang dipantau, bukan cara
+menandatangani untuknya.
+
+Variabel ini dibaca **Watcher saja.** Reconciler tidak membacanya: ia
+membandingkan `settlements` dengan `executions` dan `decisions`, dan penerima
+pembayaran diambil dari `decisions.recipient` — bukan dari konfigurasi. Memberi
+Reconciler variabel yang tidak dipakainya akan menambah satu nilai yang bisa
+salah diisi tanpa satu pun yang memeriksanya.
+
+Dua variabel lain juga ditambahkan M6 — `WATCHER_LOCK_TIMEOUT_MS` dan
+`RECONCILER_LOCK_TIMEOUT_MS` — dan keduanya **sengaja tidak** masuk tabel ini.
+Keduanya mengikuti pola `EXECUTOR_LOCK_TIMEOUT_MS` yang sudah ada sejak M5 dan
+juga tidak didokumentasikan di sini: batas waktu lock adalah penyetelan
+operasional per proses, bukan konfigurasi yang mengubah arti data. Kalau pola
+itu diubah, ketiganya didokumentasikan bersama, bukan dua dari tiga.
 
 Admin URL untuk bootstrap **tidak** ada di file `.env` mana pun. Diberikan lewat env sementara saat perintah dijalankan, atau prompt tersembunyi. Sejak M0.1, bootstrap juga **menolak URL admin yang hostnya bukan loopback** kecuali diberi `--allow-remote-admin`.
 

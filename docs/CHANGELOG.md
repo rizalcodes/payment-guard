@@ -8,6 +8,89 @@ apa yang terjadi pada tag dan commit.
 
 ---
 
+## Utang terbuka
+
+Hal yang **sengaja** belum dikerjakan, dengan alasannya. Dihapus dari daftar
+ini hanya ketika benar-benar selesai.
+
+### B3 — cek alamat wallet saat start (menunggu keputusan CoS)
+
+Yang diminta: Watcher membandingkan `EXECUTOR_WALLET_ADDRESS` dengan
+`from_addr` di `executions`, dan menolak start bila ada eksekusi dengan alamat
+yang berbeda. Gunanya nyata — konfigurasi yang menunjuk wallet lain tidak
+menggagalkan apa pun, ia hanya membuat Watcher tidak pernah melihat pembayaran.
+
+Kenapa belum dikerjakan: itu butuh **SELECT pada `executions`**, dan
+`0002_roles.sql` tidak memberikannya ke `watcher_rw`. Bukan kelalaian —
+Arsitektur bagian 3.3 menaruh tanda hubung di sana dengan sengaja, supaya
+proses yang menulis `settlements` tidak juga bisa membaca keputusan yang
+mengizinkannya. Menambah grant itu melonggarkan pemisahan yang paling ingin
+dijaga di proyek ini, dan itu bukan keputusan pelaksana.
+
+Dua opsi untuk CoS:
+
+| | Cara | Harga |
+|---|---|---|
+| **A** | Migrasi `0003` memberi `watcher_rw` SELECT pada `executions`; cek dilakukan Watcher seperti diminta. | Watcher jadi bisa membaca `executions`. Pemisahan yang dijaga M6 melemah, dan migrasi baru menyentuh matriks hak. |
+| **B** | Cek dipindahkan ke Reconciler, yang **sudah** punya SELECT pada `executions` dan `settlements`. Ia melaporkan ketidakcocokan alamat sebagai temuan, bukan menolak start Watcher. | Tidak ada grant baru, tidak ada migrasi. Tapi ketidakcocokan baru terlihat saat `guard reconcile` dijalankan, bukan saat Watcher start. |
+
+Opsi B tidak butuh perubahan hak apa pun dan karena itu yang akan dipilih
+kalau tidak ada arahan lain — tapi ia **belum** dikerjakan, karena yang
+diminta adalah penolakan saat start.
+
+Tesnya ada dan ditandai `skip` dengan alasan di
+`tests/integration/test_watcher_flow.py::TestWalletAddressGuardAtStartup`,
+jadi utang ini muncul di setiap laporan pytest. Penjaganya juga ada:
+`TestTheWatcherStillCannotReadExecutions` akan gagal kalau grant-nya berubah
+tanpa keputusan, dan kalau migrasi `0003` muncul.
+
+---
+
+## M6.1 — aturan `--from-block`, `eth_getLogs` berpotongan, utang dokumen
+
+Belum ditag.
+
+**`--from-block` wajib sekali, dan tidak pernah dua kali.** Tanpa kursor di
+`watcher_state`, Watcher berhenti dan menyebut flag itu; tidak ada default.
+Dengan kursor, flag itu diabaikan dan peringatannya dicetak.
+
+M6 memakai 0 sebagai default, dengan alasan bahwa memindai dari genesis lambat
+tapi tidak pernah melewatkan apa pun. Itu salah untuk Base Sepolia: dari
+genesis sampai kepala rantai ada puluhan juta blok, jadi kursornya praktis
+tidak pernah sampai ke pembayaran hari ini. Watcher yang terlihat jalan dan
+tidak akan pernah tiba lebih buruk daripada Watcher yang menolak start. Angka
+yang benar hanya diketahui operator — blok di sekitar funding wallet Executor —
+jadi ia yang menyebutkannya. Prosedurnya sekarang ada: `docs/runbook.md`
+bagian 8, yang menutup rujukan menggantung yang dilaporkan di M6.
+
+**`eth_getLogs` dipecah per rentang.** Lebar awal dari `SCAN_BATCH_SIZE`,
+diturunkan dari 2000 ke 1000. Bila node menolak **karena lebarnya**, rentang
+dibagi dua dan dicoba lagi, sampai lantai 10 blok. Pengenalannya lewat
+pencocokan kata pada pesan error RPC (`range`, `too large`, `more than`,
+`limit`), karena tidak ada kode error standar untuk ini. Kegagalan lain
+dilempar apa adanya: node yang menolak karena filter salah akan menolak hal
+yang sama dengan rentang separuh, hanya lebih lambat dan dengan pesan akhir
+yang menyalahkan hal yang bukan penyebabnya.
+
+Aturan batch tidak berubah: satu rentang = satu `eth_getLogs` + satu transaksi
+yang menyimpan hasilnya dan memajukan kursor. Satu siklus sekarang bisa berisi
+beberapa batch. Konsekuensinya disengaja: kalau rentang ketiga gagal, dua
+rentang pertama tetap tersimpan dan kursornya tetap maju sampai akhir rentang
+kedua — tidak ada blok yang terlewat, dan tidak ada blok yang ditandai sudah
+dipindai padahal log-nya belum tersimpan.
+
+**Dokumen.** Arsitektur naik ke v1.2 (nama berkas tetap `Architecture_v1.1.md`,
+penomoran bagian tidak berubah): bagian 2.1 kini memuat tiga variabel env yang
+ditambahkan M6. PRD v2.1 bagian 14 (peta jalan) direvisi: M6 = Watcher +
+Reconciler inti, M7 = sisanya. PRD v2 tidak disunting — ia dokumen yang
+ditutup, dan kepala PRD v2.1 sudah menyatakan bagian yang direvisi
+menggantikan pendahulunya.
+
+**TERTAHAN: B3,** cek alamat wallet saat start. Lihat bagian "Utang terbuka"
+di bawah.
+
+---
+
 ## M6 — Watcher dan Reconciler, **mock-tested, belum live**
 
 Belum ditag. Tag `m6` hanya setelah tes live dan bukti on-chain ada.

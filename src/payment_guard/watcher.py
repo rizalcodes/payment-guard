@@ -57,11 +57,12 @@ import psycopg
 
 from payment_guard.chain import (
     ChainClient,
+    ChainError,
     TransferLog,
     Web3Client,
     check_chain_and_token,
 )
-from payment_guard.config import WatcherConfig
+from payment_guard.config import SCAN_RANGE_FLOOR, WatcherConfig
 from payment_guard.db import connect, open_connection, to_int, try_session_lock
 from payment_guard.events import Actor, Event, audit
 from payment_guard.money import format_base_units
@@ -82,6 +83,26 @@ SETTLEMENT_STATUSES: Final[tuple[str, ...]] = (STATUS_PENDING, STATUS_FINAL, STA
 
 #: Status yang masih bisa berubah dan karena itu diperiksa ulang tiap siklus.
 OPEN_STATUSES: Final[tuple[str, ...]] = (STATUS_PENDING, STATUS_REORGED)
+
+#: Potongan pesan error RPC yang berarti "rentang bloknya terlalu lebar".
+#:
+#: Tidak ada kode error standar untuk ini. Setiap penyedia menuliskannya
+#: sendiri — "query returned more than 10000 results", "block range too large",
+#: "exceeds the limit" — jadi yang bisa dilakukan adalah mencocokkan kata, dan
+#: itu ditulis di sini apa adanya alih-alih disembunyikan di tengah fungsi.
+#:
+#: Daftar ini **melonggarkan** penanganan error, jadi arah kesalahannya
+#: penting: kata yang terlalu umum akan membuat kegagalan lain disalahartikan
+#: sebagai soal rentang dan dicoba ulang dengan rentang lebih kecil, yang
+#: akhirnya tetap gagal — hanya lebih lambat dan dengan pesan yang
+#: menyesatkan. Karena itu daftarnya pendek, dan semua yang tidak cocok
+#: dilempar apa adanya.
+RANGE_REJECTION_MARKERS: Final[tuple[str, ...]] = (
+    "range",
+    "too large",
+    "more than",
+    "limit",
+)
 
 #: Nilai ``last_scanned`` saat belum ada blok yang dipindai.
 #:
@@ -210,17 +231,36 @@ class ScanReport:
     reorged: int
     restored: int
     alarms: int
+    #: Berapa ``eth_getLogs`` dipakai untuk rentang siklus ini. Lebih dari satu
+    #: berarti node menolak lebarnya dan rentangnya dipecah.
+    ranges_fetched: int = 0
+    #: Berapa kali rentang dibagi dua karena ditolak node.
+    range_shrinks: int = 0
     cursor_rewound_to: int | None = None
     scanned: bool = True
+    #: ``--from-block`` diberikan padahal kursor sudah ada, jadi diabaikan.
+    from_block_ignored: int | None = None
 
     def render(self) -> str:
         """Ringkasan satu siklus, satu baris per hal yang berubah."""
+        awal = []
+        if self.from_block_ignored is not None:
+            awal.append(
+                f"PERINGATAN: --from-block {self.from_block_ignored} DIABAIKAN. "
+                "Kursor watcher_state sudah ada, dan ia tidak pernah dipindahkan ke "
+                "depan oleh flag: itu akan melewatkan blok dalam diam. Lihat "
+                "docs/runbook.md bagian 8."
+            )
         if not self.scanned:
-            return (
-                f"blok terakhir {self.latest_block}, kedalaman konfirmasi belum terlampaui; "
-                "tidak ada yang dipindai"
+            return "\n".join(
+                [
+                    *awal,
+                    f"blok terakhir {self.latest_block}, kedalaman konfirmasi belum "
+                    "terlampaui; tidak ada yang dipindai",
+                ]
             )
         lines = [
+            *awal,
             f"blok {self.first_block}..{self.last_block} "
             f"(aman sampai {self.safe_head}, terakhir {self.latest_block})",
             f"  transfer terlihat {self.logs_seen}, settlement baru {self.settlements_inserted}",
@@ -233,6 +273,11 @@ class ScanReport:
         ):
             if count:
                 lines.append(f"  {label}: {count}")
+        if self.ranges_fetched > 1:
+            lines.append(
+                f"  rentang dipecah menjadi {self.ranges_fetched} permintaan "
+                f"({self.range_shrinks} kali dibagi dua karena ditolak node)"
+            )
         if self.alarms:
             lines.append(f"  ALARM: {self.alarms} baris final ter-reorg")
         if self.cursor_rewound_to is not None:
@@ -403,6 +448,14 @@ def scan_once(
     verdicts = _verify_open(runtime, latest=latest, safe_head=safe_head)
     rewound = _apply_rewind(runtime, verdicts)
 
+    # Kursor dibaca **setelah** pemeriksaan ulang, karena pemeriksaan itu bisa
+    # memundurkannya. Dibaca sebelum kedua cabang di bawah supaya peringatan
+    # `--from-block` muncul walau tidak ada yang dipindai siklus ini: operator
+    # yang salah memakai flag itu harus diberi tahu sekarang, bukan nanti.
+    with runtime.conn.cursor() as cur:
+        cursor_value = read_cursor(cur, config.chain_id)
+    ignored = from_block if (cursor_value != NO_BLOCK_SCANNED and from_block is not None) else None
+
     if safe_head < 0:
         report = ScanReport(
             chain_id=config.chain_id,
@@ -419,13 +472,12 @@ def scan_once(
             alarms=verdicts.alarms,
             cursor_rewound_to=rewound,
             scanned=False,
+            from_block_ignored=ignored,
         )
         if out is not None:
             print(report.render(), file=out)
         return report
 
-    with runtime.conn.cursor() as cur:
-        cursor_value = read_cursor(cur, config.chain_id)
     first_block = _initial_block(cursor_value, from_block=from_block, safe_head=safe_head)
     last_block = min(first_block + config.scan_batch_size - 1, safe_head)
 
@@ -447,18 +499,15 @@ def scan_once(
             restored=verdicts.restored,
             alarms=verdicts.alarms,
             cursor_rewound_to=rewound,
+            from_block_ignored=ignored,
         )
         if out is not None:
             print(report.render(), file=out)
         return report
 
-    logs = runtime.client.transfer_logs(
-        config.usdc_address,
-        from_addr=config.wallet_address,
-        first_block=first_block,
-        last_block=last_block,
+    seen, inserted, ranges, shrinks = _scan_range(
+        runtime, first_block=first_block, last_block=last_block
     )
-    inserted = _store_batch(runtime, logs, last_block=last_block)
 
     report = ScanReport(
         chain_id=config.chain_id,
@@ -466,14 +515,17 @@ def scan_once(
         safe_head=safe_head,
         first_block=first_block,
         last_block=last_block,
-        logs_seen=len(logs),
+        logs_seen=seen,
         settlements_inserted=inserted,
+        ranges_fetched=ranges,
+        range_shrinks=shrinks,
         finalized=verdicts.finalized,
         moved=verdicts.moved,
         reorged=verdicts.reorged,
         restored=verdicts.restored,
         alarms=verdicts.alarms,
         cursor_rewound_to=rewound,
+        from_block_ignored=ignored,
     )
     if out is not None:
         print(report.render(), file=out)
@@ -486,22 +538,145 @@ def _initial_block(cursor_value: int, *, from_block: int | None, safe_head: int)
     Dengan kursor yang sudah ada, jawabannya selalu ``last_scanned + 1``, dan
     ``from_block`` **diabaikan**: memindahkan kursor yang sudah berjalan ke
     depan berarti melewatkan blok dalam diam, dan itu adalah satu-satunya
-    kesalahan yang tidak bisa diperbaiki belakangan oleh modul ini.
+    kesalahan yang tidak bisa diperbaiki belakangan oleh modul ini. Peringatan
+    dicetak oleh :func:`scan_once`, yang punya aliran keluaran.
 
-    Tanpa kursor, dan tanpa ``from_block``, jawabannya 0. Memindai dari genesis
-    di Base Sepolia sangat lambat, tapi lambat bisa dilihat dan diperbaiki;
-    melompat ke kepala rantai akan melewatkan setiap pembayaran yang sudah
-    terjadi tanpa satu pun tanda. Operator yang memang ingin melompat
-    mengatakannya lewat ``guard watch --from-block`` — sekali, dengan sengaja,
-    dan prosedurnya ada di ``docs/runbook.md``.
+    Tanpa kursor, ``from_block`` **wajib**. Tidak ada default.
+
+    M6 sempat memakai 0 sebagai default, dengan alasan bahwa memindai dari
+    genesis lambat tapi tidak pernah melewatkan apa pun. Itu salah untuk Base
+    Sepolia: dari genesis sampai kepala rantai ada puluhan juta blok, jadi
+    kursornya praktis tidak pernah sampai, dan Watcher yang terlihat jalan tapi
+    tidak akan pernah mencapai pembayaran hari ini lebih buruk daripada Watcher
+    yang menolak start. Angka yang benar hanya diketahui operator — blok di
+    sekitar funding wallet Executor — jadi ia yang menyebutkannya, sekali,
+    dengan sengaja. Prosedurnya di ``docs/runbook.md`` bagian 8.
+
+    Raises:
+        WatcherError: bila belum ada kursor dan ``from_block`` tidak diberikan,
+            atau bila ``from_block`` negatif.
     """
     if cursor_value != NO_BLOCK_SCANNED:
         return cursor_value + 1
     if from_block is None:
-        return 0
+        raise WatcherError(
+            "belum ada kursor di watcher_state untuk chain ini, jadi Watcher tidak tahu "
+            "dari blok mana harus mulai. Jalankan sekali dengan `guard watch --from-block "
+            "<nomor blok>`; pakai blok di sekitar funding wallet Executor dikurangi margin "
+            "kecil, bukan 0. Lihat docs/runbook.md bagian 8."
+        )
     if from_block < 0:
         raise WatcherError(f"--from-block tidak boleh negatif, dapat {from_block}")
     return min(from_block, safe_head + 1)
+
+
+def _scan_range(
+    runtime: WatcherRuntime,
+    *,
+    first_block: int,
+    last_block: int,
+) -> tuple[int, int, int, int]:
+    """Pindai ``first_block..last_block``, sekecil apa pun potongan yang diterima node.
+
+    Mengembalikan ``(log_terlihat, baris_baru, jumlah_rentang, jumlah_pengecilan)``.
+
+    Satu rentang = satu ``eth_getLogs`` + satu transaksi database yang menyimpan
+    hasilnya **dan** memajukan kursor. Aturan batch M6 tidak berubah; yang
+    berubah hanyalah bahwa satu siklus bisa berisi beberapa batch, karena
+    rentang yang diminta bisa harus dipecah.
+
+    Konsekuensinya penting dan disengaja: kalau rentang ketiga gagal, dua
+    rentang pertama tetap tersimpan dan kursornya tetap maju sampai akhir
+    rentang kedua. Tidak ada blok yang terlewat, dan tidak ada blok yang
+    ditandai sudah dipindai padahal log-nya belum tersimpan.
+    """
+    seen = 0
+    inserted = 0
+    ranges = 0
+    shrinks = 0
+    cursor_at = first_block
+    while cursor_at <= last_block:
+        logs, fetched_to, used_shrinks = _fetch_one_range(
+            runtime, first_block=cursor_at, last_block=last_block
+        )
+        inserted += _store_batch(runtime, logs, last_block=fetched_to)
+        seen += len(logs)
+        ranges += 1
+        shrinks += used_shrinks
+        cursor_at = fetched_to + 1
+    return seen, inserted, ranges, shrinks
+
+
+def _fetch_one_range(
+    runtime: WatcherRuntime,
+    *,
+    first_block: int,
+    last_block: int,
+) -> tuple[tuple[TransferLog, ...], int, int]:
+    """Satu ``eth_getLogs``, mengecil separuh setiap kali node menolak lebarnya.
+
+    Mengembalikan ``(log, blok_terakhir_yang_benar_benar_diambil, jumlah_pengecilan)``.
+    Blok terakhir bisa lebih kecil dari ``last_block``: itulah yang membuat
+    pemanggil tahu sampai mana kursor boleh maju.
+
+    Yang diulang **hanya** penolakan tentang lebar rentang
+    (:data:`RANGE_REJECTION_MARKERS`). Kegagalan lain dilempar apa adanya, tanpa
+    diubah menjadi percobaan ulang: node yang menolak karena filter salah, atau
+    yang mengembalikan log yang tidak bisa didekode, akan menolak hal yang sama
+    dengan rentang separuh — hanya lebih lambat, dan dengan pesan akhir yang
+    menyalahkan lebar rentang untuk masalah yang bukan itu.
+
+    Jeda dan batas percobaan RPC tingkat transport sudah ditangani
+    :class:`payment_guard.chain.Web3Client`; yang di sini adalah lapis di
+    atasnya, tentang **bentuk permintaan**, bukan tentang jaringan.
+
+    Raises:
+        ChainError: untuk kegagalan RPC yang bukan soal lebar rentang.
+        WatcherError: bila lebarnya sudah di lantai dan masih ditolak, atau
+            bila batas percobaan tercapai.
+    """
+    width = last_block - first_block + 1
+    shrinks = 0
+    terakhir = ""
+    for _ in range(runtime.config.scan_max_attempts):
+        end = first_block + width - 1
+        try:
+            logs = runtime.client.transfer_logs(
+                runtime.config.usdc_address,
+                from_addr=runtime.config.wallet_address,
+                first_block=first_block,
+                last_block=end,
+            )
+        except ChainError as exc:
+            if not _is_range_rejection(str(exc)):
+                raise
+            terakhir = str(exc)
+            if width <= SCAN_RANGE_FLOOR:
+                raise WatcherError(
+                    f"node menolak rentang {first_block}..{end} yang lebarnya sudah "
+                    f"{width} blok, yaitu lantainya ({SCAN_RANGE_FLOOR}). Di lebar ini "
+                    "penolakan hampir pasti bukan soal rentang; periksa pesan node: "
+                    f"{terakhir}"
+                ) from None
+            width = max(SCAN_RANGE_FLOOR, width // 2)
+            shrinks += 1
+            continue
+        return logs, end, shrinks
+    raise WatcherError(
+        f"rentang {first_block}..{last_block} gagal setelah "
+        f"{runtime.config.scan_max_attempts} percobaan; lebar terakhir yang dicoba "
+        f"{width} blok. Kursor tidak dimajukan. Pesan terakhir dari node: {terakhir}"
+    )
+
+
+def _is_range_rejection(message: str) -> bool:
+    """Apakah pesan error RPC itu tentang lebar rentang.
+
+    Pencocokan kata, karena tidak ada kode error standar untuk ini. Lihat
+    :data:`RANGE_REJECTION_MARKERS`.
+    """
+    lowered = message.lower()
+    return any(marker in lowered for marker in RANGE_REJECTION_MARKERS)
 
 
 def _store_batch(

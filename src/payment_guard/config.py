@@ -617,10 +617,43 @@ DEFAULT_CONFIRMATIONS: Final = 12
 CONFIRMATIONS_MIN: Final = 1
 CONFIRMATIONS_MAX: Final = 1000
 
-#: Lebar satu rentang ``eth_getLogs``. Node publik menolak rentang besar.
-DEFAULT_SCAN_BATCH_SIZE: Final = 2000
-SCAN_BATCH_SIZE_MIN: Final = 1
+#: Lebar **awal** satu rentang ``eth_getLogs``.
+#:
+#: Awal, bukan tetap: node publik menolak rentang yang terlalu lebar, dan
+#: :func:`payment_guard.watcher.scan_once` membagi rentangnya dua lalu mencoba
+#: lagi sampai :data:`SCAN_RANGE_FLOOR`. Angka di sini karena itu adalah
+#: tebakan optimis, bukan batas keras.
+#:
+#: 1000, diturunkan dari 2000 di M6.1. Rentang yang lebih kecil lebih sering
+#: diterima node publik pada percobaan pertama, dan pembagian dua hanya
+#: menolong setelah satu permintaan sudah ditolak — yaitu setelah satu
+#: perjalanan jaringan terbuang.
+DEFAULT_SCAN_BATCH_SIZE: Final = 1000
+
+#: Batas bawah lebar rentang. Di bawah ini, pembagian dua berhenti menolong:
+#: node yang menolak 10 blok sedang menolak karena hal lain.
+SCAN_RANGE_FLOOR: Final = 10
+
+#: Lebar rentang tidak boleh di bawah lantainya, kalau tidak lantai itu tidak
+#: pernah tercapai dan pembagian dua menjadi kode yang tidak pernah berguna.
+SCAN_BATCH_SIZE_MIN: Final = SCAN_RANGE_FLOOR
 SCAN_BATCH_SIZE_MAX: Final = 10_000
+
+#: Berapa kali satu rentang dicoba, termasuk percobaan pertama.
+#:
+#: Hanya penolakan yang **tentang lebar rentang** yang memicu percobaan
+#: berikutnya, dan setiap percobaan memakai rentang separuh lebih kecil. Dari
+#: 1000 sampai 10 butuh tujuh pembagian, jadi 10 memberi kelonggaran tanpa
+#: pernah menjadi jalur menunggu tanpa batas.
+#:
+#: Tidak punya variabel environment, dan itu disengaja. Ia bukan tombol
+#: penyetelan: pembagian dua sudah berhenti sendiri di lantainya, dan batas ini
+#: hanya jaring terakhir supaya tidak ada perulangan yang bisa berjalan lama.
+#: Menambahkannya ke ``.env`` berarti satu nilai lagi yang bisa diisi salah
+#: tanpa ada yang memeriksanya.
+DEFAULT_SCAN_MAX_ATTEMPTS: Final = 10
+SCAN_MAX_ATTEMPTS_MIN: Final = 1
+SCAN_MAX_ATTEMPTS_MAX: Final = 20
 
 #: Jendela mundur K untuk memeriksa ulang baris yang sudah ``final``.
 #:
@@ -666,6 +699,9 @@ class WatcherConfig:
     reorg_lookback: int
     interval_seconds: int
     lock_timeout_ms: int
+    #: Batas percobaan per rentang ``eth_getLogs``. Tanpa variabel environment;
+    #: lihat :data:`DEFAULT_SCAN_MAX_ATTEMPTS`.
+    scan_max_attempts: int = DEFAULT_SCAN_MAX_ATTEMPTS
 
 
 @dataclass(frozen=True)

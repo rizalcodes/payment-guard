@@ -237,3 +237,140 @@ Urutan rilis:
 3. `git status --porcelain` — kosong.
 4. Commit, lalu tag.
 5. Catat di [CHANGELOG.md](CHANGELOG.md), termasuk yang diketahui masih salah.
+
+---
+
+## 8. Menyemai `watcher_state` dan `--from-block`
+
+Watcher menyimpan satu baris per chain di `watcher_state`: `last_scanned`,
+yaitu blok tertinggi yang **sudah** dipindai. Semua yang di bawah atau sama
+dengan nilai itu dianggap sudah dilihat.
+
+### 8.1 Dua keadaan, dua perilaku
+
+**Kursor sudah ada untuk `chain_id` itu.** Pemindaian lanjut dari
+`last_scanned + 1`. `--from-block` **DIABAIKAN**, dan Watcher mencetak
+peringatan:
+
+```
+PERINGATAN: --from-block 4000 DIABAIKAN. Kursor watcher_state sudah ada, dan ia
+tidak pernah dipindahkan ke depan oleh flag: itu akan melewatkan blok dalam
+diam. Lihat docs/runbook.md bagian 8.
+```
+
+Flag itu tidak pernah memindahkan kursor yang sudah berjalan — ke depan maupun
+ke belakang. Memindahkannya ke depan akan menandai blok yang belum dipindai
+sebagai sudah dipindai, dan blok yang terlewat tidak akan pernah diminta lagi.
+Itu satu-satunya kesalahan di Watcher yang tidak bisa diperbaiki belakangan
+oleh Watcher sendiri.
+
+**Kursor belum ada.** `--from-block` **WAJIB**. Tanpa nilai, Watcher berhenti:
+
+```
+belum ada kursor di watcher_state untuk chain ini, jadi Watcher tidak tahu dari
+blok mana harus mulai. Jalankan sekali dengan `guard watch --from-block <nomor
+blok>`; pakai blok di sekitar funding wallet Executor dikurangi margin kecil,
+bukan 0. Lihat docs/runbook.md bagian 8.
+```
+
+Tidak ada kursor yang ditulis dan tidak ada settlement yang dicatat ketika ia
+berhenti begini. Menjalankannya lagi dengan nilai yang benar aman.
+
+### 8.2 Angka yang dipakai saat live
+
+Pakai **blok di sekitar funding wallet Executor, dikurangi margin kecil** —
+misalnya 500 blok. **Bukan 0.**
+
+Base Sepolia punya puluhan juta blok. Memindai dari genesis dengan rentang
+1000 blok per siklus berarti puluhan ribu siklus sebelum kursornya mencapai
+pembayaran hari ini: Watcher akan terlihat jalan dan tidak akan pernah tiba.
+
+Margin 500 blok ada untuk melindungi dari satu kesalahan: salah mengira blok
+funding. Transfer USDC pertama tidak bisa terjadi sebelum wallet punya gas,
+jadi blok funding adalah batas bawah yang sah — dan margin kecil di bawahnya
+membuat kekeliruan beberapa blok tidak kehilangan pembayaran apa pun. Margin
+yang besar hanya memperlambat siklus pertama.
+
+### 8.3 Mencari nomor blok funding
+
+1. Buka berkas kunci wallet Executor dan ambil field `address`. **Jangan**
+   menampilkan `private_key`, dan jangan menyalin berkasnya ke mana pun.
+2. Buka `https://sepolia.basescan.org/address/<alamat>`.
+3. Pilih tab **Transactions**. Transaksi paling bawah (paling tua) adalah
+   transfer ETH dari faucet.
+4. Klik transaksi itu. Pada halaman detailnya, baca baris **Block**. Angka itu
+   nomor blok funding.
+5. Alternatif, bila hash transaksi faucet masih ada: buka
+   `https://sepolia.basescan.org/tx/<hash>` langsung dan baca baris **Block**
+   di sana.
+6. Kurangi 500: `--from-block <blok funding − 500>`. Bila hasilnya negatif,
+   pakai 0.
+
+Periksa sekali lagi bahwa alamat di explorer sama dengan
+`EXECUTOR_WALLET_ADDRESS` di `.env`. Alamat yang berbeda berarti Watcher
+memantau wallet lain, dan tidak ada yang akan gagal — ia hanya tidak akan
+pernah melihat pembayaran apa pun.
+
+### 8.4 Kalau nilainya salah diisi
+
+**Terlalu besar** (kursor melewati blok yang berisi pembayaran). Kursor
+**tidak pernah mundur otomatis**. Satu-satunya hal yang memundurkannya adalah
+reorg yang terdeteksi pada baris settlement yang sudah ada, dan blok yang
+tidak pernah dipindai tidak punya baris settlement — jadi tidak ada yang bisa
+terdeteksi. Pemindaian akan terus maju dari tempatnya sekarang, dan pembayaran
+di bawahnya tidak akan pernah terlihat.
+
+Memperbaikinya berarti menghapus baris kursornya, dan itu **tindakan sadar
+operator**, bukan sesuatu yang dilakukan Watcher. Watcher tidak punya DELETE
+pada tabel mana pun (`0002_roles.sql`), jadi perintahnya dijalankan admin:
+
+```bash
+docker compose exec postgres psql -U guard_admin -d payment_guard \
+  -v ON_ERROR_STOP=1 \
+  -c "DELETE FROM watcher_state WHERE chain_id = 84532"
+```
+
+Hentikan Watcher lebih dulu. Ia memegang lock sesi `watcher:<chain_id>`, dan
+menghapus kursor di bawah Watcher yang sedang jalan berarti ia akan menulis
+ulang kursornya dari nilai di memorinya pada siklus berikutnya.
+
+Setelah baris itu hilang, keadaannya sama dengan belum pernah memindai:
+jalankan lagi dengan `--from-block` yang benar. Baris `settlements` yang sudah
+ada **tidak** dihapus dan tidak perlu dihapus — `ON CONFLICT (chain_id,
+tx_hash, log_index) DO NOTHING` membuat pemindaian ulang tidak menghasilkan
+baris ganda, dan baris yang sudah `final` tidak dikembalikan ke `pending`.
+
+**Terlalu kecil.** Tidak ada yang rusak; siklus pertama hanya lebih lama.
+Biarkan berjalan.
+
+### 8.5 Memulai ulang pemindaian dari awal
+
+Yang dimaksud "dari awal" di sini adalah memindai ulang rentang blok, bukan
+menghapus riwayat. Riwayat tidak dihapus sama sekali.
+
+1. Hentikan Watcher: `Ctrl-C` pada `guard watch --loop`, atau tunggu siklus
+   tunggalnya selesai. Pastikan tidak ada proses `guard watch` yang tersisa —
+   Watcher kedua akan ditolak dengan pesan "sudah memegang lock".
+2. Mundurkan kursor ke blok sebelum titik yang ingin dipindai ulang:
+
+   ```bash
+   docker compose exec postgres psql -U guard_admin -d payment_guard \
+     -v ON_ERROR_STOP=1 \
+     -c "UPDATE watcher_state SET last_scanned = 12345 WHERE chain_id = 84532"
+   ```
+
+   Nilai yang diisi adalah blok **terakhir yang sudah dipindai**, jadi
+   pemindaian lanjut dari `12346`.
+3. Jalankan Watcher seperti biasa. `--from-block` tidak diperlukan dan akan
+   diabaikan: kursornya ada.
+4. Periksa hasilnya:
+
+   ```bash
+   docker compose exec postgres psql -U guard_admin -d payment_guard -c \
+     "SELECT status, count(*) FROM settlements GROUP BY status"
+   ```
+
+**Jangan** menghapus baris `settlements` untuk "membersihkan" hasilnya. Aturan
+pertama runbook ini berlaku di sini juga: yang pernah terlihat di chain tetap
+tercatat pernah terlihat. Pemindaian ulang idempoten, jadi tidak ada yang perlu
+dibersihkan.
