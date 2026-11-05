@@ -143,11 +143,37 @@ class TableGrant:
     * ``None``   -> tanpa UPDATE
     * ``()``     -> UPDATE tingkat tabel (semua kolom)
     * tuple isi  -> UPDATE hanya pada kolom yang disebut
+
+    ``select`` dan ``select_columns`` adalah dua bentuk SELECT yang **saling
+    meniadakan**:
+
+    * ``select=True``             -> SELECT tingkat tabel, semua kolom
+    * ``select_columns=("a",)``   -> SELECT hanya pada kolom itu
+    * keduanya kosong             -> tanpa SELECT
+
+    Memberi keduanya sekaligus ditolak di :meth:`__post_init__`. Kombinasi itu
+    tidak punya arti yang jelas — SELECT tingkat tabel sudah mencakup setiap
+    kolom — dan matriks yang ambigu akan membentuk ekspektasi tes yang ambigu
+    juga.
     """
 
     select: bool = False
     insert: bool = False
     update_columns: tuple[str, ...] | None = None
+    #: SELECT per kolom. Dipakai sejak M6.2 untuk ``watcher`` pada
+    #: ``executions``: ia butuh ``from_addr`` dan tidak boleh lebih.
+    select_columns: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.select and self.select_columns is not None:
+            raise ValueError(
+                "select=True sudah mencakup semua kolom; select_columns tidak boleh diisi bersamaan"
+            )
+        if self.select_columns == ():
+            raise ValueError(
+                "select_columns kosong tidak punya arti; pakai select=True untuk "
+                "tingkat tabel, atau biarkan None untuk tanpa SELECT"
+            )
 
     @property
     def has_update(self) -> bool:
@@ -157,8 +183,26 @@ class TableGrant:
     def table_level_update(self) -> bool:
         return self.update_columns == ()
 
+    def may_select(self, column: str) -> bool:
+        """Apakah role ini boleh ``SELECT`` kolom ``column``.
+
+        Satu fungsi untuk ketiga bentuk, supaya tes tidak perlu menyusun
+        ulang aturannya dan karena itu tidak bisa menyusunnya berbeda.
+        """
+        if self.select:
+            return True
+        if self.select_columns is None:
+            return False
+        return column in self.select_columns
+
     def privileges(self) -> tuple[str, ...]:
-        """Hak tingkat tabel yang diharapkan ``has_table_privilege`` benar."""
+        """Hak tingkat tabel yang diharapkan ``has_table_privilege`` benar.
+
+        ``select_columns`` **tidak** muncul di sini dengan sengaja:
+        ``has_table_privilege(..., 'SELECT')`` harus tetap ``false`` untuk role
+        yang hanya punya hak kolom. Itu perbedaan yang paling penting di
+        M6.2 — Watcher boleh membaca satu kolom, bukan tabelnya.
+        """
         names = []
         if self.select:
             names.append("SELECT")
@@ -223,6 +267,16 @@ TABLE_MATRIX: Final[dict[str, dict[str, TableGrant]]] = {
             update_columns=("status", "broadcast_at", "updated_at"),
         ),
         "reconciler": _S,
+        # M6.2, keputusan CoS opsi A: Watcher boleh membaca `from_addr` dan
+        # tidak satu kolom pun selain itu (0003_watcher_from_addr.sql).
+        #
+        # `from_addr` adalah alamat wallet kami sendiri — satu nilai yang sama
+        # di setiap baris, yang operator sudah menuliskannya di `.env`. Ia tidak
+        # memberi tahu Watcher apa pun tentang keputusan mana pun. Yang dijaga
+        # Arsitektur bagian 3.3 bukan kerahasiaan `executions`, tapi pemisahan
+        # peran: pencocokan settlement dengan execution adalah pekerjaan
+        # Reconciler, dan satu kolom alamat tidak memindahkannya.
+        "watcher": TableGrant(select_columns=("from_addr",)),
     },
     "settlements": {
         # Watcher: pending -> final/reorged, dan settlement_moved (blok berubah).

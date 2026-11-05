@@ -19,7 +19,7 @@ from conftest import RoleNames
 from payment_guard.bootstrap import MIGRATOR_ENV_KEY
 from payment_guard.db import MigrationError
 from payment_guard.locks import MIGRATE_LOCK_KEY
-from payment_guard.migrate import migrations_dir, run_migrate, run_status
+from payment_guard.migrate import discover, migrations_dir, run_migrate, run_status
 from payment_guard.privileges import OWNER_ONLY_TABLES, TABLE_MATRIX
 
 pytestmark = pytest.mark.integration
@@ -28,6 +28,18 @@ pytestmark = pytest.mark.integration
 EXPECTED_TABLES = frozenset(TABLE_MATRIX) | OWNER_ONLY_TABLES
 
 REAL_MIGRATIONS = migrations_dir()
+
+#: Label setiap migrasi di disk, terurut. Diturunkan, bukan ditulis tangan.
+#:
+#: Daftar tangan harus disunting setiap kali migrasi bertambah, dan sampai
+#: disunting ia menggagalkan delapan tes di berkas ini sekaligus dengan pesan
+#: yang tidak menyebut sebabnya — yang persis terjadi saat
+#: ``0003_watcher_from_addr.sql`` ditambahkan di M6.2.
+#:
+#: Yang tetap dijaga ada di ``TestTheFirstTwoAreLocked`` di bawah: dua migrasi
+#: pertama tidak boleh berubah, dan daftarnya tidak boleh kosong.
+ALL_MIGRATIONS = [f.label for f in discover(REAL_MIGRATIONS)]
+ALL_VERSIONS = list(range(1, len(ALL_MIGRATIONS) + 1))
 
 
 def write_migration(directory: Path, name: str, body: str) -> Path:
@@ -57,7 +69,7 @@ class TestEmptyDatabase:
     def test_all_tables_are_created(self, bootstrapped: dict[str, str]) -> None:
         url = bootstrapped[MIGRATOR_ENV_KEY]
         applied = run_migrate(url, REAL_MIGRATIONS)
-        assert [f.label for f in applied] == ["0001_init.sql", "0002_roles.sql"]
+        assert [f.label for f in applied] == ALL_MIGRATIONS
         assert EXPECTED_TABLES <= table_names(url)
 
     def test_no_unexpected_tables(self, migrated: dict[str, str]) -> None:
@@ -79,16 +91,77 @@ class TestEmptyDatabase:
         with psycopg.connect(url) as conn, conn.cursor() as cur:
             cur.execute("SELECT version, name, checksum FROM schema_migrations ORDER BY version")
             rows = cur.fetchall()
-        assert [(r[0], r[1]) for r in rows] == [(1, "init"), (2, "roles")]
+        # Nama di `schema_migrations` adalah nama berkas tanpa nomor dan tanpa
+        # sufiks: `0003_watcher_from_addr.sql` -> `watcher_from_addr`.
+        diharapkan = [
+            (version, label.split("_", 1)[1].removesuffix(".sql"))
+            for version, label in zip(ALL_VERSIONS, ALL_MIGRATIONS, strict=True)
+        ]
+        assert [(r[0], r[1]) for r in rows] == diharapkan
         for _, _, checksum in rows:
             assert len(checksum) == 64
+
+        # Checksum di database harus sama dengan checksum berkas di disk.
+        # Itu yang membuat runner bisa menolak berkas yang berubah setelah
+        # diterapkan, dan di sini ia diperiksa dari sisi yang berlawanan.
+        di_disk = {f.label: f.checksum for f in discover(REAL_MIGRATIONS)}
+        for (version, name, checksum), label in zip(rows, ALL_MIGRATIONS, strict=True):
+            assert checksum == di_disk[label], f"{label} (versi {version}, nama {name})"
+
+
+class TestTheFirstTwoAreLocked:
+    """Penjaga untuk ``ALL_MIGRATIONS``, yang diturunkan dari disk.
+
+    Daftar yang diturunkan tidak bisa basi, tapi juga tidak menolak apa pun:
+    kalau seseorang mengganti ``0001_init.sql``, setiap tes yang memakainya
+    akan tetap lulus. Dua pernyataan di bawah yang menahannya, dan keduanya
+    tidak menyentuh database.
+    """
+
+    def test_the_list_is_not_empty(self) -> None:
+        """Daftar kosong akan meluluskan setiap tes yang membandingkannya."""
+        assert ALL_MIGRATIONS
+
+    def test_the_locked_two_come_first(self) -> None:
+        """``0001`` dan ``0002`` terkunci; migrasi baru selalu di belakangnya."""
+        assert ALL_MIGRATIONS[:2] == ["0001_init.sql", "0002_roles.sql"]
+
+    def test_the_locked_two_have_not_changed_a_byte(self) -> None:
+        """Known-answer: checksum ``0001`` dan ``0002`` dipin apa adanya.
+
+        Nama berkas yang sama tidak berarti isi yang sama, dan nama itulah
+        satu-satunya hal yang dijaga tes di atas. Dua nilai di bawah adalah
+        checksum yang **sudah tercatat** di setiap database yang pernah
+        dimigrasi — termasuk instalasi operator, yang menerapkannya pada M0.
+
+        Mengubah salah satu berkas itu akan membuat runner menolak jalan di
+        database yang sudah ada (``checksum ... berubah setelah diterapkan``),
+        yaitu kegagalan yang hanya muncul di mesin yang sudah punya data.
+        Tes ini memindahkan kegagalan itu ke tempat yang terlihat lebih awal.
+
+        Checksum dihitung atas isi yang newline-nya sudah dinormalkan, jadi
+        nilainya sama di Windows dan Linux.
+        """
+        terpin = {
+            "0001_init.sql": "dcd1caa043aa3e8750ac9efb810b0d97615504e5caad1f54c1581143d5a9d0cb",
+            "0002_roles.sql": "4ee5c59bc2037e1ef648becf113852a0eb7579c38c8ee098932da11113a2e2b2",
+        }
+        actual = {f.label: f.checksum for f in discover(REAL_MIGRATIONS)}
+        for name, expected in terpin.items():
+            assert actual[name] == expected, (
+                f"{name} berubah. Berkas itu terkunci; perubahan skema berjalan lewat migrasi baru."
+            )
+
+    def test_versions_are_contiguous_from_one(self) -> None:
+        assert ALL_VERSIONS[0] == 1
+        assert len(ALL_VERSIONS) == len(ALL_MIGRATIONS)
 
 
 class TestIdempotence:
     def test_second_run_does_nothing(self, bootstrapped: dict[str, str]) -> None:
         url = bootstrapped[MIGRATOR_ENV_KEY]
         first = run_migrate(url, REAL_MIGRATIONS)
-        assert len(first) == 2
+        assert [f.label for f in first] == ALL_MIGRATIONS
         second = run_migrate(url, REAL_MIGRATIONS)
         assert second == []
 
@@ -417,7 +490,7 @@ class TestRolesMigrationGuard:
 
     def test_0002_succeeds_after_bootstrap(self, bootstrapped: dict[str, str]) -> None:
         applied = run_migrate(bootstrapped[MIGRATOR_ENV_KEY], REAL_MIGRATIONS)
-        assert [f.label for f in applied] == ["0001_init.sql", "0002_roles.sql"]
+        assert [f.label for f in applied] == ALL_MIGRATIONS
 
 
 class TestAdvisoryLock:
@@ -451,7 +524,7 @@ class TestAdvisoryLock:
 
         assert not thread.is_alive()
         assert outcome.get("error") is None, outcome.get("error")
-        assert outcome["applied"] == ["0001_init.sql", "0002_roles.sql"]
+        assert outcome["applied"] == ALL_MIGRATIONS
 
     def test_lock_key_matches_the_specification(self) -> None:
         from payment_guard.locks import advisory_key
@@ -464,12 +537,12 @@ class TestStatus:
         report = run_status(bootstrapped[MIGRATOR_ENV_KEY], REAL_MIGRATIONS)
         assert report.table_exists is False
         assert report.applied == []
-        assert [f.label for f in report.pending] == ["0001_init.sql", "0002_roles.sql"]
+        assert [f.label for f in report.pending] == ALL_MIGRATIONS
 
     def test_status_after_full_migration(self, migrated: dict[str, str]) -> None:
         report = run_status(migrated[MIGRATOR_ENV_KEY], REAL_MIGRATIONS)
         assert report.table_exists is True
-        assert [row.version for row in report.applied] == [1, 2]
+        assert [row.version for row in report.applied] == ALL_VERSIONS
         assert report.pending == []
 
     def test_status_detects_checksum_drift(

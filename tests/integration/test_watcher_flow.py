@@ -30,15 +30,19 @@ from conftest_watcher import (
     settlement_rows,
     table_snapshot,
 )
+from psycopg import sql
 
 from conftest_executor import (
     CHAIN_ID,
+    USDC_ADDRESS,
     audit_events,
+    audit_payloads_for,
+    count_executions,
     seed_approved_decision,
     seed_mandate,
 )
 from conftest_guard import RECIPIENT_A, RECIPIENT_B, USDC
-from fake_chain import TEST_WALLET_ADDRESS, FakeChain
+from fake_chain import TEST_WALLET_ADDRESS, TEST_WALLET_SEED, FakeChain
 from payment_guard.chain import ChainError
 from payment_guard.config import ExecutorConfig, ReconcilerConfig, WatcherConfig
 from payment_guard.executor import execute_decision, open_runtime
@@ -1072,19 +1076,30 @@ class TestTheWatcherChangesNothingElse:
         }
         assert after == before
 
-    def test_the_watcher_role_cannot_even_select_executions(
+    def test_the_watcher_role_cannot_read_what_matters_in_executions(
         self, watcher_url: str, executor_db: str, chain: FakeChain, seeded: dict
     ) -> None:
-        """Bukan hanya tidak menulis: ia tidak boleh **membaca**.
+        """Bukan hanya tidak menulis: isi barisnya tidak boleh dibaca.
 
-        Pencocokan adalah pekerjaan Reconciler. Proses yang bisa membaca
-        ``executions`` dan menulis ``settlements`` sekaligus adalah proses
-        yang bisa, suatu hari, "memperbaiki" salah satunya.
+        Di M6 tes ini berbunyi "tidak boleh membaca `executions` sama sekali".
+        M6.2 membuka satu kolom, `from_addr`, lewat migrasi 0003 — jadi yang
+        dijaga sekarang adalah kolom yang menentukan: `decision_id`,
+        `amount_base`, dan `raw_tx`.
+
+        Pencocokan tetap pekerjaan Reconciler. Proses yang bisa membaca
+        keputusan **dan** menulis `settlements` sekaligus adalah proses yang
+        bisa, suatu hari, "memperbaiki" salah satunya — dan satu kolom alamat
+        tidak memindahkan kemampuan itu.
+
+        Cakupan penuh per kolom ada di
+        ``TestTheWatcherReadsOnlyFromAddr``; yang di sini adalah tiga kolom
+        yang paling penting, di tempat yang membaca tentang kewenangan Watcher.
         """
         with psycopg.connect(watcher_url) as conn, conn.cursor() as cur:
-            with pytest.raises(psycopg.errors.InsufficientPrivilege):
-                cur.execute("SELECT count(*) FROM executions")
-            conn.rollback()
+            for column in ("decision_id", "amount_base", "raw_tx"):
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    cur.execute(sql.SQL("SELECT {} FROM executions").format(sql.Identifier(column)))
+                conn.rollback()
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 cur.execute("SELECT count(*) FROM decisions")
             conn.rollback()
@@ -1462,67 +1477,360 @@ class TestChunkedGetLogs:
             assert row["block_number"] <= maju
 
 
-@pytest.mark.skip(
-    reason=(
-        "menunggu keputusan CoS: cek alamat wallet saat start (B3) butuh SELECT "
-        "pada executions, yang tidak dimiliki watcher_rw. Opsi A: tambah grant "
-        "lewat migrasi 0003. Opsi B: pindahkan cek ke Reconciler, yang sudah "
-        "punya SELECT pada keduanya. Tidak dikerjakan sampai diputuskan."
-    )
-)
 class TestWalletAddressGuardAtStartup:
-    """B3, TERTAHAN. Tes ini mendokumentasikan perilaku yang **diminta**, bukan yang ada.
+    """B3, DIKERJAKAN di M6.2 setelah keputusan CoS (opsi A).
 
-    Yang diminta: Watcher membandingkan ``EXECUTOR_WALLET_ADDRESS`` dengan
-    ``from_addr`` di ``executions`` dan menolak start bila ada yang berbeda.
+    Di M6.1 kelas ini ada dengan tiga tes ber-``skip``: perilakunya butuh
+    SELECT pada ``executions``, yang tidak dimiliki ``watcher_rw``. Migrasi
+    ``0003_watcher_from_addr.sql`` memberi hak itu untuk **satu kolom**
+    ``from_addr``, jadi ketiganya sekarang dijalankan — dan ``raise
+    AssertionError`` yang dulu menjadi isinya diganti tes yang sebenarnya.
 
-    Kenapa tertahan: itu butuh SELECT pada ``executions``, dan matriks hak di
-    ``0002_roles.sql`` tidak memberikannya ke ``watcher_rw`` — bukan karena
-    kelalaian, tapi supaya proses yang menulis ``settlements`` tidak juga bisa
-    membaca keputusan yang mengizinkannya (Arsitektur v1.1 bagian 3.3).
-    Menambah grant berarti melonggarkan pemisahan yang justru paling ingin
-    dijaga di seluruh proyek ini, dan itu bukan keputusan pelaksana.
-
-    Tes ini dibiarkan ``skip`` dengan sengaja, bukan dihapus: ia catatan utang
-    yang muncul di setiap laporan pytest, bukan di berkas yang bisa terlupa.
+    Yang dijaga: konfigurasi yang menunjuk wallet lain tidak menggagalkan apa
+    pun tanpa penjaga ini. Watcher jalan, menyaring log per pengirim yang
+    salah, dan tidak pernah melihat satu pun pembayaran — tanpa pengecualian,
+    tanpa baris ``settlements``, hanya diam.
     """
 
-    def test_a_mismatched_wallet_refuses_to_start(self) -> None:
-        raise AssertionError("belum diimplementasi; lihat alasan skip di kelas ini")
+    OTHER_WALLET = "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
 
-    def test_a_matching_wallet_starts_normally(self) -> None:
-        raise AssertionError("belum diimplementasi; lihat alasan skip di kelas ini")
+    def test_a_matching_wallet_starts_normally(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """Ada eksekusi, alamatnya sama: lanjut."""
+        broadcast(executor_config, chain, seeded["decision_id"])
+        runtime = start_watcher(watcher_config, client=chain)
+        close_runtime(runtime)
 
-    def test_an_empty_executions_table_does_not_block_startup(self) -> None:
-        raise AssertionError("belum diimplementasi; lihat alasan skip di kelas ini")
+    def test_an_empty_executions_table_does_not_block_startup(
+        self, watcher_config: WatcherConfig, chain: FakeChain, executor_db: str
+    ) -> None:
+        """Belum ada apa pun untuk dibandingkan, jadi tidak ada yang bisa salah.
+
+        Menolak start di sini akan berarti Watcher tidak bisa dijalankan
+        sebelum pembayaran pertama — padahal justru pembayaran pertama yang
+        ingin dilihatnya.
+        """
+        assert count_executions(executor_db) == 0
+        runtime = start_watcher(watcher_config, client=chain)
+        close_runtime(runtime)
+
+    def test_a_mismatched_wallet_refuses_to_start(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        executor_db: str,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """Ada ``from_addr`` yang berbeda: tolak, dan sebut kedua alamatnya."""
+        broadcast(executor_config, chain, seeded["decision_id"])
+        salah = dataclasses.replace(watcher_config, wallet_address=self.OTHER_WALLET)
+
+        with pytest.raises(WatcherError) as info:
+            start_watcher(salah, client=chain)
+
+        pesan = str(info.value)
+        assert self.OTHER_WALLET in pesan, "alamat yang diharapkan harus disebut"
+        assert TEST_WALLET_ADDRESS in pesan, "alamat yang ditemukan harus disebut"
+        assert "devonly_not_a_secret" not in pesan
+        assert TEST_WALLET_SEED not in pesan, "kunci tidak pernah masuk pesan"
+
+    def test_the_refusal_is_audited(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        executor_db: str,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """Audit di-commit sebelum pengecualian dilempar.
+
+        Kejadian ini satu-satunya jejak yang akan ada: sesudahnya tidak ada
+        apa pun yang berjalan.
+        """
+        broadcast(executor_config, chain, seeded["decision_id"])
+        salah = dataclasses.replace(watcher_config, wallet_address=self.OTHER_WALLET)
+
+        with pytest.raises(WatcherError):
+            start_watcher(salah, client=chain)
+
+        assert ("watcher", "alarm_watcher_wallet_mismatch") in audit_events(executor_db)
+        payloads = audit_payloads_for(executor_db, "alarm_watcher_wallet_mismatch")
+        assert len(payloads) == 1
+        assert payloads[0]["expected_from_addr"] == self.OTHER_WALLET
+        assert payloads[0]["found_from_addr"] == [TEST_WALLET_ADDRESS]
+        assert payloads[0]["chain_id"] == CHAIN_ID
+
+    def test_the_refusal_releases_the_session_lock(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """Satu kesalahan konfigurasi tidak boleh menahan lock sampai reboot."""
+        broadcast(executor_config, chain, seeded["decision_id"])
+        salah = dataclasses.replace(watcher_config, wallet_address=self.OTHER_WALLET)
+
+        with pytest.raises(WatcherError):
+            start_watcher(salah, client=chain)
+
+        kedua = open_watcher(watcher_config, client=chain)
+        close_runtime(kedua)
+
+    def test_nothing_is_scanned_when_it_refuses(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        executor_db: str,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """Penjaganya berjalan **sebelum** pemindaian apa pun."""
+        tx_hash = broadcast(executor_config, chain, seeded["decision_id"])
+        chain.add_transfer(
+            tx_hash=tx_hash, to_addr=RECIPIENT_A, amount_base=AMOUNT, block_number=BLOCK
+        )
+        deep_enough(chain)
+        salah = dataclasses.replace(watcher_config, wallet_address=self.OTHER_WALLET)
+
+        with pytest.raises(WatcherError):
+            start_watcher(salah, client=chain)
+
+        assert settlement_rows(executor_db) == []
+        assert cursor_value(executor_db) is None
+
+    def test_it_runs_before_the_chain_is_asked_anything(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """Konfigurasi yang sudah salah tidak perlu perjalanan RPC."""
+        broadcast(executor_config, chain, seeded["decision_id"])
+        chain.calls.clear()
+        salah = dataclasses.replace(watcher_config, wallet_address=self.OTHER_WALLET)
+
+        with pytest.raises(WatcherError):
+            start_watcher(salah, client=chain)
+
+        assert "chain_id" not in chain.calls
+        assert "token_decimals" not in chain.calls
+
+    def test_the_comparison_ignores_case(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """Alamat ber-checksum EIP-55 di ``.env`` harus tetap cocok.
+
+        Operator menyalin alamat dari explorer, dan explorer menampilkannya
+        ber-checksum. Perbandingan yang peka huruf akan menolak start untuk
+        alamat yang sama persis — kegagalan yang terlihat seperti bug penjaga
+        dan bukan seperti konfigurasi yang benar.
+        """
+        from payment_guard.addresses import to_checksum_address
+
+        broadcast(executor_config, chain, seeded["decision_id"])
+        checksummed = to_checksum_address(TEST_WALLET_ADDRESS)
+        assert checksummed != TEST_WALLET_ADDRESS, "alamat uji harus punya huruf besar"
+
+        runtime = start_watcher(
+            dataclasses.replace(watcher_config, wallet_address=checksummed), client=chain
+        )
+        close_runtime(runtime)
+
+    def test_an_invalid_config_address_is_refused_clearly(
+        self, watcher_config: WatcherConfig, chain: FakeChain
+    ) -> None:
+        """Alamat yang tidak sah ditolak dengan pesan yang menyebut variabelnya."""
+        rusak = dataclasses.replace(watcher_config, wallet_address="0xbukan-alamat")
+
+        with pytest.raises(WatcherError, match="EXECUTOR_WALLET_ADDRESS"):
+            start_watcher(rusak, client=chain)
+
+    def test_an_empty_config_address_is_refused(
+        self, watcher_config: WatcherConfig, chain: FakeChain
+    ) -> None:
+        """Kosong juga tidak sah. Tidak ada default."""
+        kosong = dataclasses.replace(watcher_config, wallet_address="")
+
+        with pytest.raises(WatcherError, match="EXECUTOR_WALLET_ADDRESS"):
+            start_watcher(kosong, client=chain)
+
+    def test_several_foreign_addresses_are_all_reported(
+        self, executor_db: str, watcher_config: WatcherConfig, chain: FakeChain, seeded: dict
+    ) -> None:
+        """Lebih dari satu alamat berarti wallet Executor pernah diganti."""
+        lain = "0x3c44cdddb6a900fa2b585dd299e03d12fa4293bc"
+        with psycopg.connect(executor_db) as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO executions (decision_id, tx_hash, from_addr, to_addr, "
+                "amount_base, nonce, raw_tx, status) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    seeded["decision_id"],
+                    FOREIGN_TX,
+                    lain,
+                    USDC_ADDRESS,
+                    str(AMOUNT),
+                    0,
+                    b"\x01",
+                    "signed",
+                ),
+            )
+            conn.commit()
+
+        with pytest.raises(WatcherError) as info:
+            start_watcher(watcher_config, client=chain)
+
+        assert lain in str(info.value)
 
 
-class TestTheWatcherStillCannotReadExecutions:
-    """Penjaga untuk B3: selama tertahan, grant-nya tidak boleh berubah.
+class TestTheWatcherReadsOnlyFromAddr:
+    """Inti migrasi 0003: satu kolom boleh dibaca, sisanya tidak.
 
-    Kalau suatu hari seseorang menambahkan SELECT pada ``executions`` ke
-    ``watcher_rw`` tanpa keputusan, tes ini yang menangkapnya — dan ia berada
-    di berkas yang sama dengan tes yang di-skip di atas, supaya keduanya
-    terbaca bersama.
+    Kelas ini menggantikan ``TestTheWatcherStillCannotReadExecutions`` dari
+    M6.1, yang menyatakan ``watcher`` tidak punya hak apa pun pada
+    ``executions``. Pernyataan itu benar sampai keputusan CoS dan sengaja akan
+    gagal sesudahnya — itu memang gunanya. Yang dijaga sekarang bukan "tidak
+    ada hak" melainkan "tepat satu kolom", dan itu pernyataan yang lebih sempit
+    serta lebih berguna: yang penting bukan bahwa ``from_addr`` bisa dibaca,
+    tapi bahwa ``raw_tx`` dan sisanya tetap tidak.
     """
 
-    def test_the_matrix_gives_the_watcher_nothing_on_executions(self) -> None:
+    #: Kolom ``executions`` yang **tidak** boleh dibaca Watcher. Daftar
+    #: eksplisit, bukan "semua kecuali": kolom baru yang suatu hari ditambahkan
+    #: ke tabel ini harus dipertimbangkan satu per satu, bukan ikut lolos
+    #: karena tidak ada di daftar.
+    FORBIDDEN_COLUMNS = (
+        "id",
+        "decision_id",
+        "tx_hash",
+        "to_addr",
+        "amount_base",
+        "nonce",
+        "raw_tx",
+        "status",
+        "created_at",
+        "broadcast_at",
+        "updated_at",
+    )
+
+    def test_the_matrix_gives_the_watcher_exactly_one_column(self) -> None:
         from payment_guard.privileges import TABLE_MATRIX
 
-        assert "watcher" not in TABLE_MATRIX["executions"]
+        grant = TABLE_MATRIX["executions"]["watcher"]
+        assert grant.select_columns == ("from_addr",)
+        assert grant.select is False, "SELECT tingkat tabel tidak boleh"
+        assert grant.insert is False
+        assert grant.update_columns is None
 
-    def test_the_matrix_gives_the_watcher_nothing_on_decisions(self) -> None:
+    def test_the_matrix_still_gives_the_watcher_nothing_on_decisions(self) -> None:
+        """Yang berubah hanya ``executions``. ``decisions`` tetap tertutup."""
         from payment_guard.privileges import TABLE_MATRIX
 
         assert "watcher" not in TABLE_MATRIX["decisions"]
 
-    def test_there_is_no_third_migration(self) -> None:
-        """B3 tidak boleh diselesaikan diam-diam lewat migrasi baru."""
-        from pathlib import Path
-
+    def test_there_are_exactly_three_migrations(self) -> None:
+        """0003 ada; 0004 tidak. Grant berikutnya butuh keputusan berikutnya."""
         akar = Path(__file__).resolve().parents[2]
         migrasi = sorted(p.name for p in (akar / "migrations").glob("*.sql"))
-        assert migrasi == ["0001_init.sql", "0002_roles.sql"], migrasi
+        assert migrasi == [
+            "0001_init.sql",
+            "0002_roles.sql",
+            "0003_watcher_from_addr.sql",
+        ], migrasi
+
+    def test_watcher_app_can_select_from_addr(
+        self, watcher_url: str, executor_config: ExecutorConfig, chain: FakeChain, seeded: dict
+    ) -> None:
+        broadcast(executor_config, chain, seeded["decision_id"])
+        with psycopg.connect(watcher_url) as conn, conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT from_addr FROM executions")
+            assert [row[0] for row in cur.fetchall()] == [TEST_WALLET_ADDRESS]
+
+    @pytest.mark.parametrize("column", FORBIDDEN_COLUMNS)
+    def test_watcher_app_cannot_select_any_other_column(
+        self, watcher_url: str, column: str
+    ) -> None:
+        """Tes utama migrasi ini, satu kolom per parametrisasi.
+
+        Dijalankan tanpa baris apa pun di tabel dengan sengaja: Postgres
+        memeriksa hak sebelum membaca data, jadi penolakannya tidak bergantung
+        pada ada tidaknya isi.
+        """
+        with psycopg.connect(watcher_url) as conn, conn.cursor() as cur:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cur.execute(sql.SQL("SELECT {} FROM executions").format(sql.Identifier(column)))
+            conn.rollback()
+
+    def test_watcher_app_cannot_select_star(self, watcher_url: str) -> None:
+        """``SELECT *`` adalah bentuk yang paling mudah ditulis tanpa sadar."""
+        with psycopg.connect(watcher_url) as conn, conn.cursor() as cur:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cur.execute("SELECT * FROM executions")
+            conn.rollback()
+
+    def test_counting_rows_is_allowed_and_that_is_worth_knowing(self, watcher_url: str) -> None:
+        """``count(*)`` **berhasil** dengan hak satu kolom. Itu mengejutkan.
+
+        Postgres memperlakukan ``count(*)`` sebagai tidak merujuk kolom mana
+        pun, jadi hak ``SELECT`` pada **satu** kolom sudah cukup. Hak kolom
+        karena itu bukan penghalang untuk mengetahui **berapa banyak** baris
+        yang ada — hanya untuk mengetahui apa isinya.
+
+        Dicatat sebagai tes, bukan sebagai komentar, karena kesimpulan
+        sebaliknya terasa lebih masuk akal: saya menulis tes ini dengan
+        ``pytest.raises`` lebih dulu, dan ia gagal.
+
+        Dampaknya pada model ancaman kecil dan perlu disebut jujur: jumlah
+        eksekusi bukan rahasia, dan Watcher sudah mengetahui lebih banyak dari
+        itu lewat ``settlements`` yang ia tulis sendiri. Yang tetap tertutup
+        adalah isi setiap barisnya.
+        """
+        with psycopg.connect(watcher_url) as conn, conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM executions")
+            row = cur.fetchone()
+            assert row is not None
+            assert isinstance(row[0], int)
+
+    def test_watcher_app_cannot_write_executions(self, watcher_url: str) -> None:
+        """Hak baca satu kolom tidak membawa hak tulis apa pun."""
+        with psycopg.connect(watcher_url) as conn, conn.cursor() as cur:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cur.execute("UPDATE executions SET from_addr = %s", (TEST_WALLET_ADDRESS,))
+            conn.rollback()
+
+    def test_watcher_app_still_cannot_read_decisions(self, watcher_url: str) -> None:
+        with psycopg.connect(watcher_url) as conn, conn.cursor() as cur:
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                cur.execute("SELECT 1 FROM decisions")
+            conn.rollback()
+
+    def test_the_module_query_names_only_that_column(self) -> None:
+        """Penjaga statis: query di modul tidak boleh menyebut kolom lain.
+
+        Postgres akan menolaknya saat dijalankan, tapi penolakan itu muncul
+        sebagai ``permission denied`` yang tidak menyebut sebabnya. Lebih baik
+        tertangkap di sini.
+        """
+        from payment_guard.watcher import SELECT_EXECUTION_SENDERS
+
+        teks = SELECT_EXECUTION_SENDERS.lower()
+        assert "from_addr" in teks
+        for column in self.FORBIDDEN_COLUMNS:
+            assert column not in teks, column
+        assert "count(" not in teks
+        assert "*" not in teks
 
 
 class TestOnlyOneWatcherPerChain:

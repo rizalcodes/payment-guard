@@ -14,7 +14,7 @@ Sumber kebenaran tetap berkas SQL-nya. Keduanya terkunci: `0001_init.sql`
 dan `0002_roles.sql` tidak diubah lagi, dan perubahan skema berjalan lewat
 migrasi baru.
 
-Berkas yang dibaca: `0001_init.sql`, `0002_roles.sql`.
+Berkas yang dibaca: `0001_init.sql`, `0002_roles.sql`, `0003_watcher_from_addr.sql`.
 
 ## Tabel
 
@@ -211,6 +211,7 @@ atau TRIGGER untuk role mana pun.
 | `executions` | `executor_rw` | `UPDATE (status, broadcast_at, updated_at)` |
 | `executions` | `guard_rw` | `SELECT` |
 | `executions` | `reconciler_rw` | `SELECT` |
+| `executions` | `watcher_rw` | `SELECT (from_addr)` |
 | `executions_id_seq` | `executor_rw` | `USAGE` |
 | `mandates` | `approver_rw` | `SELECT` |
 | `mandates` | `executor_rw` | `SELECT` |

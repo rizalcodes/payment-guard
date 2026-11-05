@@ -13,7 +13,78 @@ apa yang terjadi pada tag dan commit.
 Hal yang **sengaja** belum dikerjakan, dengan alasannya. Dihapus dari daftar
 ini hanya ketika benar-benar selesai.
 
-### B3 — cek alamat wallet saat start (menunggu keputusan CoS)
+*Kosong.* Utang satu-satunya — B3, cek alamat wallet saat start — ditutup di
+M6.2; catatannya di bawah dibiarkan sebagai riwayat.
+
+---
+
+## M6.2 — penjaga alamat wallet lewat grant kolom-tunggal
+
+Belum ditag.
+
+`0003_watcher_from_addr.sql`: satu pernyataan,
+`GRANT SELECT (from_addr) ON executions TO watcher_rw`. Tidak ada GRANT lain,
+tidak ada perubahan tabel. Keputusan CoS, opsi A.
+
+**Penjaganya.** Sebelum pemindaian apa pun — dan sebelum satu pun perjalanan
+RPC — Watcher membaca `DISTINCT from_addr` dari `executions` dan
+membandingkannya dengan `EXECUTOR_WALLET_ADDRESS` lewat `normalize_address`,
+jadi alamat ber-checksum dari explorer tetap cocok. Tidak ada eksekusi: lanjut.
+Semua sama: lanjut. Ada yang berbeda: menolak start, mencatat
+`alarm_watcher_wallet_mismatch` di transaksinya sendiri, dan keluar dengan kode
+non-nol.
+
+Yang dicegah adalah kegagalan yang **tidak** menggagalkan apa pun: konfigurasi
+yang menunjuk wallet lain membuat Watcher jalan, menyaring log per pengirim
+yang salah, dan tidak pernah melihat satu pun pembayaran — tanpa pengecualian,
+tanpa baris `settlements`, hanya diam.
+
+**Matriks hak**, perubahan pertama sejak `0002_roles.sql`:
+
+| | sebelum | sesudah |
+|---|---|---|
+| `executions` × `watcher` | `—` | `S (kolom from_addr saja)` |
+
+`has_table_privilege('watcher_rw', 'executions', 'SELECT')` tetap `false`.
+Ada tes terpisah untuk itu, karena setiap tes per kolom akan tetap lulus kalau
+grant-nya diganti menjadi tingkat tabel.
+
+**Dua kekeliruan saya sendiri yang ditemukan tes:**
+
+1. `count(*)` **berhasil** dengan hak satu kolom. Saya menulis tesnya dengan
+   `pytest.raises` lebih dulu dan ia gagal. Postgres memperlakukan `count(*)`
+   sebagai tidak merujuk kolom mana pun, jadi hak pada satu kolom sudah cukup.
+   Hak kolom menutup isi baris, bukan jumlahnya. Tesnya sekarang menyatakan
+   yang benar dan menjelaskan kenapa dampaknya kecil.
+2. Generator `docs/schema.md` menelan blok komentar ke dalam kolom "hak",
+   karena `parse_grants` tidak memanggil `strip_comments` sementara polanya
+   memakai `re.DOTALL`. `0003` adalah migrasi pertama dengan komentar panjang
+   tepat sebelum pernyataannya, jadi bug itu baru terlihat sekarang.
+   Diperbaiki di generatornya, bukan dengan memendekkan komentar.
+
+**Tes.** `TestWalletAddressGuardAtStartup` dibuka dari `skip` dan tumbuh dari
+3 menjadi 11 tes yang berjalan. `TestTheWatcherStillCannotReadExecutions`
+digantikan `TestTheWatcherReadsOnlyFromAddr`: pernyataannya berubah dari
+"tidak ada hak" menjadi "tepat satu kolom", dengan satu tes per kolom terlarang.
+`test_select_is_never_granted_per_column` di `test_privileges.py` menjadi
+`test_select_columns_match_matrix`, bentuknya kini sama dengan padanannya untuk
+UPDATE.
+
+Fixture `migrated` tidak lagi memeriksa daftar nama migrasi yang ditulis
+tangan; ia membandingkan dengan `discover()`. Daftar tangan harus disunting
+setiap kali migrasi bertambah, dan sampai disunting ia menggagalkan seluruh
+suite integrasi dengan pesan yang tidak menyebut sebabnya — yang persis terjadi
+saat `0003` ditambahkan.
+
+**Operator harus menjalankan `guard db migrate` sendiri** sebelum
+`guard watch`. Tidak ada proses runtime yang menerapkan migrasi, dan
+`guard serve` hanya memeriksa keberadaan tabel (RR-12), bukan versinya.
+Prosedurnya di `docs/runbook.md` bagian 9. Migrasi ini **belum** diterapkan di
+cluster operator.
+
+---
+
+### B3 — cek alamat wallet saat start (DITUTUP di M6.2, opsi A)
 
 Yang diminta: Watcher membandingkan `EXECUTOR_WALLET_ADDRESS` dengan
 `from_addr` di `executions`, dan menolak start bila ada eksekusi dengan alamat
@@ -38,11 +109,15 @@ Opsi B tidak butuh perubahan hak apa pun dan karena itu yang akan dipilih
 kalau tidak ada arahan lain — tapi ia **belum** dikerjakan, karena yang
 diminta adalah penolakan saat start.
 
-Tesnya ada dan ditandai `skip` dengan alasan di
-`tests/integration/test_watcher_flow.py::TestWalletAddressGuardAtStartup`,
-jadi utang ini muncul di setiap laporan pytest. Penjaganya juga ada:
-`TestTheWatcherStillCannotReadExecutions` akan gagal kalau grant-nya berubah
-tanpa keputusan, dan kalau migrasi `0003` muncul.
+**Hasil: CoS memilih opsi A**, dengan hak dipersempit ke satu kolom.
+Dikerjakan di M6.2; lihat entri di atas. Anjuran saya (opsi B) tidak diikuti,
+dan alasannya masuk akal — Reconciler yang melaporkan belakangan tidak
+mencegah Watcher memantau wallet yang salah selama berjam-jam lebih dulu.
+
+Tes yang ditandai `skip` sudah dibuka dan dijalankan.
+`TestTheWatcherStillCannotReadExecutions` sengaja gagal setelah grant berubah,
+yang memang gunanya; ia digantikan `TestTheWatcherReadsOnlyFromAddr` yang
+menjaga pernyataan yang lebih sempit: tepat satu kolom, bukan nol.
 
 ---
 

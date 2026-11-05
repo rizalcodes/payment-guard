@@ -55,6 +55,7 @@ from typing import Final, TextIO
 
 import psycopg
 
+from payment_guard.addresses import AddressError, normalize_address
 from payment_guard.chain import (
     ChainClient,
     ChainError,
@@ -118,6 +119,21 @@ NO_BLOCK_SCANNED: Final = -1
 # --------------------------------------------------------------------------- #
 # SQL. Statik; nilai selalu lewat parameter.
 # --------------------------------------------------------------------------- #
+
+#: Alamat pengirim yang pernah dipakai Executor, satu baris per alamat.
+#:
+#: **Hanya kolom ``from_addr``.** Itu satu-satunya kolom ``executions`` yang
+#: boleh dibaca Watcher (``0003_watcher_from_addr.sql``), dan menyebut kolom
+#: lain di sini — termasuk ``ORDER BY id`` — akan ditolak Postgres dengan
+#: ``permission denied``. Query ini karena itu ditulis sesempit mungkin dengan
+#: sengaja, dan tes integrasi memeriksa setiap kolom lain satu per satu.
+#:
+#: Satu kekecualian yang diuji dan patut diketahui: ``count(*)`` **berhasil**
+#: dengan hak satu kolom, karena Postgres memperlakukannya sebagai tidak
+#: merujuk kolom mana pun. Hak kolom menutup isi baris, bukan jumlahnya.
+SELECT_EXECUTION_SENDERS: Final = """
+SELECT DISTINCT from_addr FROM executions
+"""
 
 SELECT_CURSOR: Final = """
 SELECT last_scanned FROM watcher_state WHERE chain_id = %s
@@ -359,6 +375,11 @@ def start_watcher(
     """
     runtime = open_runtime(config, client=client)
     try:
+        # Penjaga alamat wallet berjalan **sebelum** pemeriksaan chain, dan
+        # sebelum pemindaian apa pun: ia tidak butuh jaringan, jadi tidak ada
+        # alasan membelanjakan perjalanan RPC untuk konfigurasi yang sudah
+        # salah.
+        check_wallet_matches_executions(runtime)
         chain_id, decimals = check_chain_and_token(
             runtime.client,
             expected_chain_id=config.chain_id,
@@ -374,6 +395,114 @@ def start_watcher(
             file=out,
         )
     return runtime
+
+
+# --------------------------------------------------------------------------- #
+# Penjaga alamat wallet (M6.2)
+# --------------------------------------------------------------------------- #
+
+
+def execution_senders(cur: psycopg.Cursor) -> list[str]:
+    """Alamat pengirim berbeda yang pernah dipakai Executor, ternormalisasi.
+
+    Hanya ``from_addr`` yang dibaca; lihat :data:`SELECT_EXECUTION_SENDERS`.
+
+    Nilai di kolom itu sudah lowercase — ``CHECK (from_addr ~
+    '^0x[0-9a-f]{40}$')`` di ``0001_init.sql`` menjaminnya — tapi tetap
+    dinormalisasi lewat :func:`payment_guard.addresses.normalize_address`.
+    Alasannya bukan ketidakpercayaan pada CHECK: ia memastikan kedua sisi
+    perbandingan melewati fungsi yang **sama**, sehingga tidak ada bentuk yang
+    bisa berbeda di satu sisi saja.
+
+    Raises:
+        WatcherError: bila ada nilai yang bukan alamat sah. Baris semacam itu
+            tidak bisa ada selama CHECK berlaku, jadi kalau ia ada, yang salah
+            bukan konfigurasi melainkan database.
+    """
+    cur.execute(SELECT_EXECUTION_SENDERS)
+    senders = []
+    for row in cur.fetchall():
+        raw = str(row[0])
+        try:
+            senders.append(normalize_address(raw))
+        except AddressError as exc:
+            raise WatcherError(
+                f"executions.from_addr memuat nilai yang bukan alamat ({raw!r}): {exc}. "
+                "CHECK di 0001_init.sql seharusnya mencegah ini."
+            ) from None
+    return sorted(senders)
+
+
+def check_wallet_matches_executions(runtime: WatcherRuntime) -> None:
+    """Tolak start bila ``EXECUTOR_WALLET_ADDRESS`` bukan wallet yang dipakai.
+
+    Keputusan CoS, opsi A. Konfigurasi yang menunjuk wallet lain adalah
+    kegagalan yang **tidak** menggagalkan apa pun: Watcher jalan, menyaring log
+    per pengirim yang salah, dan tidak pernah melihat satu pun pembayaran.
+    Tidak ada pengecualian, tidak ada baris ``settlements``, tidak ada alarm —
+    hanya diam. Satu kolom ``from_addr`` cukup untuk menolaknya lebih dulu.
+
+    Tiga keadaan:
+
+    * **Tidak ada eksekusi.** Lanjut. Belum ada apa pun untuk dibandingkan, dan
+      menolak start di sini berarti Watcher tidak bisa dijalankan sebelum
+      pembayaran pertama — padahal justru pembayaran pertama yang ingin
+      dilihatnya.
+    * **Semua ``from_addr`` sama dengan config.** Lanjut.
+    * **Ada yang berbeda.** Tolak, catat audit, dan biarkan pemanggil keluar
+      dengan kode non-nol.
+
+    Audit ditulis di **transaksinya sendiri** dan di-commit sebelum
+    pengecualian dilempar. Itu disengaja: kejadian ini satu-satunya jejak yang
+    akan ada, karena sesudahnya tidak ada apa pun yang berjalan.
+
+    Kedua alamat masuk ke pesan dan ke payload audit. Keduanya publik — yang
+    rahasia adalah kuncinya, bukan alamatnya — dan operator yang salah mengisi
+    `.env` tidak bisa memperbaikinya tanpa melihat keduanya.
+
+    Raises:
+        WatcherError: bila ada ``from_addr`` yang berbeda, atau bila alamat di
+            konfigurasi tidak sah.
+    """
+    config = runtime.config
+    try:
+        expected = normalize_address(config.wallet_address)
+    except AddressError as exc:
+        raise WatcherError(
+            f"EXECUTOR_WALLET_ADDRESS bukan alamat yang sah ({config.wallet_address!r}): {exc}"
+        ) from None
+
+    with runtime.conn.cursor() as cur:
+        senders = execution_senders(cur)
+    runtime.conn.rollback()
+
+    if not senders:
+        return
+    unexpected = [address for address in senders if address != expected]
+    if not unexpected:
+        return
+
+    with runtime.conn.cursor() as cur:
+        audit(
+            cur,
+            Event.ALARM_WATCHER_WALLET_MISMATCH,
+            {
+                "expected_from_addr": expected,
+                "found_from_addr": unexpected,
+                "chain_id": config.chain_id,
+            },
+            actor=Actor.WATCHER,
+        )
+    runtime.conn.commit()
+
+    raise WatcherError(
+        "EXECUTOR_WALLET_ADDRESS tidak cocok dengan wallet yang dipakai Executor. "
+        f"Diharapkan {expected}; di executions ditemukan {', '.join(unexpected)}. "
+        "Watcher menyaring log Transfer per pengirim, jadi konfigurasi ini akan "
+        "membuatnya tidak pernah melihat satu pun pembayaran. Perbaiki "
+        "EXECUTOR_WALLET_ADDRESS di .env, atau jalankan Watcher untuk wallet yang "
+        "benar. Alamat di atas publik; kuncinya tidak pernah dibaca Watcher."
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1071,6 +1200,7 @@ def settlement_counts(url: str, chain_id: int) -> dict[str, int]:
 __all__ = [
     "NO_BLOCK_SCANNED",
     "OPEN_STATUSES",
+    "SELECT_EXECUTION_SENDERS",
     "SETTLEMENT_STATUSES",
     "STATUS_FINAL",
     "STATUS_PENDING",
@@ -1079,7 +1209,9 @@ __all__ = [
     "SettlementRow",
     "WatcherError",
     "WatcherRuntime",
+    "check_wallet_matches_executions",
     "close_runtime",
+    "execution_senders",
     "open_runtime",
     "read_cursor",
     "run_watch",

@@ -167,7 +167,8 @@ class TestObjectInventory:
         for table, row in TABLE_MATRIX.items():
             actual = set(columns_of(owner_cur, table))
             for process, grant in row.items():
-                for column in grant.update_columns or ():
+                named = (grant.update_columns or ()) + (grant.select_columns or ())
+                for column in named:
                     if column not in actual:
                         problems.append(f"{table}.{column} (matriks {process})")
         assert problems == [], problems
@@ -264,24 +265,58 @@ class TestEffectiveColumnPrivileges:
                         )
         assert problems == [], problems
 
-    def test_select_is_never_granted_per_column(
-        self, owner_cur: psycopg.Cursor, roles: RoleNames
-    ) -> None:
-        """Matriks memberi SELECT di tingkat tabel saja.
+    def test_select_columns_match_matrix(self, owner_cur: psycopg.Cursor, roles: RoleNames) -> None:
+        """SELECT per kolom harus sama persis dengan matriks, kolom demi kolom.
 
-        Role tanpa SELECT pada tabel tidak boleh punya SELECT pada kolom mana
-        pun: itu akan menjadi hak tambahan yang tidak tercatat di matriks.
+        Sampai M6.1 tes ini berbunyi "SELECT tidak pernah diberikan per
+        kolom", dan itu benar saat itu: setiap SELECT di matriks adalah SELECT
+        tingkat tabel. M6.2 menambahkan satu pengecualian yang disetujui —
+        ``watcher`` pada ``executions.from_addr`` — jadi aturannya tidak lagi
+        "tidak pernah" melainkan "tepat seperti matriks".
+
+        Bentuknya kini sama dengan ``test_update_columns_match_matrix``: dua
+        arah, kolom demi kolom. Kolom yang **tidak** disebut matriks tetap
+        harus ditolak, dan itulah inti migrasi 0003 — bukan bahwa ``from_addr``
+        bisa dibaca, tapi bahwa ``raw_tx`` dan sisanya tidak.
         """
         problems = []
         for table in sorted(TABLE_MATRIX):
             columns = columns_of(owner_cur, table)
             for process in PROCESSES:
-                expected = grant_for(table, process).select
+                grant = grant_for(table, process)
                 role = roles.login(process)
                 for column in columns:
+                    expected = grant.may_select(column)
                     actual = has_column(owner_cur, role, table, column, "SELECT")
                     if actual is not expected:
-                        problems.append(f"{role}: {table}.{column} SELECT ada={actual}")
+                        problems.append(
+                            f"{role}: {table}.{column} SELECT ada={actual}, harus={expected}"
+                        )
+        assert problems == [], problems
+
+    def test_a_column_level_grant_does_not_become_a_table_grant(
+        self, owner_cur: psycopg.Cursor, roles: RoleNames
+    ) -> None:
+        """``has_table_privilege(SELECT)`` harus tetap false untuk hak kolom.
+
+        Ini perbedaan yang paling mudah hilang: ``GRANT SELECT (from_addr)``
+        tidak membuat ``SELECT * FROM executions`` berhasil, dan kalau suatu
+        hari seseorang menggantinya dengan ``GRANT SELECT ON executions``,
+        setiap tes kolom di atas tetap lulus — karena SELECT tingkat tabel
+        mencakup setiap kolom. Yang menangkapnya hanya tes ini.
+        """
+        problems = []
+        for table in sorted(TABLE_MATRIX):
+            for process in PROCESSES:
+                grant = grant_for(table, process)
+                if grant.select_columns is None:
+                    continue
+                for role in (roles.group(process), roles.login(process)):
+                    if has_table(owner_cur, role, table, "SELECT"):
+                        problems.append(
+                            f"{role} punya SELECT tingkat tabel pada {table}, "
+                            "padahal matriks hanya memberi hak kolom"
+                        )
         assert problems == [], problems
 
     def test_insert_is_never_granted_per_column(

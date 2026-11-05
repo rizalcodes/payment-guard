@@ -108,9 +108,19 @@ def parse_tables(sql: str, source: str) -> list[Table]:
 
 
 def parse_grants(sql: str) -> dict[str, list[tuple[str, str]]]:
-    """Objek -> daftar (role, hak), terurut dan tanpa duplikat."""
+    """Objek -> daftar (role, hak), terurut dan tanpa duplikat.
+
+    Komentar dibuang lebih dulu, dan itu perlu karena polanya memakai
+    ``re.DOTALL``: tanpa ``strip_comments``, blok komentar di atas sebuah
+    ``GRANT`` akan ikut tertelan ke dalam kolom "hak" — persis yang terjadi
+    pada ``0003_watcher_from_addr.sql``, migrasi pertama yang punya komentar
+    panjang tepat sebelum pernyataannya.
+
+    ``parse_tables`` sudah melakukan hal yang sama sejak awal; di sini ia
+    terlewat karena sampai M6.1 tidak ada berkas yang memicunya.
+    """
     found: dict[str, set[tuple[str, str]]] = {}
-    for privileges, obj, role in GRANT.findall(sql):
+    for privileges, obj, role in GRANT.findall(strip_comments(sql)):
         found.setdefault(obj, set()).add((role, collapse(privileges)))
     return {obj: sorted(pairs) for obj, pairs in sorted(found.items())}
 

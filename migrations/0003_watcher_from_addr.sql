@@ -1,0 +1,38 @@
+-- Payment Guard — 0003_watcher_from_addr.sql
+--
+-- Satu hak, satu kolom: Watcher boleh membaca `executions.from_addr`, dan tidak
+-- satu kolom pun selain itu.
+--
+-- Keputusan CoS, opsi A (docs/CHANGELOG.md "Utang terbuka", docs/decisions.md).
+-- Matriks: Arsitektur v1.1 bagian 3.3, dicerminkan di
+-- src/payment_guard/privileges.py (dipakai tes ST-38, ST-39, ST-40).
+--
+-- ALASAN. Konfigurasi `EXECUTOR_WALLET_ADDRESS` yang menunjuk wallet lain tidak
+-- menggagalkan apa pun: Watcher jalan, menyaring log per pengirim yang salah,
+-- dan tidak pernah melihat satu pun pembayaran. Tidak ada pengecualian, tidak
+-- ada baris `settlements`, tidak ada alarm — hanya diam. Satu kolom
+-- `from_addr` cukup untuk menolak start sebelum itu terjadi.
+--
+-- MENGAPA KOLOM TUNGGAL, BUKAN `GRANT SELECT ON executions`. Yang dijaga
+-- bagian 3.3 bukan kerahasiaan `executions` — ia memang bukan rahasia — tapi
+-- pemisahan peran: proses yang menulis `settlements` tidak boleh bisa membaca
+-- keputusan yang mengizinkan pembayaran, karena pencocokan antara keduanya
+-- adalah pekerjaan Reconciler (PRD v2 bagian 11). `from_addr` adalah alamat
+-- wallet kami sendiri, satu nilai yang sama di setiap baris, dan operator sudah
+-- menuliskannya di `.env`. Ia tidak memberi tahu Watcher apa pun tentang
+-- keputusan mana pun: bukan `decision_id`, bukan `tx_hash`, bukan `amount_base`,
+-- bukan `nonce`, bukan `raw_tx`.
+--
+-- ATURAN FILE (sama dengan 0002_roles.sql):
+--   * TANPA BEGIN/COMMIT. Runner migrasi yang memegang transaksi.
+--   * HANYA hak. Tidak ada perubahan tabel, kolom, indeks, atau constraint.
+--   * Hak diberikan ke ROLE GRUP (NOLOGIN). Role LOGIN `watcher_app` mewarisi
+--     lewat keanggotaan grup, yang diatur `guard db bootstrap-roles`.
+--   * Tidak ada DELETE, TRUNCATE, REFERENCES, TRIGGER, atau DDL.
+--
+-- IDEMPOTEN. `GRANT` di Postgres aman diulang: memberikan hak yang sudah ada
+-- tidak melakukan apa pun dan tidak melempar error. Runner juga tidak akan
+-- menjalankan file ini dua kali — ia tercatat di `schema_migrations` — tapi
+-- keduanya benar secara terpisah.
+
+GRANT SELECT (from_addr) ON executions TO watcher_rw;

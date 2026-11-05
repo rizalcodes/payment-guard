@@ -565,16 +565,67 @@ class TestWatcherStaysInsideItsPrivileges:
             and id(node) not in docstrings
         ]
 
-    @pytest.mark.parametrize("table", ["decisions", "executions", "reconciliations"])
+    @pytest.mark.parametrize("table", ["decisions", "reconciliations"])
     def test_it_never_names_a_table_it_cannot_touch(self, table: str) -> None:
-        """Watcher tidak punya hak apa pun pada ketiga tabel ini.
+        """Watcher tidak punya hak apa pun pada kedua tabel ini.
 
-        ``decisions`` dan ``executions``: tidak ada SELECT sekalipun, supaya
-        pencocokan tidak bisa pindah ke proses yang juga bisa menulis
-        ``settlements``. ``reconciliations``: milik Reconciler.
+        ``decisions``: tidak ada SELECT sekalipun, supaya pencocokan tidak
+        bisa pindah ke proses yang juga bisa menulis ``settlements``.
+        ``reconciliations``: milik Reconciler.
+
+        ``executions`` **tidak** lagi di daftar ini sejak M6.2: Watcher punya
+        hak baca satu kolom di sana (`0003_watcher_from_addr.sql`). Yang
+        menjaganya sekarang adalah dua tes di bawah, yang lebih sempit —
+        "tepat satu kolom" alih-alih "jangan disebut".
         """
         offenders = [sql for sql in self.sql_literals() if table in sql]
         assert offenders == [], offenders
+
+    def executions_statements(self) -> list[str]:
+        """Pernyataan SQL di modul yang menyentuh ``executions``.
+
+        Disaring ke literal yang benar-benar SQL: nama tabel juga muncul di
+        pesan error dan di nama fungsi, dan keduanya bukan query.
+        """
+        verbs = ("SELECT", "INSERT", "UPDATE", "DELETE")
+        return [
+            sql
+            for sql in self.sql_literals()
+            if "executions" in sql and any(v in sql.upper() for v in verbs)
+        ]
+
+    def test_the_only_executions_query_selects_one_column(self) -> None:
+        """Satu-satunya query ke ``executions``, dan ia menyebut satu kolom.
+
+        Query kedua ke tabel itu — apa pun bentuknya — harus melewati tes ini
+        lebih dulu, dan karena itu harus dibaca manusia.
+        """
+        menyentuh = self.executions_statements()
+        assert len(menyentuh) == 1, menyentuh
+        satu = " ".join(menyentuh[0].lower().split())
+        assert satu == "select distinct from_addr from executions", satu
+
+    @pytest.mark.parametrize(
+        "column",
+        [
+            "decision_id",
+            "tx_hash",
+            "to_addr",
+            "amount_base",
+            "nonce",
+            "raw_tx",
+            "status",
+            "broadcast_at",
+        ],
+    )
+    def test_no_other_executions_column_is_named(self, column: str) -> None:
+        """Kolom lain akan ditolak Postgres, tapi dengan pesan yang tidak menjelaskan.
+
+        ``permission denied for table executions`` tidak menyebut kolom mana
+        yang menyebabkannya. Lebih baik tertangkap di sini.
+        """
+        for statement in self.executions_statements():
+            assert column not in statement.lower(), statement
 
     def test_it_never_writes_to_the_audit_table_directly(self) -> None:
         assert "INSERT INTO audit_log" not in self.source()

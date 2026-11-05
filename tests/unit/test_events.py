@@ -79,6 +79,8 @@ class TestEnum:
             "settlement_restored",
             "alarm_final_settlement_reorged",
             "reconciliation_state_changed",
+            # M6.2
+            "alarm_watcher_wallet_mismatch",
         }
 
     def test_every_event_has_a_caller_in_src(self) -> None:

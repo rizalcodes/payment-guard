@@ -23,9 +23,18 @@ from payment_guard.config import (
     RUNTIME_URL_ENV_VARS,
     read_env_file,
 )
-from payment_guard.migrate import migrations_dir
+from payment_guard.migrate import discover, migrations_dir
 
 pytestmark = pytest.mark.integration
+
+#: Nama setiap migrasi di disk, terurut. Diturunkan, bukan ditulis tangan.
+#:
+#: Tes di bawah memeriksa keluaran CLI yang menyebut **jumlah** migrasi, dan
+#: jumlah itu adalah data — berapa berkas yang ada — bukan perilaku. Menuliskan
+#: angkanya berarti tes ini gagal setiap kali migrasi bertambah, dengan pesan
+#: yang menyalahkan CLI padahal CLI-nya benar. Itu yang terjadi saat
+#: ``0003_watcher_from_addr.sql`` ditambahkan di M6.2.
+MIGRATION_NAMES = [f.label for f in discover(migrations_dir())]
 
 
 @pytest.fixture(autouse=True)
@@ -90,17 +99,19 @@ class TestFullFlow:
         # dan tanpa pernah membuka .env.
         assert run(*migrate_argv("migrate", migrator_env_file)) == 0
         out = capsys.readouterr().out
-        assert "0001_init.sql" in out
-        assert "0002_roles.sql" in out
-        assert "2 migrasi diterapkan" in out
+        # Setiap migrasi disebut namanya, bukan hanya dua yang pertama: itu
+        # yang sebenarnya ingin dibuktikan, dan ia tidak pernah basi.
+        for name in MIGRATION_NAMES:
+            assert name in out, name
+        assert f"{len(MIGRATION_NAMES)} migrasi diterapkan" in out
 
         assert run(*migrate_argv("migrate", migrator_env_file)) == 0
         assert "Tidak ada migrasi baru" in capsys.readouterr().out
 
         assert run(*migrate_argv("status", migrator_env_file)) == 0
         out = capsys.readouterr().out
-        assert out.count("terapan ") >= 2
-        assert "2 terapan, 0 tertunda" in out
+        assert out.count("terapan ") >= len(MIGRATION_NAMES)
+        assert f"{len(MIGRATION_NAMES)} terapan, 0 tertunda" in out
 
     def test_runtime_urls_are_usable_after_the_flow(
         self,

@@ -425,9 +425,23 @@ def bootstrapped(
 
 @pytest.fixture
 def migrated(bootstrapped: dict[str, str]) -> dict[str, str]:
-    """Database yang sudah di-bootstrap dan dimigrasi penuh (0001 dan 0002)."""
+    """Database yang sudah di-bootstrap dan dimigrasi **penuh**.
+
+    Yang diperiksa adalah "semua migrasi di disk diterapkan", bukan daftar
+    nama yang ditulis tangan. Daftar tangan harus disunting setiap kali
+    migrasi bertambah, dan sampai disunting ia menggagalkan seluruh suite
+    integrasi dengan pesan yang tidak menyebut sebabnya — itu yang terjadi
+    saat ``0003_watcher_from_addr.sql`` ditambahkan di M6.2.
+
+    Penjaganya tetap ada: daftar yang **kosong** berarti tidak ada yang
+    diterapkan, dan itu tetap gagal.
+    """
+    from payment_guard.migrate import discover
+
+    diharapkan = [f.label for f in discover(migrations_dir())]
+    assert diharapkan, "tidak ada berkas migrasi di disk"
     applied = run_migrate(bootstrapped[MIGRATOR_ENV_KEY], migrations_dir())
-    assert [f.label for f in applied] == ["0001_init.sql", "0002_roles.sql"]
+    assert [f.label for f in applied] == diharapkan
     return bootstrapped
 
 

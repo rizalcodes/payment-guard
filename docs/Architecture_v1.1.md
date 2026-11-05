@@ -17,7 +17,8 @@ tanpa satu pun tes gagal.
 
 | Versi | Tanggal | Perubahan |
 |---|---|---|
-| v1.2 | 5 Nov 2026 | Bagian 2.1: tiga variabel env yang ditambahkan M6 (`EXECUTOR_WALLET_ADDRESS`, `WATCHER_INTERVAL_SECONDS`, `RECONCILE_DEADLINE_SECONDS`) didokumentasikan. Tidak ada perubahan perilaku, penomoran bagian, maupun matriks hak. |
+| v1.2 | 5 Nov 2026 | Bagian 3.3: sel `watcher` untuk `executions` dari "—" menjadi "S (kolom `from_addr` saja)", lewat `0003_watcher_from_addr.sql`. Keputusan CoS, opsi A. Hak tingkat tabel tetap tidak ada. Satu-satunya perubahan matriks hak sejak `0002_roles.sql`. |
+| v1.2 | 5 Nov 2026 | Bagian 2.1: tiga variabel env yang ditambahkan M6 (`EXECUTOR_WALLET_ADDRESS`, `WATCHER_INTERVAL_SECONDS`, `RECONCILE_DEADLINE_SECONDS`) didokumentasikan. Tidak ada perubahan perilaku maupun penomoran bagian. |
 | v1.1 | 30 Okt 2026 | Versi awal dokumen ini, pendamping PRD v2.1. |
 
 ---
@@ -160,7 +161,7 @@ README, bagian "Menjalankan Guard".
 | decisions | S, I, U* | S, U* | S | — | S |
 | mandates | S, I | S | S | — | S |
 | active_mandates | S, I, U | S | S | — | — |
-| executions | S | S | S, I, U* | — | S |
+| executions | S | S | S, I, U* | S (kolom `from_addr` saja) | S |
 | settlements | — | — | — | S, I, U* | S |
 | reconciliations | — | — | — | — | S, I, U* |
 | watcher_state | — | — | — | S, I, U | — |
@@ -168,6 +169,12 @@ README, bagian "Menjalankan Guard".
 | schema_migrations | — | — | — | — | — (hanya owner) |
 
 \* = UPDATE per kolom sesuai transisi. Contoh: executor hanya `status`, `broadcast_at`, `updated_at`. Guard hanya kolom yang diperlukan untuk kedaluwarsa lazy.
+
+**`watcher` pada `executions`: SELECT satu kolom, `from_addr`, dan tidak lebih** (v1.2, keputusan CoS opsi A; `0003_watcher_from_addr.sql`). Hak **tingkat tabel** tetap tidak ada — `has_table_privilege('watcher_rw', 'executions', 'SELECT')` harus `false`, dan ada tes yang memeriksanya secara terpisah dari tes per kolom.
+
+Gunanya satu: Watcher menolak start bila `EXECUTOR_WALLET_ADDRESS` tidak cocok dengan wallet yang dipakai Executor. Konfigurasi yang menunjuk wallet lain tidak menggagalkan apa pun tanpa penjaga ini — Watcher jalan, menyaring log per pengirim yang salah, dan tidak pernah melihat satu pun pembayaran.
+
+Yang **tidak** berubah: pemisahan peran yang dijaga bagian ini. `from_addr` adalah alamat wallet kami sendiri, satu nilai yang sama di setiap baris, yang operator sudah menuliskannya di `.env`. Ia tidak memberi tahu Watcher apa pun tentang keputusan mana pun — bukan `decision_id`, bukan `tx_hash`, bukan `amount_base`, bukan `nonce`, bukan `raw_tx`. Pencocokan settlement dengan execution tetap pekerjaan Reconciler (bagian 11).
 
 **Sequence (USAGE saja):**
 - `audit_log_id_seq`: guard, approver, executor, watcher, reconciler

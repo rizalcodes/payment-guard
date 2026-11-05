@@ -374,3 +374,83 @@ menghapus riwayat. Riwayat tidak dihapus sama sekali.
 pertama runbook ini berlaku di sini juga: yang pernah terlihat di chain tetap
 tercatat pernah terlihat. Pemindaian ulang idempoten, jadi tidak ada yang perlu
 dibersihkan.
+
+---
+
+## 9. Setelah menambah migrasi 0003
+
+Migrasi `0003_watcher_from_addr.sql` memberi `watcher_rw` hak `SELECT` pada
+**satu kolom** `executions.from_addr`, supaya Watcher bisa menolak start kalau
+`EXECUTOR_WALLET_ADDRESS` menunjuk wallet yang salah.
+
+**Jalankan `guard db migrate` sebelum `guard watch`.**
+
+```bash
+guard db migrate
+guard db status
+```
+
+`guard db status` harus menampilkan `0003` sebagai terapan. Kalau belum,
+`guard watch` akan gagal dengan `permission denied for table executions` —
+bukan dengan pesan yang menyebut migrasi, karena yang menolak adalah Postgres.
+
+### Mengapa migrasinya manual
+
+Tidak ada proses runtime yang menerapkan migrasi sendiri, dan itu disengaja.
+`guard serve` hanya memeriksa **keberadaan tabel** yang dibutuhkannya, bukan
+versi skemanya: role `guard_app` tidak punya hak baca ke `schema_migrations`
+(RR-12 di Security v1.1, dan bagian 3.2 Arsitektur). Jadi Guard yang berjalan
+di atas skema lama tidak akan mengeluh — ia hanya akan gagal di tempat lain,
+nanti.
+
+Konsekuensinya untuk operator: **setiap kali repo diperbarui, jalankan
+`guard db migrate` lebih dulu.** Tidak ada yang akan mengingatkan.
+
+`guard db migrate` dijalankan sebagai role **migrator**, yang URL-nya ada di
+`.env.migrator` — bukan `.env`. Role itu pemilik semua objek; ia tidak dipakai
+proses runtime mana pun.
+
+### Verifikasi
+
+```bash
+guard db status
+```
+
+Keluarannya menyebut `0003 watcher_from_addr` sebagai terapan. Untuk memeriksa
+hak yang sesungguhnya diberikan:
+
+```bash
+docker compose exec postgres psql -U guard_admin -d payment_guard -c \
+  "SELECT column_name, privilege_type FROM information_schema.column_privileges
+   WHERE grantee = 'watcher_rw' AND table_name = 'executions'"
+```
+
+Harus tepat satu baris: `from_addr | SELECT`. Lebih dari itu berarti ada yang
+memberi hak di luar migrasi, dan tes `test_select_columns_match_matrix` akan
+menangkapnya juga.
+
+Hak **tingkat tabel** harus tetap tidak ada:
+
+```bash
+docker compose exec postgres psql -U guard_admin -d payment_guard -c \
+  "SELECT has_table_privilege('watcher_rw', 'executions', 'SELECT')"
+```
+
+Harus `f`. Kalau `t`, seseorang mengganti `GRANT SELECT (from_addr)` menjadi
+`GRANT SELECT` — yang membuat Watcher bisa membaca seluruh `executions`,
+termasuk `decision_id`, `amount_base`, dan `raw_tx`.
+
+### Kalau penjaganya berbunyi
+
+Watcher menolak start dengan pesan yang menyebut dua alamat: yang diharapkan
+(dari `.env`) dan yang ditemukan (dari `executions`). Keduanya publik.
+
+1. Periksa `EXECUTOR_WALLET_ADDRESS` di `.env` terhadap field `address` di
+   berkas kunci Executor. **Jangan** menampilkan `private_key`.
+2. Kalau `.env` yang salah: perbaiki, lalu jalankan Watcher lagi.
+3. Kalau `executions` memuat alamat dari wallet lain, wallet Executor pernah
+   diganti. Itu bukan sesuatu yang Watcher bisa perbaiki: satu Watcher
+   memantau satu wallet. Jalankan Watcher untuk wallet yang sekarang, dan
+   catat bahwa pembayaran dari wallet lama tidak akan terpantau.
+4. Kejadiannya ada di `audit_log` sebagai `alarm_watcher_wallet_mismatch`,
+   lengkap dengan kedua alamat. Baris itu ditulis sebelum Watcher keluar.

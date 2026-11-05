@@ -45,6 +45,7 @@ Aturan yang berlaku untuk seluruh tabel:
 | `settlement_reorged` | `watcher` | Hash blok berubah **dan** transaksinya hilang. Baris tidak dihapus | sama seperti di atas, plus `previous_status` |
 | `settlement_restored` | `watcher` | Transaksi yang sudah `reorged` muncul lagi di blok lain | sama seperti di atas, plus `new_block_number` |
 | `alarm_final_settlement_reorged` | `watcher` | Baris yang sudah `final` ter-reorg di dalam jendela mundur K. **Alarm** | sama seperti di atas, plus `previous_status` |
+| `alarm_watcher_wallet_mismatch` | `watcher` | `EXECUTOR_WALLET_ADDRESS` tidak cocok dengan `from_addr` di `executions`; Watcher menolak start. **Alarm** | `expected_from_addr`, `found_from_addr` (daftar), `chain_id` |
 | `reconciliation_state_changed` | `reconciler` | State rekonsiliasi satu subjek berubah | `subject_type`, `subject_id`, `state`, `detail`, dan `previous_state` bila ada |
 
 ## Catatan per kelompok
@@ -129,6 +130,25 @@ yang tidak bisa di-UPDATE. Yang perlu jejak adalah **perubahan** keadaan.
 Nama-nama itu diambil apa adanya dari tabel state machine di PRD v2 bagian 10
 dan diagram sequence Arsitektur bagian 10. Tidak ada nama baru yang dikarang
 di M6.
+
+### `alarm_watcher_wallet_mismatch`: satu-satunya kejadian sebelum proses keluar
+
+Ditulis di **transaksinya sendiri** dan di-commit sebelum `WatcherError`
+dilempar, karena sesudahnya tidak ada apa pun yang berjalan. Setiap kejadian
+lain di repo ini berada di transaksi yang sama dengan hal yang dicatatnya —
+"keputusan dan catatannya commit bersama atau tidak sama sekali". Di sini tidak
+ada keputusan untuk ikut di-commit: yang dicatat adalah penolakan untuk mulai.
+
+Kedua alamat masuk ke payload. Keduanya **publik** — yang rahasia adalah
+kuncinya, bukan alamatnya — dan operator yang salah mengisi `.env` tidak bisa
+memperbaikinya tanpa melihat keduanya. `found_from_addr` berupa daftar: lebih
+dari satu alamat berarti wallet Executor pernah diganti.
+
+Kejadian ini mungkin karena `0003_watcher_from_addr.sql` memberi `watcher_rw`
+hak `SELECT` pada satu kolom `executions.from_addr`. Tanpa penjaganya,
+konfigurasi yang menunjuk wallet lain tidak menggagalkan apa pun: Watcher
+jalan, menyaring log per pengirim yang salah, dan tidak pernah melihat satu pun
+pembayaran.
 
 ### `reconciliation_state_changed`, dan mengapa state ada di payload
 

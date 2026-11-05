@@ -9,6 +9,39 @@ yang ditolak dan mengapa.
 
 ---
 
+## M6.2 — Watcher mendapat satu kolom di `executions`
+
+Keputusan CoS, opsi A, 5 Nov 2026. `watcher_rw` mendapat `SELECT (from_addr)`
+pada `executions` lewat `0003_watcher_from_addr.sql`. Tidak lebih.
+
+Utang ini dibuka di M6.1 dengan dua opsi (`docs/CHANGELOG.md`, "Utang
+terbuka"). Yang dipilih bukan yang saya anjurkan — saya menulis bahwa opsi B
+(cek dipindahkan ke Reconciler) akan dipilih kalau tidak ada arahan, karena ia
+tidak butuh grant baru. Opsi A dipilih, dan alasannya masuk akal: **penolakan
+saat start** adalah yang diminta, dan Reconciler yang melaporkan belakangan
+tidak mencegah Watcher memantau wallet yang salah selama berjam-jam lebih dulu.
+
+Yang membuat opsi A tetap sempit:
+
+- **Satu kolom, bukan tabel.** `has_table_privilege('watcher_rw',
+  'executions', 'SELECT')` tetap `false`, dan ada tes terpisah untuk itu —
+  karena setiap tes per kolom akan tetap lulus kalau grant-nya diganti menjadi
+  tingkat tabel.
+- **`from_addr` tidak memberi tahu Watcher apa pun tentang keputusan mana pun.**
+  Ia alamat wallet kami sendiri, satu nilai yang sama di setiap baris, yang
+  operator sudah menuliskannya di `.env`. Bukan `decision_id`, bukan `tx_hash`,
+  bukan `amount_base`, bukan `nonce`, bukan `raw_tx`.
+- **Pemisahan peran tidak berubah.** Pencocokan settlement dengan execution
+  tetap pekerjaan Reconciler (PRD v2 bagian 11).
+
+Satu sifat Postgres yang ditemukan lewat tes yang gagal, dan dicatat jujur:
+`count(*)` **berhasil** dengan hak satu kolom, karena Postgres
+memperlakukannya sebagai tidak merujuk kolom mana pun. Hak kolom menutup isi
+baris, bukan jumlahnya. Dampaknya kecil — jumlah eksekusi bukan rahasia, dan
+Watcher sudah mengetahui lebih banyak lewat `settlements` yang ia tulis
+sendiri — tapi anggapan sebaliknya terasa lebih masuk akal, jadi ia diuji
+alih-alih dikomentari.
+
 ## M6 — Watcher tidak mencocokkan apa pun
 
 Brief M6 meminta Watcher "mencocokkan setiap transfer ke execution yang punya

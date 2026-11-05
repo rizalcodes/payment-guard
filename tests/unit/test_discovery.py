@@ -38,7 +38,21 @@ class TestHappyPath:
 
     def test_real_migrations_directory_is_valid(self) -> None:
         files = discover(migrations_dir())
-        assert [f.label for f in files] == ["0001_init.sql", "0002_roles.sql"]
+        assert [f.label for f in files] == [
+            "0001_init.sql",
+            "0002_roles.sql",
+            "0003_watcher_from_addr.sql",
+        ]
+
+    def test_the_locked_two_are_still_the_first_two(self) -> None:
+        """0001 dan 0002 terkunci: migrasi baru selalu di belakangnya.
+
+        Daftar di atas disunting setiap kali migrasi bertambah, dan itu
+        memang maksudnya — migrasi baru harus terlihat di diff. Yang tidak
+        boleh berubah adalah dua yang pertama.
+        """
+        files = discover(migrations_dir())
+        assert [f.label for f in files[:2]] == ["0001_init.sql", "0002_roles.sql"]
 
 
 class TestNumbering:

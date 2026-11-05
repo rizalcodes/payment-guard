@@ -118,6 +118,22 @@ class Event(StrEnum):
     #: ``invalidated`` (PRD v2 bagian 11).
     ALARM_FINAL_SETTLEMENT_REORGED = "alarm_final_settlement_reorged"
 
+    # --- M6.2: penjaga alamat wallet saat start (keputusan CoS, opsi A) ---
+    #: ``EXECUTOR_WALLET_ADDRESS`` tidak cocok dengan ``from_addr`` di
+    #: ``executions``. Watcher menolak start.
+    #:
+    #: Berawalan ``alarm_`` seperti kejadian Watcher yang satu lagi, dan karena
+    #: alasan yang sejenis: keduanya menandai keadaan di mana apa yang kami
+    #: catat berhenti bisa dipercaya. Yang satu karena rantai berubah; yang ini
+    #: karena konfigurasi menunjuk wallet yang salah, dan Watcher yang
+    #: memantau wallet lain tidak akan melihat satu pun pembayaran — tanpa
+    #: pengecualian, tanpa baris ``settlements``, hanya diam.
+    #:
+    #: Satu-satunya kejadian di repo ini yang ditulis **sebelum** proses keluar
+    #: dengan kode non-nol, dan di transaksinya sendiri; lihat
+    #: :func:`payment_guard.watcher.check_wallet_matches_executions`.
+    ALARM_WATCHER_WALLET_MISMATCH = "alarm_watcher_wallet_mismatch"
+
     # --- M6: Reconciler (PRD v2 bagian 11, Arsitektur v1.1 bagian 11) ---
     #: State rekonsiliasi satu subjek berubah.
     #:
@@ -172,6 +188,7 @@ EVENT_ACTORS: Final[dict[Event, frozenset[Actor]]] = {
     Event.SETTLEMENT_REORGED: frozenset({Actor.WATCHER}),
     Event.SETTLEMENT_RESTORED: frozenset({Actor.WATCHER}),
     Event.ALARM_FINAL_SETTLEMENT_REORGED: frozenset({Actor.WATCHER}),
+    Event.ALARM_WATCHER_WALLET_MISMATCH: frozenset({Actor.WATCHER}),
     Event.RECONCILIATION_STATE_CHANGED: frozenset({Actor.RECONCILER}),
 }
 
