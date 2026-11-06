@@ -39,6 +39,41 @@ bagian 2). Lihat `docs/decisions.md`.
 
 ---
 
+## M6.4 — batas awal pemindaian wallet executor (dokumen saja)
+
+Belum ditag. **Tidak ada perubahan kode, migrasi, maupun hak akses.**
+
+Batas bawah `--from-block` untuk wallet Executor ditetapkan ke blok
+**54235999**: transfer USDC masuk pertama ada di **54236499** (faucet Circle,
+20 USDC), dikurangi margin 500 sesuai runbook 8.2. Disetujui pemilik
+6 Nov 2026, opsi A.
+
+Keputusan itu **menyimpang dari runbook 8.3**, yang mengasumsikan transfer ETH
+pertama sebagai transaksi tertua. Wallet ini menerima USDC lebih dulu dan
+belum punya ETH, jadi kata "funding" di sana tidak menunjuk transaksi yang
+benar. Alasannya ada di `docs/decisions.md`.
+
+Runbook 8.3 diperbarui dengan satu paragraf: bila wallet belum pernah menerima
+ETH tetapi sudah menerima USDC, pakai transfer **masuk pertama** (ETH atau
+USDC, mana yang lebih dulu), dengan syarat wallet belum pernah mengirim
+transaksi apa pun. Langkah 1–6 tidak diubah.
+
+Aturan yang sebenarnya dicari di sana adalah "transfer **keluar** pertama yang
+mungkin", bukan "transfer ETH pertama" — transaksi keluar menuntut gas, jadi
+transaksi masuk apa pun yang paling tua adalah batas bawah yang sah. Syarat
+"belum pernah mengirim" itu yang menahannya: wallet yang sudah pernah mengirim
+bisa punya transfer keluar lebih tua dari transaksi masuk mana pun yang
+terlihat.
+
+Nomor blok di dokumen lain tidak diubah. Alamat wallet sungguhan tidak ditulis
+ke repo; runbook memakai placeholder, dan nilainya hidup di `.env`.
+
+**Migrasi 0003 sudah diterapkan pemilik di cluster operator.** Probe operator
+kini `bbf717ac…dccdc` dan mencatat `[[1, init], [2, roles], [3,
+watcher_from_addr]]`. Itu menutup satu utang yang disebut di M6.2 dan M6.3.
+
+---
+
 ## M6.3.1 — `guard wallet` (read-only), dan koreksi atas checklist M6.3
 
 Belum ditag.

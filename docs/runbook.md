@@ -306,6 +306,25 @@ yang besar hanya memperlambat siklus pertama.
 6. Kurangi 500: `--from-block <blok funding − 500>`. Bila hasilnya negatif,
    pakai 0.
 
+**Bila wallet belum pernah menerima ETH tetapi sudah menerima USDC**, gunakan
+transfer **masuk pertama** (ETH atau USDC, mana yang lebih dulu) sebagai dasar.
+Syarat: wallet belum pernah mengirim transaksi apa pun. Catat keputusannya di
+[decisions.md](decisions.md).
+
+Langkah 1–6 di atas mengandaikan transfer ETH dari faucet sebagai transaksi
+tertua, dan itu urutan yang biasa — wallet butuh gas sebelum bisa mengirim
+apa pun. Tapi urutannya tidak dijamin: faucet USDC dan faucet ETH adalah dua
+layanan terpisah, dan yang satu bisa datang lebih dulu. Yang sesungguhnya
+dicari batas bawah ini adalah **transfer keluar pertama yang mungkin**, dan
+transfer keluar tidak bisa terjadi sebelum wallet punya gas — jadi transaksi
+masuk apa pun yang paling tua tetap batas bawah yang sah.
+
+Syarat "belum pernah mengirim" itu yang menahannya: wallet yang sudah pernah
+mengirim mungkin punya transfer keluar **sebelum** transaksi masuk yang Anda
+temukan, misalnya karena pernah diisi lalu dikosongkan. Di tab
+**Transactions** explorer, periksa tidak ada baris dengan wallet ini di kolom
+`From`. Kalau ada, pakai blok baris tertua itu, bukan transaksi masuk.
+
 Periksa sekali lagi bahwa alamat di explorer sama dengan
 `EXECUTOR_WALLET_ADDRESS` di `.env`. Alamat yang berbeda berarti Watcher
 memantau wallet lain, dan tidak ada yang akan gagal — ia hanya tidak akan

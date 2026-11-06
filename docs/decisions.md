@@ -9,6 +9,40 @@ yang ditolak dan mengapa.
 
 ---
 
+## M6.4 — batas awal pemindaian wallet executor
+
+Batas awal pemindaian wallet executor: blok **54235999** (USDC masuk pertama
+**54236499**, margin 500). Menyimpang dari runbook 8.3 yang mengasumsikan ETH.
+Disetujui pemilik 6 Nov 2026.
+
+Alasannya:
+
+- Transfer USDC **masuk** pertama ke wallet itu ada di blok 54236499 (faucet
+  Circle, 20 USDC).
+- Wallet belum pernah mengirim apa pun, dan belum punya ETH gas, jadi tidak ada
+  transfer **keluar** yang bisa terjadi sebelum blok itu. Transaksi keluar
+  menuntut gas; tanpa ETH, tidak ada satu pun yang mungkin.
+- Runbook 8.3 mengasumsikan transfer **ETH** pertama sebagai transaksi tertua,
+  karena itu urutan yang biasa. Di kasus ini USDC datang lebih dulu, jadi kata
+  "funding" di sana tidak menunjuk transaksi yang benar.
+
+Yang sesungguhnya dicari batas bawah itu adalah **transfer keluar pertama yang
+mungkin**, bukan "transfer ETH pertama". Keduanya biasanya sama; di sini tidak.
+Runbook 8.3 diperbarui untuk menyebut aturan yang sebenarnya, beserta syaratnya
+— wallet belum pernah mengirim apa pun — karena wallet yang sudah pernah
+mengirim bisa punya transfer keluar lebih tua dari transaksi masuk mana pun
+yang terlihat.
+
+Alamat wallet-nya **tidak** ditulis di sini. Ia memang publik, tapi ia tidak
+perlu ada di repo: nilainya hidup di `.env` (gitignored), dan `guard wallet`
+mencetaknya kapan pun dibutuhkan. Repo ini reference implementation yang
+dibaca orang lain, dan alamat sungguhan di dalamnya hanya akan menjadi hal
+yang disalin tanpa dipikir. Yang membuat keputusan ini bisa dilacak adalah
+nomor bloknya, dan itu ada di atas.
+
+Margin 500 blok mengikuti runbook 8.2: ia melindungi dari kekeliruan beberapa
+blok saat membaca explorer, dan yang hilang hanya kecepatan siklus pertama.
+
 ## M6.3.1 — perintah baca terpisah untuk alamat wallet
 
 Perintah baca terpisah lebih aman daripada memakai perintah yang menyiarkan
