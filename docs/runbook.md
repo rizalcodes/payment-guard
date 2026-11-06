@@ -362,6 +362,17 @@ baris ganda, dan baris yang sudah `final` tidak dikembalikan ke `pending`.
 **Terlalu kecil.** Tidak ada yang rusak; siklus pertama hanya lebih lama.
 Biarkan berjalan.
 
+**Pengecualian terdokumentasi:** lihat [decisions.md](decisions.md)
+(6 Nov 2026). Hanya berlaku bila wallet belum pernah mengirim.
+
+Bagian ini melarang memajukan kursor, dan larangan itu tetap berlaku sebagai
+aturan. Satu pengecualian pernah diberikan, dengan buktinya, dan ia dicatat
+sebagai pengecualian — bukan sebagai pelonggaran aturannya. Jangan memakainya
+sebagai preseden tanpa bukti yang sama: wallet yang **belum pernah mengirim
+apa pun** tidak bisa punya transfer keluar di rentang yang dilewati, jadi tidak
+ada pembayaran yang bisa hilang. Begitu wallet pernah mengirim satu transaksi
+saja, alasan itu habis dan larangannya kembali mutlak.
+
 ### 8.5 Memulai ulang pemindaian dari awal
 
 Yang dimaksud "dari awal" di sini adalah memindai ulang rentang blok, bukan

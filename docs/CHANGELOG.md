@@ -39,6 +39,37 @@ bagian 2). Lihat `docs/decisions.md`.
 
 ---
 
+## M6.5 — pengecualian kursor watcher (dokumen saja)
+
+Belum ditag. **Tidak ada perubahan kode, migrasi, maupun hak akses.**
+
+Kursor `watcher_state` chain 84532 dimajukan ke **55115178** (blok aman
+terakhir 55115678 dikurangi margin 500). Keputusan pemilik 6 Nov 2026, opsi B.
+Kursor sebelumnya 54238123, backlog **877.055 blok** — sekitar 877 siklus
+dengan `SCAN_BATCH_SIZE` 1000, terlalu lambat untuk kejadian pembayaran
+pertama.
+
+**Menyimpang dari runbook §8.4, yang melarang memajukan kursor.** Dicatat
+sebagai pengecualian dengan buktinya, bukan sebagai pelonggaran aturan.
+Buktinya: wallet Executor belum pernah mengirim transaksi apa pun, diperiksa di
+explorer pada dua tab — **Transactions** dan **Token Transfers**.
+
+Kedua tab itu perlu, dan alasannya ada di `docs/decisions.md`: log `Transfer`
+dengan `from = wallet` bisa muncul dari transaksi yang **dikirim orang lain**
+(`transferFrom` oleh pihak yang pernah diberi `approve`), sehingga "belum
+pernah mengirim transaksi" tetap benar sementara transfer keluarnya ada. Tab
+Token Transfers yang menutup celah itu.
+
+Syaratnya ikut dicatat: **kalau ada transaksi keluar di masa depan,
+pengecualian ini tidak berlaku lagi.** Runbook §8.4 mendapat catatan yang
+menunjuk ke `decisions.md` dan menegaskan larangannya tetap berlaku sebagai
+aturan. Langkah lain di §8.4 tidak diubah.
+
+Yang dikerjakan **pemilik**, bukan pelaksana: pembacaan explorer dan perintah
+yang memajukan kursor di cluster operator. Pekerjaan ini dokumen saja.
+
+---
+
 ## M6.4 — batas awal pemindaian wallet executor (dokumen saja)
 
 Belum ditag. **Tidak ada perubahan kode, migrasi, maupun hak akses.**

@@ -9,6 +9,62 @@ yang ditolak dan mengapa.
 
 ---
 
+## M6.5 — pengecualian: kursor watcher dimajukan (opsi B)
+
+Kursor `watcher_state` untuk chain 84532 dimajukan ke **55115178** (blok aman
+terakhir **55115678** dikurangi margin 500). Keputusan pemilik, 6 Nov 2026,
+opsi B.
+
+**Ini menyimpang dari runbook §8.4, yang melarang memajukan kursor.** Dicatat
+sebagai pengecualian, dengan alasan dan buktinya, bukan sebagai pelonggaran
+aturannya.
+
+### Mengapa
+
+Kursor sebelumnya di **54238123**. Blok aman terakhir 55115678, jadi
+backlog-nya **877.055 blok**. Dengan `SCAN_BATCH_SIZE` 1000 per siklus, itu
+sekitar 877 siklus sebelum pemindaian mencapai kejadian pembayaran pertama —
+terlalu lambat untuk hal yang justru ingin dilihat.
+
+### Bukti yang membuatnya aman
+
+Wallet Executor (`0x08bd44a1…`, alamat lengkapnya di `.env`) **belum pernah
+mengirim transaksi apa pun**. Diperiksa di explorer pada **6 Nov 2026**, dua
+tab:
+
+| Tab | Yang dicari |
+|---|---|
+| **Transactions** | tidak ada baris dengan wallet ini di kolom `From` |
+| **Token Transfers** | tidak ada transfer token **keluar** dari wallet ini |
+
+Kedua tab itu diperiksa, dan keduanya perlu. Tab **Transactions** saja tidak
+cukup: Watcher menyaring log `Transfer` per `from`, dan log dengan
+`from = wallet` bisa muncul dari transaksi yang **dikirim orang lain** —
+yaitu `transferFrom` oleh pihak yang pernah diberi `approve`. Dalam kasus itu
+"wallet belum pernah mengirim transaksi" tetap benar sementara transfer
+keluarnya ada. Tab **Token Transfers** yang menutup celah itu.
+
+Karena tidak ada transfer keluar sama sekali, rentang blok yang dilewati
+(54238124–55115177) tidak memuat satu pun log yang akan dicatat Watcher. Tidak
+ada pembayaran yang hilang.
+
+### Syarat, dan kapan pengecualian ini habis
+
+**Kalau ada transaksi keluar di masa depan, pengecualian ini TIDAK berlaku.**
+Alasannya bersandar sepenuhnya pada "belum pernah mengirim apa pun", dan
+begitu wallet mengirim satu transaksi saja, kalimat itu berhenti benar. Sejak
+saat itu larangan §8.4 kembali mutlak: kursor tidak dimajukan, dan rentang
+yang terlewat hanya bisa dipindai ulang dengan memundurkan kursor.
+
+Pengecualian ini juga **tidak** menjadi preseden untuk wallet lain, chain
+lain, atau kursor yang sama di waktu lain. Yang bisa diulang bukan
+keputusannya, melainkan buktinya: dua tab explorer, keduanya kosong di sisi
+keluar.
+
+Hanya **tanggal** yang dicatat, bukan jamnya — itu yang tersedia saat entri ini
+ditulis, dan jam tidak mengubah apa pun yang bisa diperiksa ulang. Pembacaan
+explorer-nya dilakukan pemilik, bukan oleh pelaksana.
+
 ## M6.4 — batas awal pemindaian wallet executor
 
 Batas awal pemindaian wallet executor: blok **54235999** (USDC masuk pertama
