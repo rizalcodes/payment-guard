@@ -39,6 +39,35 @@ bagian 2). Lihat `docs/decisions.md`.
 
 ---
 
+## M6.6 — kursor watcher dimajukan lagi (dokumen saja)
+
+Belum ditag. **Tidak ada perubahan kode, migrasi, maupun hak akses.**
+Runbook tidak diubah.
+
+Tambahan atas M6.5. Kursor `watcher_state` chain 84532 dimajukan ke
+**55124304** (blok aman 55124804 saat pengecekan, dikurangi margin 500).
+Keputusan pemilik 6 Nov 2026.
+
+Selisih kursor terhadap blok aman membesar dari **4.336** menjadi **5.626**
+blok dalam satu siklus. Blok aman sendiri bergerak 9.126 blok antara kedua
+pengecekan — sekitar 5 jam waktu chain pada Base dengan blok 2 detik.
+
+Buktinya sama dengan M6.5: wallet Executor belum pernah mengirim transaksi apa
+pun, diperiksa ulang di dua tab explorer. Syarat berakhirnya juga sama —
+**kalau ada transaksi keluar, pengecualian ini tidak berlaku.**
+
+**Catatan pelaksana, bukan bagian dari keputusan.** Ini pengecualian kedua
+dalam satu hari dan selisihnya membesar, jadi yang diperbaiki adalah gejalanya.
+Base Sepolia menghasilkan ~30 blok/menit; `guard watch --loop` dengan batch
+2.000 dan interval 15 detik memindai ~8.000 blok/menit, dan backlog 5.626 blok
+akan selesai dalam sekitar tiga siklus. Yang membuat selisih tumbuh adalah
+Watcher dijalankan satu siklus per pemanggilan, bukan Watcher yang terlalu
+lambat. Perbaikan strukturalnya `--loop`, bukan pengecualian ketiga; setiap
+pengecualian melewatkan blok secara permanen dan membakar satu-satunya alasan
+yang membuatnya aman. Rinciannya di `docs/decisions.md`.
+
+---
+
 ## M6.5 — pengecualian kursor watcher (dokumen saja)
 
 Belum ditag. **Tidak ada perubahan kode, migrasi, maupun hak akses.**

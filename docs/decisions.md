@@ -9,6 +9,79 @@ yang ditolak dan mengapa.
 
 ---
 
+## M6.6 — kursor watcher dimajukan lagi (tambahan atas M6.5)
+
+Tambahan atas [M6.5](#m65--pengecualian-kursor-watcher-dimajukan-opsi-b).
+Kursor `watcher_state` chain 84532 dimajukan ke **55124304** (blok aman
+**55124804** saat pengecekan, dikurangi margin 500). Keputusan pemilik,
+6 Nov 2026.
+
+### Nilai dan selisih
+
+| | Blok |
+|---|---|
+| Kursor yang ditetapkan M6.5 | 55115178 |
+| Blok aman saat M6.5 | 55115678 (selisih 500) |
+| Blok aman saat pengecekan M6.6 | 55124804 |
+| Kursor baru | **55124304** (selisih 500) |
+
+Selisih kursor terhadap blok aman membesar dari **4.336** menjadi **5.626**
+blok dalam satu siklus — angka pemilik, dari pengamatan langsung. Keduanya
+menyiratkan kursor berada di sekitar **55119178** saat pengecekan terakhir,
+yaitu 4.000 blok di depan nilai M6.5: Watcher memang berjalan, hanya tidak
+cukup cepat untuk mengejar. (Angka 55119178 itu **turunan**, bukan hasil
+pembacaan; pelaksana tidak membaca database operator.)
+
+Blok aman bergerak 9.126 blok antara kedua pengecekan, yang pada Base dengan
+blok 2 detik berarti sekitar 5 jam waktu chain.
+
+### Bukti, sama dengan M6.5
+
+Wallet Executor **belum pernah mengirim transaksi apa pun** — diperiksa ulang
+di explorer, dua tab, Transactions dan Token Transfers. Alasan kedua tab itu
+perlu ada di entri M6.5 dan tidak diulang di sini.
+
+Karena tidak ada transfer keluar sama sekali, rentang yang dilewati tidak
+memuat satu pun log yang akan dicatat Watcher. Tidak ada pembayaran yang
+hilang.
+
+Hanya tanggal pemeriksaan yang dicatat. Hasil rincinya tidak disertakan di
+brief yang meminta entri ini; yang tercatat adalah kesimpulannya, dan
+pembacaannya dilakukan pemilik.
+
+### Syarat berakhirnya, tetap sama
+
+**Kalau ada transaksi keluar, pengecualian ini tidak berlaku.** Seluruh
+alasannya bersandar pada "belum pernah mengirim apa pun".
+
+### Risiko yang perlu dicatat: ini pengecualian kedua, dan selisihnya membesar
+
+Dua pengecualian dalam satu hari, dan selisih yang tumbuh dari 500 ke 5.626,
+berarti yang diperbaiki adalah gejalanya. Memajukan kursor **melewatkan blok
+secara permanen** — Watcher tidak pernah mundur sendiri (runbook §8.4) — dan
+setiap pengecualian membakar satu-satunya alasan yang membuatnya aman. Alasan
+itu habis pada pembayaran pertama.
+
+Angkanya menunjukkan masalahnya bukan kecepatan Watcher:
+
+| | Blok per menit |
+|---|---|
+| Base Sepolia menghasilkan blok | ~30 |
+| `guard watch --loop` (batch 2.000, interval 15 detik) | ~8.000 |
+
+Pada laju itu backlog 5.626 blok selesai dalam sekitar **tiga siklus**, kurang
+dari satu menit. Yang membuat selisih membesar adalah Watcher dijalankan
+**satu siklus per pemanggilan** — satu siklus memindai satu batch, lalu proses
+berhenti — sementara chain terus berjalan di antara pemanggilan.
+
+Jadi perbaikan strukturalnya `guard watch --loop`, bukan pengecualian ketiga.
+Dengan `--loop`, kursor mengejar sendiri dan tidak ada blok yang dilewati;
+tanpa itu, setiap jeda antar pemanggilan menjadi utang yang hanya bisa dibayar
+dengan melewatkan blok lagi.
+
+Ini catatan pelaksana, bukan bagian dari keputusan pemilik. Keputusan di atas
+tetap berlaku apa adanya.
+
 ## M6.5 — pengecualian: kursor watcher dimajukan (opsi B)
 
 Kursor `watcher_state` untuk chain 84532 dimajukan ke **55115178** (blok aman
