@@ -39,6 +39,11 @@ module-root = "src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# `payment_guard` terpasang sebagai paket (layout src), tapi `evals` tidak:
+# ia harness eval, bukan bagian produk, dan tidak ikut terpasang ke
+# lingkungan runtime mana pun. Akar repo ditambahkan ke sys.path supaya tes
+# unit bisa mengimpornya tanpa memasangnya.
+pythonpath = ["."]
 # Tes `live` menyentuh chain sungguhan dan membelanjakan gas. Dilewati secara
 # bawaan, dan membukanya butuh dua hal sekaligus: `-m live` di baris perintah
 # DAN PAYMENT_GUARD_LIVE=1 di environment. Lihat tests/integration/test_live.py.
@@ -81,10 +86,27 @@ python_version = "3.12"
 # daripada tidak menyalakannya.
 show_error_codes = true
 
+# `evals/` mengimpor `payment_guard`, dan paket itu terpasang TANPA penanda
+# py.typed. Tanpa baris ini mypy melewatkan setiap impor dari produk, dan
+# `evals/` akan lolos --strict tanpa pernah diperiksa terhadap tipe produk.
+# Dengan `src` di jalur, ia membaca produk sebagai sumber.
+mypy_path = "src"
+
 [[tool.mypy.overrides]]
 # Paket ini tidak mengirim anotasi yang lengkap. Kami tidak memeriksa isinya;
 # yang diperiksa adalah kode kami yang memanggilnya.
 module = ["eth_account.*", "Crypto.*", "mcp.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# `anthropic` SENGAJA tidak terpasang. Arm API eval memuatnya secara lazy, di
+# dalam `HaikuAdapter.from_env`, dan jalur itu hanya dipanggil saat live run
+# yang butuh izin eksplisit pemilik. Tes unit memakai transport tiruan.
+#
+# Override ini dipakai alih-alih `# type: ignore` di baris impornya, karena
+# ignore itu akan menjadi SALAH begitu paketnya dipasang: --strict mencakup
+# warn_unused_ignores. Override ini tetap benar dalam dua keadaan.
+module = ["anthropic.*"]
 ignore_missing_imports = true
 
 [tool.ruff]
@@ -98,6 +120,7 @@ target-version = "py312"
 # ketiga dan mengurutkannya bersama paket eksternal.
 known-first-party = [
     "payment_guard",
+    "evals",
     "fake_chain",
     "conftest",
     "conftest_guard",
