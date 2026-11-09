@@ -9,6 +9,118 @@ yang ditolak dan mengapa.
 
 ---
 
+## M7 — state machine reorg satu tempat, dan `guard reconcile --report`
+
+9 Nov 2026.
+
+### Transisi settlement menjadi data, bukan percabangan
+
+Sampai M6 transisinya tersebar di empat fungsi, dan daftar yang **dilarang**
+tidak ada di mana pun: yang menolak `final → pending` hanyalah kebetulan tidak
+ada pemanggil yang memintanya. `SETTLEMENT_TRANSITIONS` sekarang menuliskannya
+sebagai himpunan `(dari, ke)`, diturunkan dari PRD v2 §10, dan
+`require_allowed_transition` menolak sisanya.
+
+Tiga cacat yang ditemukan saat membacanya, semuanya diperbaiki:
+
+| | Sebelum | Sesudah |
+|---|---|---|
+| `_handle_hash_change(from_final=...)` | parameter tidak pernah dipakai di body | dihapus |
+| `MOVE_BLOCK`, `MARK_REORGED` | tanpa `AND status = %s` | ada, sejajar `MARK_FINAL` |
+| Jalur `→ reorged` | di dua tempat, dua event | satu jalur, `_set_status` |
+
+Yang **dilarang**, dan alasannya — ini yang sebelumnya tidak tertulis:
+
+- **`final → pending`** membatalkan finality tanpa reorg. Rekonsiliasi hanya
+  menghitung baris `final`; menurunkannya kembali berarti pembayaran yang
+  sudah dicocokkan berhenti dihitung tanpa satu pun alarm.
+- **`reorged → final`** melompati `pending`. Baris yang muncul lagi harus
+  melewati kedalaman konfirmasi sekali lagi: rantai yang baru saja menata
+  ulang dirinya adalah rantai yang paling mungkin menata ulang lagi.
+- **`x → x`** bukan transisi melainkan pemeriksaan ulang; jalurnya `_touch`,
+  yang hanya menyentuh `last_verified_at`.
+
+Perilakunya tidak berubah — seluruh tes reorg M6 lulus tanpa disunting. Ini
+pemusatan dan pengetatan.
+
+### `--report` memakai opsi A: hitungan segar
+
+Disetujui pemilik. `--report` memanggil `collect_findings` yang sudah ada —
+ia `rollback()` sendiri dan tidak pernah memanggil `record` — jadi tidak ada
+baris `reconciliations` maupun `audit_log` yang ditulis. Ada tes integrasi
+yang membandingkan kedua tabel sebelum dan sesudah.
+
+Konsekuensinya: laporan bisa berbeda dari isi tabel `reconciliations` kalau
+`guard reconcile` belum dijalankan sejak perubahan terakhir. Itu bukan efek
+samping melainkan tujuannya, dan baris **"Mode baca saja: ini hitungan segar
+… bukan isi tabel reconciliations"** dicetak selalu supaya perbedaan itu
+terbaca sebagai fitur, bukan kesalahan.
+
+Pilihan lain yang ditolak: membaca tabel `reconciliations` apa adanya. Ia
+selalu cocok dengan yang direkam, tapi bisa basi tanpa tanda — dan laporan
+basi yang terlihat segar lebih berbahaya daripada laporan yang menyebut
+dirinya hitungan ulang.
+
+**Keluarannya ASCII saja.** `cli.py` sudah memuat satu em-dash sejak lama, jadi
+ini bukan aturan repo — tapi laporan ini dibaca di konsol operator yang di
+Windows bisa memakai cp1252, dan elipsis Unicode akan muncul di **setiap**
+baris temuan. Satu karakter non-ASCII per baris adalah satu cara lagi perintah
+ini gagal di tempat yang tidak ada hubungannya dengan rekonsiliasi.
+
+**Kode keluar 1 bila ada yang perlu tindakan**, sama dengan `guard reconcile`.
+Dua konvensi untuk satu perintah adalah satu hal lagi yang harus diingat jam
+tiga pagi.
+
+Daftar tindakan memuat **keempat** state alarm, bukan tiga yang disebut brief:
+`invalidated` juga alarm — ia settlement yang pernah `final` lalu ter-reorg —
+dan menghilangkannya berarti menyembunyikan pembayaran yang berhenti berlaku.
+
+### Batas hak akses yang baru terlihat di kasus urutan terbalik
+
+Settlement bisa terlihat **sebelum** baris `executions`-nya ada: Watcher dan
+Executor dua proses, dan Watcher memindai blok yang sudah aman. Kesimpulan
+pertamanya `unmatched_onchain` dengan `execution_id` NULL. Ketika
+execution-nya menyusul, state berubah menjadi `matched` — dan di situ
+muncul batasnya.
+
+`reconciler_rw` hanya boleh `UPDATE (state, detail, updated_at)` pada
+`reconciliations` (`0002_roles.sql`). Kolom `execution_id` yang NULL saat
+INSERT pertama karena itu **tidak bisa diisi belakangan**, dan baris `matched`
+itu tidak menyebutkan execution mana yang cocok.
+
+Tidak diperbaiki dengan migrasi: itu perubahan hak akses, dan perubahan hak
+akses bukan keputusan pelaksana. Yang dikerjakan adalah membawa `execution_id`
+dan `decision_id` di dalam `detail`, yang **boleh** di-UPDATE. Informasinya
+tidak hilang; kolomnya tetap NULL, dan itu batas hak akses yang tercatat,
+bukan kelalaian.
+
+**Keputusan pemilik, 9 Nov 2026: kolom `execution_id` dibiarkan NULL untuk
+sekarang, dan tidak ada migrasi `0004`.** Batasnya tercatat di sini, dan
+informasinya tetap bisa dibaca dari `detail`.
+
+Kalau suatu hari kolom itu ingin benar-benar terisi, pilihannya menambah
+`execution_id` dan `decision_id` ke GRANT UPDATE lewat migrasi `0004`. Itu
+melonggarkan hak akses, jadi ia keputusan pemilik — bukan sesuatu yang bisa
+ikut dalam perubahan kode biasa.
+
+### Bukti on-chain dan tes reorg terhadap node sungguhan: DITUNDA
+
+Disetujui pemilik, 9 Nov 2026. Keduanya tetap bagian M7 menurut PRD §14, dan
+keduanya **belum dikerjakan**:
+
+- **Bukti on-chain** untuk `unmatched_onchain` dan `mismatch` — keduanya
+  diimplementasi dan diuji mock sejak M6; yang belum ada adalah buktinya
+  terhadap Base Sepolia sungguhan.
+- **Tes ketahanan reorg terhadap node sungguhan** — seluruh state machine
+  diuji dengan RPC tiruan. Reorg sungguhan di Base Sepolia belum pernah
+  dilihat sistem ini.
+
+Sebabnya sama seperti sejak M6: wallet Executor punya 20 USDC tapi **belum
+punya ETH gas**, jadi belum ada satu pun transaksi yang bisa dikirim.
+
+**Tag `m6` tetap ditahan** sampai bukti itu ada. Penundaan ini dicatat supaya
+tidak terbaca sebagai hal yang terlupa.
+
 ## M6.7 — Watcher mengingat lebar rentang yang diterima node
 
 Lebar `eth_getLogs` yang terakhir **diterima** node disimpan di memori proses

@@ -39,6 +39,54 @@ bagian 2). Lihat `docs/decisions.md`.
 
 ---
 
+## M7 — state machine reorg satu tempat, dan `guard reconcile --report`
+
+Belum ditag. Tanpa migrasi, tanpa perubahan hak akses, tanpa perubahan skema.
+
+**State machine reorg.** `SETTLEMENT_TRANSITIONS` menuliskan kelima transisi
+PRD v2 §10 sebagai data, dan `require_allowed_transition` menolak sisanya.
+Sebelumnya transisinya tersebar di empat fungsi dan daftar yang dilarang tidak
+ada di mana pun. `_set_status` kini satu-satunya jalur yang menulis
+`settlements.status`.
+
+Tiga cacat yang ditemukan sambil jalan: parameter `from_final` yang tidak
+pernah dipakai (dihapus), `MOVE_BLOCK` dan `MARK_REORGED` tanpa penjaga
+`AND status = %s` (ditambahkan, sejajar `MARK_FINAL`), dan jalur `→ reorged`
+yang ada di dua tempat (disatukan). Perilaku tidak berubah — seluruh tes reorg
+M6 lulus tanpa disunting.
+
+**`guard reconcile --report`.** Baca saja: menghitung ulang dari `settlements`,
+`executions`, dan `decisions`, tanpa menulis satu baris pun ke
+`reconciliations` maupun `audit_log`. Keluarannya satu layar (≤ 24 baris,
+≤ 100 kolom), bahasa Indonesia, ASCII saja, hash dipotong, tanpa `RPC_URL`,
+isi `.env`, atau alamat wallet penuh. Kode keluar 1 bila ada yang perlu
+tindakan, sama dengan `guard reconcile`.
+
+Baris "Mode baca saja" dicetak selalu dan menyebut bahwa ini hitungan segar —
+bukan isi tabel `reconciliations`. Keduanya bisa berbeda, dan itu memang
+tujuannya.
+
+**Batas hak akses yang baru terlihat.** Settlement yang terlihat sebelum
+baris `executions`-nya ada mulai sebagai `unmatched_onchain` dengan
+`execution_id` NULL, lalu berubah menjadi `matched` ketika execution-nya
+menyusul. `reconciler_rw` hanya boleh `UPDATE (state, detail, updated_at)`,
+jadi kolom tautan itu **tidak bisa diisi belakangan**. Tidak diperbaiki dengan
+migrasi — itu keputusan pemilik. Informasinya dibawa di `detail`, yang boleh
+di-UPDATE.
+
+**Tes.** 115 unit di `test_watcher.py` dan 61 di `test_reconciler.py`
+(termasuk setiap transisi yang diizinkan, setiap yang dilarang sebagai daftar
+tertutup, dan bentuk laporan). 17 integrasi baru: laporan tidak menulis apa
+pun, kasus urutan terbalik, dan transisi terlarang ditolak dengan baris
+database yang tetap utuh.
+
+**DITUNDA, disetujui pemilik:** bukti on-chain untuk `unmatched_onchain` dan
+`mismatch`, dan tes ketahanan reorg terhadap node sungguhan. Wallet Executor
+punya USDC tapi belum punya ETH gas. **Tag `m6` tetap ditahan.** Rinciannya di
+`docs/decisions.md`.
+
+---
+
 ## M6.7 — Watcher mengingat lebar rentang yang diterima node
 
 Belum ditag. Perubahan kode di `watcher.py` saja; tanpa migrasi, tanpa

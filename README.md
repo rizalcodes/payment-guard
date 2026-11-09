@@ -182,7 +182,7 @@ Flag per perintah:
 | `execute` | `<decision_id>` (posisional), `--env-file` |
 | `recover` | `--env-file` |
 | `watch` | `--loop`, `--cycles N`, `--from-block BLOK`, `--env-file` |
-| `reconcile` | `--env-file` |
+| `reconcile` | `--report`, `--env-file` |
 | `wallet` | `--env-file` |
 | `verify` | `<envelope>` (posisional), `--pubkey`, `--mandate` |
 
