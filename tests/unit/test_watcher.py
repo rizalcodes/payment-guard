@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 import dataclasses
+import itertools
 import re
 from pathlib import Path
 from typing import Any
@@ -711,3 +712,249 @@ class TestTransferLogIsPlainData:
         )
         with pytest.raises(dataclasses.FrozenInstanceError):
             log.block_number = 2  # type: ignore[misc]
+
+
+# --------------------------------------------------------------------------- #
+# M6.7: lebar rentang yang diingat
+# --------------------------------------------------------------------------- #
+
+
+class TestRememberedRangeWidth:
+    """Batas node ditemukan sekali per proses, bukan sekali per potongan.
+
+    Sebelum M6.7, ``_fetch_one_range`` menghitung lebar awalnya dari sisa
+    rentang batch setiap kali dipanggil, jadi setiap potongan mengulang
+    penemuan yang sama. Pada endpoint publik yang menolak di atas ~200 blok,
+    satu batch 2000 blok membuang 38 dari 52 permintaan — dan penolakan
+    memakan ~14,5 detik sementara permintaan yang diterima hanya ~0,75 detik.
+
+    Angka itu dari pengukuran read-only terhadap node sungguhan; tes di berkas
+    ini memakai :class:`fake_chain.FakeChain` dan tidak menyentuh jaringan.
+    """
+
+    LIMIT = 200
+    BATCH_FIRST = 1_000_000
+
+    def runtime(self, *, limit: int | None = 200, batch: int = 2000) -> Any:
+        """Runtime dengan klien tiruan yang menolak rentang lebih lebar dari ``limit``.
+
+        ``conn`` sengaja ``None``: ``_store_batch`` di-patch oleh pemanggil,
+        dan tidak ada jalur lain di ``_scan_range`` yang menyentuh database.
+        Runtime yang membawa koneksi sungguhan akan membuat tes ini butuh
+        Postgres untuk hal yang tidak ada hubungannya dengan database.
+        """
+        from typing import cast
+
+        from fake_chain import TEST_WALLET_ADDRESS, FakeChain
+        from payment_guard.config import WatcherConfig
+        from payment_guard.watcher import WatcherRuntime
+
+        chain = FakeChain()
+        chain.max_log_range = limit
+        chain.advance_to(self.BATCH_FIRST + 100_000)
+        config = WatcherConfig(
+            db_url="postgresql://tidak-dipakai/x_test",
+            rpc_url="http://127.0.0.1:1/tidak-pernah-dihubungi",
+            chain_id=chain.chain_id_value,
+            usdc_address=USDC,
+            wallet_address=TEST_WALLET_ADDRESS,
+            confirmations=12,
+            scan_batch_size=batch,
+            reorg_lookback=64,
+            interval_seconds=1,
+            lock_timeout_ms=5000,
+        )
+        return WatcherRuntime(config=config, client=chain, conn=cast(Any, None))
+
+    def scan(self, runtime: Any, *, first: int, last: int, monkeypatch: Any) -> Any:
+        """Jalankan ``_scan_range`` sungguhan, dengan penulisan database dimatikan."""
+        monkeypatch.setattr(watcher, "_store_batch", lambda *a, **k: 0)
+        return watcher._scan_range(runtime, first_block=first, last_block=last)
+
+    def accepted(self, runtime: Any) -> list[tuple[int, int]]:
+        """Rentang yang benar-benar DITERIMA node, dalam urutan permintaan."""
+        return list(runtime.client.log_ranges)
+
+    # -- Yang diminta brief M6.7 ------------------------------------------- #
+
+    def test_a_warmed_up_process_uses_ten_clean_requests(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Lebar sudah diketahui 200: satu batch 2000 blok = 10 permintaan, 0 ditolak."""
+        runtime = self.runtime()
+        runtime.accepted_range_width = self.LIMIT
+        last = self.BATCH_FIRST + 2000 - 1
+
+        _, _, chunks, shrinks = self.scan(
+            runtime, first=self.BATCH_FIRST, last=last, monkeypatch=monkeypatch
+        )
+
+        assert chunks == 10
+        assert shrinks == 0, "tidak boleh ada permintaan yang terbuang"
+        assert runtime.client.log_range_widths == [self.LIMIT] * 10
+        assert len(self.accepted(runtime)) == 10
+
+    def test_the_coverage_is_contiguous_with_no_gap_and_no_overlap(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Yang paling penting: tidak ada blok terlewat, tidak ada yang dobel.
+
+        Pemecahan rentang yang melewatkan satu blok akan kehilangan pembayaran
+        secara permanen — Watcher tidak pernah mundur sendiri.
+        """
+        runtime = self.runtime()
+        runtime.accepted_range_width = self.LIMIT
+        last = self.BATCH_FIRST + 2000 - 1
+
+        self.scan(runtime, first=self.BATCH_FIRST, last=last, monkeypatch=monkeypatch)
+
+        diterima = self.accepted(runtime)
+        assert diterima[0][0] == self.BATCH_FIRST
+        assert diterima[-1][1] == last
+        for (_, akhir), (mulai_berikut, _) in itertools.pairwise(diterima):
+            assert mulai_berikut == akhir + 1, (akhir, mulai_berikut)
+        tercakup = sum(akhir - mulai + 1 for mulai, akhir in diterima)
+        assert tercakup == 2000
+
+    def test_the_remembered_width_is_reused_by_the_next_batch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Permintaan pertama batch kedua tidak boleh ditolak."""
+        runtime = self.runtime()
+        pertama_akhir = self.BATCH_FIRST + 2000 - 1
+
+        self.scan(runtime, first=self.BATCH_FIRST, last=pertama_akhir, monkeypatch=monkeypatch)
+        assert runtime.accepted_range_width is not None
+        assert runtime.accepted_range_width <= self.LIMIT
+
+        runtime.client.log_range_widths.clear()
+        runtime.client.log_ranges.clear()
+        kedua_mulai = pertama_akhir + 1
+        _, _, _, shrinks = self.scan(
+            runtime, first=kedua_mulai, last=kedua_mulai + 2000 - 1, monkeypatch=monkeypatch
+        )
+
+        assert shrinks == 0, "batas node ditemukan ulang di batch kedua"
+        assert runtime.client.log_range_widths[0] <= self.LIMIT
+        assert self.accepted(runtime)[0][0] == kedua_mulai
+
+    def test_a_cold_start_discovers_the_limit_once_not_once_per_chunk(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Penemuan awal tetap berbiaya, tapi dibayar sekali saja.
+
+        Inilah perbedaan dari sebelum M6.7, yang membayarnya 38 kali untuk
+        batch yang sama.
+        """
+        runtime = self.runtime()
+        assert runtime.accepted_range_width is None
+        last = self.BATCH_FIRST + 2000 - 1
+
+        _, _, _, shrinks = self.scan(
+            runtime, first=self.BATCH_FIRST, last=last, monkeypatch=monkeypatch
+        )
+
+        # 2000 -> 1000 -> 500 -> 250 ditolak, 125 diterima: empat pengecilan,
+        # semuanya di potongan pertama.
+        assert shrinks == 4
+        ditolak = [w for w in runtime.client.log_range_widths if w > self.LIMIT]
+        assert ditolak == [2000, 1000, 500, 250]
+        assert runtime.client.log_range_widths.count(2000) == 1, "lebar 2000 dicoba lagi"
+        tercakup = sum(akhir - mulai + 1 for mulai, akhir in self.accepted(runtime))
+        assert tercakup == 2000
+
+    def test_a_short_final_chunk_does_not_lower_the_memory(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Potongan terakhir yang kecil bukan kabar tentang batas node.
+
+        Tanpa penjaga ini, batch yang berakhir dengan sisa 50 blok akan
+        menurunkan ingatan ke 50 dan membuat batch berikutnya memakai empat
+        kali lebih banyak permintaan dari yang perlu.
+        """
+        runtime = self.runtime()
+        runtime.accepted_range_width = self.LIMIT
+        # 450 blok = 200 + 200 + sisa 50.
+        last = self.BATCH_FIRST + 450 - 1
+
+        self.scan(runtime, first=self.BATCH_FIRST, last=last, monkeypatch=monkeypatch)
+
+        assert runtime.client.log_range_widths == [200, 200, 50]
+        assert runtime.accepted_range_width == self.LIMIT
+
+    def test_the_memory_comes_down_when_the_node_tightens(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ingatan harus bisa turun, bukan hanya naik.
+
+        Endpoint bisa berganti batas di tengah proses. Kalau ingatan hanya
+        pernah naik, setiap potongan sesudahnya membayar satu penolakan.
+        """
+        runtime = self.runtime()
+        runtime.accepted_range_width = self.LIMIT
+        runtime.client.max_log_range = 60
+        last = self.BATCH_FIRST + 600 - 1
+
+        self.scan(runtime, first=self.BATCH_FIRST, last=last, monkeypatch=monkeypatch)
+
+        assert runtime.accepted_range_width is not None
+        assert runtime.accepted_range_width <= 60
+        ditolak = [w for w in runtime.client.log_range_widths if w > 60]
+        assert len(ditolak) <= 2, runtime.client.log_range_widths
+
+    # -- Yang TIDAK berubah ------------------------------------------------ #
+
+    def test_a_non_range_error_is_still_raised_as_is(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from payment_guard.chain import ChainError
+
+        runtime = self.runtime()
+        runtime.accepted_range_width = self.LIMIT
+        runtime.client.logs_failure = "unauthorized: bad api key"
+
+        monkeypatch.setattr(watcher, "_store_batch", lambda *a, **k: 0)
+        with pytest.raises(ChainError, match="unauthorized"):
+            watcher._scan_range(
+                runtime, first_block=self.BATCH_FIRST, last_block=self.BATCH_FIRST + 999
+            )
+        assert len(runtime.client.log_range_widths) == 1, "ada percobaan ulang"
+
+    def test_a_node_that_refuses_everything_still_stops_at_the_floor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Lantai dan pesannya tidak berubah dari M6.1."""
+        from payment_guard.config import SCAN_RANGE_FLOOR
+
+        runtime = self.runtime(limit=1)
+        monkeypatch.setattr(watcher, "_store_batch", lambda *a, **k: 0)
+
+        with pytest.raises(WatcherError, match="lantainya"):
+            watcher._scan_range(
+                runtime, first_block=self.BATCH_FIRST, last_block=self.BATCH_FIRST + 999
+            )
+        assert min(runtime.client.log_range_widths) == SCAN_RANGE_FLOOR
+
+    def test_the_attempt_limit_still_applies(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """``scan_max_attempts`` tetap membatasi, dan kursor tidak maju."""
+        runtime = self.runtime(limit=20)
+        runtime.config = dataclasses.replace(runtime.config, scan_max_attempts=2)
+        monkeypatch.setattr(watcher, "_store_batch", lambda *a, **k: 0)
+
+        with pytest.raises(WatcherError, match="2 percobaan"):
+            watcher._scan_range(
+                runtime, first_block=self.BATCH_FIRST, last_block=self.BATCH_FIRST + 1999
+            )
+
+    def test_the_width_is_never_written_to_the_database(self) -> None:
+        """Ingatan ini milik proses, bukan keadaan yang di-persist.
+
+        Endpoint bisa berganti di antara dua proses tanpa ada yang memberi
+        tahu, jadi lebar yang benar kemarin belum tentu benar hari ini.
+        """
+        for sql in (
+            watcher.UPSERT_CURSOR,
+            watcher.INSERT_SETTLEMENT,
+            watcher.MARK_FINAL,
+            watcher.MOVE_BLOCK,
+        ):
+            assert "width" not in sql.lower()
+            assert "range" not in sql.lower()

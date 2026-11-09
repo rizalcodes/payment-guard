@@ -313,6 +313,20 @@ class WatcherRuntime:
     client: ChainClient
     conn: psycopg.Connection
     counters: dict[str, int] = field(default_factory=dict)
+    #: Lebar rentang ``eth_getLogs`` terakhir yang **diterima** node, dalam blok.
+    #:
+    #: ``None`` berarti belum ada yang diterima di proses ini. Nilainya hidup
+    #: di memori saja dan **tidak** disimpan ke database: ia pengetahuan tentang
+    #: endpoint yang sedang dipakai, bukan tentang keadaan chain, dan endpoint
+    #: bisa berganti di antara dua proses tanpa ada yang memberi tahu.
+    #:
+    #: Sebelum M6.7 lebar selalu dimulai dari sisa rentang batch, jadi batas
+    #: node ditemukan ulang di **setiap** potongan. Pada endpoint publik yang
+    #: menolak di atas ~200 blok, satu batch 2000 blok membuang 38 dari 52
+    #: permintaan — dan penolakan memakan ~14,5 detik sementara permintaan yang
+    #: diterima hanya ~0,75 detik. Mengingat satu angka ini menghapus seluruh
+    #: pemborosan itu.
+    accepted_range_width: int | None = None
 
 
 def open_runtime(
@@ -744,6 +758,16 @@ def _fetch_one_range(
 ) -> tuple[tuple[TransferLog, ...], int, int]:
     """Satu ``eth_getLogs``, mengecil separuh setiap kali node menolak lebarnya.
 
+    Lebar **awal**-nya diambil dari :attr:`WatcherRuntime.accepted_range_width`
+    — lebar terakhir yang diterima node di proses ini — dibatasi sisa rentang.
+    Tanpa ingatan itu (potongan pertama sebuah proses) perilakunya sama dengan
+    sebelum M6.7: mulai dari sisa rentang, lalu bagi dua sampai diterima.
+
+    Ingatan itu yang menghapus pemborosan. Batas node ditemukan **sekali** per
+    proses, bukan sekali per potongan: pada endpoint publik yang menolak di
+    atas ~200 blok, satu batch 2000 blok turun dari 52 permintaan (38 terbuang,
+    9,4 menit) menjadi 10 permintaan tanpa satu pun terbuang.
+
     Mengembalikan ``(log, blok_terakhir_yang_benar_benar_diambil, jumlah_pengecilan)``.
     Blok terakhir bisa lebih kecil dari ``last_block``: itulah yang membuat
     pemanggil tahu sampai mana kursor boleh maju.
@@ -764,7 +788,19 @@ def _fetch_one_range(
         WatcherError: bila lebarnya sudah di lantai dan masih ditolak, atau
             bila batas percobaan tercapai.
     """
-    width = last_block - first_block + 1
+    remaining = last_block - first_block + 1
+    remembered = runtime.accepted_range_width
+
+    # Lebar awal: yang terakhir diterima node, dibatasi sisa rentang. Tanpa
+    # ingatan, perilakunya sama dengan sebelum M6.7 — mulai dari sisa rentang.
+    width = remaining if remembered is None else min(remaining, remembered)
+
+    # Percobaan yang dibatasi sisa rentang tidak mengajarkan apa pun tentang
+    # batas node: 50 blok diterima bukan kabar baru kalau 200 sudah diketahui
+    # diterima. Tanpa penjaga ini, satu potongan terakhir yang kebetulan kecil
+    # akan menurunkan ingatan untuk seluruh batch berikutnya.
+    capped_by_remaining = remembered is not None and remaining < remembered
+
     shrinks = 0
     terakhir = ""
     for _ in range(runtime.config.scan_max_attempts):
@@ -789,7 +825,15 @@ def _fetch_one_range(
                 ) from None
             width = max(SCAN_RANGE_FLOOR, width // 2)
             shrinks += 1
+            # Lebar yang baru ditolak tidak boleh dicoba lagi di potongan
+            # berikutnya. Ingatan diturunkan ke lebar yang akan dicoba
+            # sekarang — sebuah dugaan, tapi dugaan yang langsung diuji di
+            # iterasi ini. Ini juga yang membuat ingatan bisa turun ketika
+            # batas node mengecil, bukan hanya naik.
+            runtime.accepted_range_width = width
             continue
+        if not capped_by_remaining:
+            runtime.accepted_range_width = width
         return logs, end, shrinks
     raise WatcherError(
         f"rentang {first_block}..{last_block} gagal setelah "
