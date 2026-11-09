@@ -958,3 +958,171 @@ class TestRememberedRangeWidth:
         ):
             assert "width" not in sql.lower()
             assert "range" not in sql.lower()
+
+
+# --------------------------------------------------------------------------- #
+# M7: state machine reorg, satu tempat
+# --------------------------------------------------------------------------- #
+
+
+class TestSettlementTransitionTable:
+    """Daftar transisi di :data:`SETTLEMENT_TRANSITIONS`, dua arah.
+
+    Sampai M6 transisinya tersebar di empat fungsi dan daftar yang **dilarang**
+    tidak ada di mana pun: yang menolak ``final -> pending`` hanyalah kebetulan
+    tidak ada pemanggil yang memintanya. M7 menuliskannya sebagai data, dan
+    tes ini yang menahannya tetap sama dengan PRD v2 bagian 10.
+    """
+
+    def test_the_table_is_exactly_the_prd_list(self) -> None:
+        assert watcher.SETTLEMENT_TRANSITIONS == {
+            (STATUS_PENDING, STATUS_FINAL),
+            (STATUS_PENDING, STATUS_PENDING),
+            (STATUS_PENDING, STATUS_REORGED),
+            (STATUS_REORGED, STATUS_PENDING),
+            (STATUS_FINAL, STATUS_REORGED),
+        }
+
+    def test_every_status_in_the_table_is_a_real_status(self) -> None:
+        for dari, ke in watcher.SETTLEMENT_TRANSITIONS:
+            assert dari in SETTLEMENT_STATUSES, dari
+            assert ke in SETTLEMENT_STATUSES, ke
+
+    @pytest.mark.parametrize(
+        ("dari", "ke"),
+        sorted(watcher.SETTLEMENT_TRANSITIONS),
+    )
+    def test_every_allowed_transition_is_accepted(self, dari: str, ke: str) -> None:
+        watcher.require_allowed_transition(dari, ke)
+
+    @pytest.mark.parametrize(
+        ("dari", "ke", "sebab"),
+        [
+            (
+                STATUS_FINAL,
+                STATUS_PENDING,
+                "membatalkan finality tanpa reorg: rekonsiliasi hanya menghitung "
+                "baris final, jadi pembayaran yang sudah dicocokkan berhenti "
+                "dihitung tanpa satu pun alarm",
+            ),
+            (
+                STATUS_REORGED,
+                STATUS_FINAL,
+                "melompati pending: baris yang muncul lagi harus melewati "
+                "kedalaman konfirmasi sekali lagi",
+            ),
+            (STATUS_FINAL, STATUS_FINAL, "bukan transisi; jalurnya _touch"),
+            (STATUS_REORGED, STATUS_REORGED, "bukan transisi; jalurnya _touch"),
+        ],
+    )
+    def test_every_forbidden_transition_is_refused(self, dari: str, ke: str, sebab: str) -> None:
+        with pytest.raises(WatcherError, match="tidak diizinkan"):
+            watcher.require_allowed_transition(dari, ke)
+
+    def test_the_forbidden_set_is_closed(self) -> None:
+        """Setiap pasangan status yang bukan di tabel harus ditolak.
+
+        Daftar terlarang tidak ditulis tangan: ia pelengkap dari yang
+        diizinkan. Jadi menambah status baru ke ``SETTLEMENT_STATUSES`` tanpa
+        memutuskan transisinya akan membuat tes ini gagal, bukan lolos.
+        """
+        ditolak = 0
+        for dari in SETTLEMENT_STATUSES:
+            for ke in SETTLEMENT_STATUSES:
+                if (dari, ke) in watcher.SETTLEMENT_TRANSITIONS:
+                    continue
+                with pytest.raises(WatcherError, match="tidak diizinkan"):
+                    watcher.require_allowed_transition(dari, ke)
+                ditolak += 1
+        assert ditolak == len(SETTLEMENT_STATUSES) ** 2 - len(watcher.SETTLEMENT_TRANSITIONS)
+
+    @pytest.mark.parametrize("status", ["", "selesai", "FINAL", "pendingx", None])
+    def test_an_unknown_status_is_refused_by_name(self, status: Any) -> None:
+        """Pesannya menyebut status yang tidak dikenal, bukan 'tidak diizinkan'.
+
+        Dua sebab kegagalan yang berbeda harus punya pesan yang berbeda: salah
+        ketik status dan transisi yang memang dilarang perlu ditangani dengan
+        cara yang berbeda pula.
+        """
+        with pytest.raises(WatcherError, match="tidak dikenal"):
+            watcher.require_allowed_transition(status, STATUS_FINAL)
+        with pytest.raises(WatcherError, match="tidak dikenal"):
+            watcher.require_allowed_transition(STATUS_PENDING, status)
+
+
+class TestOnlyOneWriterForStatus:
+    """``_set_status`` satu-satunya jalur yang menulis ``settlements.status``."""
+
+    def sql_literals(self) -> list[str]:
+        tree = ast.parse(WATCHER_SOURCE.read_text(encoding="utf-8"))
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef) and node.body:
+                first = node.body[0]
+                if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+                    if isinstance(first.value.value, str):
+                        docstrings.add(id(first.value))
+        return [
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+        ]
+
+    def status_writers(self) -> list[str]:
+        return [
+            sql
+            for sql in self.sql_literals()
+            if "UPDATE settlements" in sql and "status = %s" in sql
+        ]
+
+    def test_every_status_update_guards_the_previous_status(self) -> None:
+        """``AND status = %s`` di setiap UPDATE yang menulis status.
+
+        ``MOVE_BLOCK`` dan ``MARK_REORGED`` tidak punya penjaga itu sampai M7.
+        Tanpa penjaganya, UPDATE menulis apa pun yang diminta ke baris apa pun
+        — termasuk baris yang statusnya sudah berubah di antara SELECT dan
+        UPDATE, dan termasuk transisi yang tabel di atas melarangnya.
+        """
+        penulis = self.status_writers()
+        assert len(penulis) >= 3, penulis
+        for sql in penulis:
+            klausa = sql.split("WHERE")[-1]
+            assert "status = %s" in klausa, sql
+
+    def test_the_transition_is_checked_before_the_database_is_touched(self) -> None:
+        import inspect
+
+        sumber = inspect.getsource(watcher._set_status)
+        assert sumber.index("require_allowed_transition") < sumber.index("cur.execute")
+
+    def test_set_status_is_the_only_code_that_uses_those_statements(self) -> None:
+        """Ketiga pernyataan itu hanya dibaca dari dalam ``_set_status``.
+
+        Dibaca lewat AST, bukan dengan menghitung teks: nama pernyataannya
+        juga muncul di komentar dan docstring, dan menghitungnya sebagai
+        pemakaian akan membuat tes ini gagal karena penjelasan.
+        """
+        tree = ast.parse(WATCHER_SOURCE.read_text(encoding="utf-8"))
+        batas = next(
+            (n.lineno, n.end_lineno or n.lineno)
+            for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "_set_status"
+        )
+        pemakaian: dict[str, list[int]] = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                if node.id in ("MARK_FINAL", "MOVE_BLOCK", "MARK_REORGED"):
+                    pemakaian.setdefault(node.id, []).append(node.lineno)
+
+        assert set(pemakaian) == {"MARK_FINAL", "MOVE_BLOCK", "MARK_REORGED"}, pemakaian
+        for nama, baris in pemakaian.items():
+            for ln in baris:
+                assert batas[0] <= ln <= batas[1], (
+                    f"{nama} dipakai di baris {ln}, di luar _set_status"
+                )
+
+    def test_touch_never_writes_status(self) -> None:
+        """Pemeriksaan ulang bukan transisi."""
+        assert "status" not in watcher.MARK_VERIFIED.lower()

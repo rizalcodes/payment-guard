@@ -85,6 +85,40 @@ SETTLEMENT_STATUSES: Final[tuple[str, ...]] = (STATUS_PENDING, STATUS_FINAL, STA
 #: Status yang masih bisa berubah dan karena itu diperiksa ulang tiap siklus.
 OPEN_STATUSES: Final[tuple[str, ...]] = (STATUS_PENDING, STATUS_REORGED)
 
+#: Transisi status settlement yang **diizinkan**, sebagai ``(dari, ke)``.
+#:
+#: Diturunkan langsung dari tabel state machine di PRD v2 bagian 10, dan
+#: ditulis sebagai **data** supaya daftarnya bisa dibaca dan diuji sekaligus.
+#: Sampai M6 transisinya tersebar di empat fungsi, dan daftar yang dilarang
+#: tidak ada di mana pun — jadi tidak ada yang menolak ``final -> pending``
+#: selain kebetulan tidak ada pemanggil yang memintanya.
+#:
+#: Yang **tidak** ada di sini, dan alasannya:
+#:
+#: * ``final -> pending`` — membatalkan finality tanpa reorg. Rekonsiliasi
+#:   hanya menghitung baris ``final``; menurunkannya kembali berarti pembayaran
+#:   yang sudah dicocokkan berhenti dihitung tanpa satu pun alarm.
+#: * ``reorged -> final`` — melompati ``pending``. Baris yang baru muncul lagi
+#:   harus melewati kedalaman konfirmasi sekali lagi; rantai yang baru saja
+#:   menata ulang dirinya adalah rantai yang paling mungkin menata ulang lagi.
+#: * ``pending -> pending`` **tanpa** pindah blok, ``final -> final``, dan
+#:   ``reorged -> reorged`` sebagai penulisan status: itu bukan transisi,
+#:   melainkan pemeriksaan ulang. Jalurnya :func:`_touch`, yang hanya menyentuh
+#:   ``last_verified_at``.
+#:
+#: ``(STATUS_PENDING, STATUS_PENDING)`` ada di daftar karena satu transisi nyata
+#: memakainya: ``settlement_moved``, baris yang sama dipindah ke blok lain dan
+#: tetap ``pending``.
+SETTLEMENT_TRANSITIONS: Final[frozenset[tuple[str, str]]] = frozenset(
+    {
+        (STATUS_PENDING, STATUS_FINAL),
+        (STATUS_PENDING, STATUS_PENDING),
+        (STATUS_PENDING, STATUS_REORGED),
+        (STATUS_REORGED, STATUS_PENDING),
+        (STATUS_FINAL, STATUS_REORGED),
+    }
+)
+
 #: Potongan pesan error RPC yang berarti "rentang bloknya terlalu lebar".
 #:
 #: Tidak ada kode error standar untuk ini. Setiap penyedia menuliskannya
@@ -195,14 +229,22 @@ MARK_VERIFIED: Final = """
 UPDATE settlements SET last_verified_at = now() WHERE id = %s
 """
 
+#: ``AND status = %s`` adalah status **lama**, sama seperti di ``MARK_FINAL``.
+#:
+#: Ditambahkan di M7. Tanpa itu, UPDATE ini menulis apa pun yang diminta ke
+#: baris apa pun — termasuk baris yang statusnya sudah berubah di antara SELECT
+#: dan UPDATE. Hanya satu Watcher yang jalan, tapi lock sesi adalah janji di
+#: tingkat aplikasi; penjaga ini di tingkat baris, dan ia juga yang membuat
+#: transisi terlarang tetap ditolak kalau suatu hari ada pemanggil baru.
 MOVE_BLOCK: Final = """
 UPDATE settlements
 SET block_number = %s, block_hash = %s, status = %s, last_verified_at = now()
-WHERE id = %s
+WHERE id = %s AND status = %s
 """
 
 MARK_REORGED: Final = """
-UPDATE settlements SET status = %s, last_verified_at = now() WHERE id = %s
+UPDATE settlements SET status = %s, last_verified_at = now()
+WHERE id = %s AND status = %s
 """
 
 
@@ -971,15 +1013,15 @@ def _verify_pending(
     canonical = runtime.client.block_hash(row.block_number)
     if canonical == row.block_hash:
         if latest - row.block_number >= runtime.config.confirmations:
-            _finalize(runtime, row)
-            verdicts.finalized += 1
+            if _set_status(runtime, row, to=STATUS_FINAL, event=Event.SETTLEMENT_FINALIZED):
+                verdicts.finalized += 1
         else:
             # Di bawah kedalaman konfirmasi: tetap `pending`. Yang dicatat
             # hanya bahwa ia baru saja diperiksa, supaya operator bisa
             # membedakan "belum dalam" dari "tidak pernah dilihat lagi".
             _touch(runtime, row)
         return
-    _handle_hash_change(runtime, row, verdicts=verdicts, from_final=False)
+    _handle_hash_change(runtime, row, verdicts=verdicts)
 
 
 def _verify_reorged(
@@ -997,16 +1039,15 @@ def _verify_reorged(
     if new_hash is None:
         _touch(runtime, row)
         return
-    _move(
+    if _set_status(
         runtime,
         row,
-        block_number=receipt.block_number,
-        block_hash=new_hash,
-        status=STATUS_PENDING,
+        to=STATUS_PENDING,
         event=Event.SETTLEMENT_RESTORED,
-    )
-    verdicts.restored += 1
-    verdicts.shaken_blocks.append(receipt.block_number)
+        block=(receipt.block_number, new_hash),
+    ):
+        verdicts.restored += 1
+        verdicts.shaken_blocks.append(receipt.block_number)
 
 
 def _verify_final(
@@ -1020,18 +1061,13 @@ def _verify_final(
     if canonical == row.block_hash:
         _touch(runtime, row)
         return
-    with runtime.conn.cursor() as cur:
-        cur.execute(MARK_REORGED, (STATUS_REORGED, row.id))
-        audit(
-            cur,
-            Event.ALARM_FINAL_SETTLEMENT_REORGED,
-            _payload(row, extra={"previous_status": STATUS_FINAL}),
-            actor=Actor.WATCHER,
-        )
-    runtime.conn.commit()
-    verdicts.alarms += 1
-    verdicts.reorged += 1
-    verdicts.shaken_blocks.append(row.block_number)
+    # Satu-satunya perbedaan dari `pending -> reorged` adalah nama
+    # kejadiannya, dan perbedaan itu memang yang penting: baris `final` yang
+    # ter-reorg adalah janji ke rekonsiliasi yang dibatalkan, jadi ia alarm.
+    if _set_status(runtime, row, to=STATUS_REORGED, event=Event.ALARM_FINAL_SETTLEMENT_REORGED):
+        verdicts.alarms += 1
+        verdicts.reorged += 1
+        verdicts.shaken_blocks.append(row.block_number)
 
 
 def _handle_hash_change(
@@ -1039,7 +1075,6 @@ def _handle_hash_change(
     row: SettlementRow,
     *,
     verdicts: VerifyVerdicts,
-    from_final: bool,
 ) -> None:
     """Hash blok tidak lagi kanonik: dipindah bila transaksinya masih ada.
 
@@ -1052,67 +1087,90 @@ def _handle_hash_change(
     if receipt is not None:
         new_hash = runtime.client.block_hash(receipt.block_number)
         if new_hash is not None:
-            _move(
+            if _set_status(
                 runtime,
                 row,
-                block_number=receipt.block_number,
-                block_hash=new_hash,
-                status=STATUS_PENDING,
+                to=STATUS_PENDING,
                 event=Event.SETTLEMENT_MOVED,
-            )
-            verdicts.moved += 1
-            verdicts.shaken_blocks.append(row.block_number)
-            verdicts.shaken_blocks.append(receipt.block_number)
+                block=(receipt.block_number, new_hash),
+            ):
+                verdicts.moved += 1
+                verdicts.shaken_blocks.append(row.block_number)
+                verdicts.shaken_blocks.append(receipt.block_number)
             return
-    with runtime.conn.cursor() as cur:
-        cur.execute(MARK_REORGED, (STATUS_REORGED, row.id))
-        audit(
-            cur,
-            Event.SETTLEMENT_REORGED,
-            _payload(row, extra={"previous_status": row.status}),
-            actor=Actor.WATCHER,
-        )
-    runtime.conn.commit()
-    verdicts.reorged += 1
-    verdicts.shaken_blocks.append(row.block_number)
+    if _set_status(runtime, row, to=STATUS_REORGED, event=Event.SETTLEMENT_REORGED):
+        verdicts.reorged += 1
+        verdicts.shaken_blocks.append(row.block_number)
 
 
-def _finalize(runtime: WatcherRuntime, row: SettlementRow) -> None:
-    """``pending -> final``, dengan ``status`` lama ikut di klausa WHERE.
+def require_allowed_transition(from_status: str, to_status: str) -> None:
+    """Tolak transisi status yang tidak ada di :data:`SETTLEMENT_TRANSITIONS`.
 
-    Perbandingan status di ``WHERE`` bukan hiasan: ia membuat UPDATE ini tidak
-    bisa menghidupkan kembali baris yang sudah dipindahkan proses lain di
-    antara SELECT dan UPDATE. Hanya satu Watcher yang jalan, tapi lock sesi
-    adalah janji di tingkat aplikasi, sedangkan ini di tingkat baris.
+    Dipanggil sebelum setiap penulisan status, jadi daftar transisi di atas
+    adalah satu-satunya tempat yang perlu dibaca untuk tahu apa yang mungkin.
+
+    Raises:
+        WatcherError: bila transisinya tidak diizinkan. Bukan ``ValueError``:
+            pemanggilnya selalu Watcher, dan pesannya ditujukan ke operator.
     """
-    with runtime.conn.cursor() as cur:
-        cur.execute(MARK_FINAL, (STATUS_FINAL, row.id, STATUS_PENDING))
-        if cur.rowcount != 1:
-            runtime.conn.rollback()
-            return
-        audit(cur, Event.SETTLEMENT_FINALIZED, _payload(row), actor=Actor.WATCHER)
-    runtime.conn.commit()
+    if from_status not in SETTLEMENT_STATUSES:
+        raise WatcherError(f"status asal tidak dikenal: {from_status!r}")
+    if to_status not in SETTLEMENT_STATUSES:
+        raise WatcherError(f"status tujuan tidak dikenal: {to_status!r}")
+    if (from_status, to_status) not in SETTLEMENT_TRANSITIONS:
+        raise WatcherError(
+            f"transisi settlement {from_status} -> {to_status} tidak diizinkan. "
+            "Daftar yang diizinkan ada di payment_guard.watcher."
+            "SETTLEMENT_TRANSITIONS, diturunkan dari PRD v2 bagian 10."
+        )
 
 
-def _move(
+def _set_status(
     runtime: WatcherRuntime,
     row: SettlementRow,
     *,
-    block_number: int,
-    block_hash: str,
-    status: str,
+    to: str,
     event: Event,
-) -> None:
-    """Pindahkan baris ke blok lain. Kunci uniknya tidak berubah."""
+    block: tuple[int, str] | None = None,
+) -> bool:
+    """Satu-satunya jalur yang menulis ``settlements.status``.
+
+    Mengembalikan ``True`` bila barisnya benar-benar berubah. ``False`` berarti
+    status baris sudah bukan ``row.status`` lagi saat UPDATE dijalankan, jadi
+    tidak ada yang ditulis dan tidak ada audit — keadaan yang seharusnya tidak
+    mungkin karena hanya satu Watcher yang jalan, tapi yang penjaga tingkat
+    baris di SQL tetap menolak.
+
+    ``block`` mengisi ``(block_number, block_hash)`` baru untuk transisi yang
+    memindahkan baris; ``None`` berarti hanya status yang berubah.
+
+    Transisi diperiksa **sebelum** menyentuh database. Status dan audit berada
+    di satu transaksi: baris yang statusnya berubah tanpa jejak di
+    ``audit_log``, atau sebaliknya, lebih buruk daripada perubahan yang gagal
+    seluruhnya.
+
+    Raises:
+        WatcherError: bila transisinya tidak diizinkan.
+    """
+    require_allowed_transition(row.status, to)
+
+    extra: dict[str, object] = {"previous_status": row.status}
     with runtime.conn.cursor() as cur:
-        cur.execute(MOVE_BLOCK, (block_number, block_hash, status, row.id))
-        audit(
-            cur,
-            event,
-            _payload(row, extra={"new_block_number": block_number}),
-            actor=Actor.WATCHER,
-        )
+        if block is None:
+            if to == STATUS_FINAL:
+                cur.execute(MARK_FINAL, (to, row.id, row.status))
+            else:
+                cur.execute(MARK_REORGED, (to, row.id, row.status))
+        else:
+            block_number, block_hash = block
+            extra["new_block_number"] = block_number
+            cur.execute(MOVE_BLOCK, (block_number, block_hash, to, row.id, row.status))
+        if cur.rowcount != 1:
+            runtime.conn.rollback()
+            return False
+        audit(cur, event, _payload(row, extra=extra), actor=Actor.WATCHER)
     runtime.conn.commit()
+    return True
 
 
 def _touch(runtime: WatcherRuntime, row: SettlementRow) -> None:
@@ -1246,6 +1304,7 @@ __all__ = [
     "OPEN_STATUSES",
     "SELECT_EXECUTION_SENDERS",
     "SETTLEMENT_STATUSES",
+    "SETTLEMENT_TRANSITIONS",
     "STATUS_FINAL",
     "STATUS_PENDING",
     "STATUS_REORGED",
@@ -1258,6 +1317,7 @@ __all__ = [
     "execution_senders",
     "open_runtime",
     "read_cursor",
+    "require_allowed_transition",
     "run_watch",
     "scan_once",
     "settlement_counts",

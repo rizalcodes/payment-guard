@@ -270,6 +270,140 @@ class ReconcileReport:
 # --------------------------------------------------------------------------- #
 
 
+#: Waktu jam **database**, sudah diformat oleh database.
+#:
+#: Diambil terformat, bukan sebagai epoch lalu diformat di Python, karena yang
+#: ingin ditampilkan memang jam database (Arsitektur v1.1 prinsip 5) dan
+#: memformatnya di sini akan menambahkan satu tempat yang bisa salah zona
+#: waktu.
+SELECT_DB_CLOCK: Final = """
+SELECT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') || ' UTC'
+"""
+
+#: Berapa karakter awal dan akhir hash yang ditampilkan laporan.
+#:
+#: Hash penuh 66 karakter membuat satu baris laporan tidak muat di satu layar,
+#: dan laporan yang tidak muat berhenti dibaca. Potongan ini cukup untuk
+#: mencari di explorer: 4 byte awal dan 2 byte akhir sudah membuat tabrakan
+#: tidak mungkin dalam satu database tes mana pun.
+SHORT_HASH_HEAD: Final = 10
+SHORT_HASH_TAIL: Final = 6
+
+
+def short_hash(value: str) -> str:
+    """``0x9a6280ec…23b3ef`` — cukup untuk dicari, cukup pendek untuk dibaca."""
+    if len(value) <= SHORT_HASH_HEAD + SHORT_HASH_TAIL + 1:
+        return value
+    return f"{value[:SHORT_HASH_HEAD]}...{value[-SHORT_HASH_TAIL:]}"
+
+
+def render_report(findings: list[Finding], *, chain_id: int, db_time: str) -> str:
+    """Laporan ``guard reconcile --report``: satu layar, bahasa Indonesia.
+
+    Tidak memuat ``RPC_URL``, isi ``.env``, alamat wallet penuh, maupun hash
+    penuh. Yang ditampilkan adalah hal yang bisa ditindaklanjuti: jumlah per
+    state, lalu setiap temuan yang perlu tindakan satu baris.
+
+    Baris "Mode baca saja" dicetak **selalu**, dan menyebut bahwa ini hitungan
+    segar — bukan isi tabel ``reconciliations``. Tanpa itu, laporan yang
+    berbeda dari tabel akan terlihat seperti kesalahan, padahal justru itu
+    gunanya: ia menunjukkan keadaan sekarang walau ``guard reconcile`` belum
+    dijalankan sejak perubahan terakhir.
+    """
+    counts = dict.fromkeys(RECONCILIATION_STATES, 0)
+    for finding in findings:
+        counts[finding.state] += 1
+
+    lines = [
+        f"Laporan rekonsiliasi - chain {chain_id}, {db_time} (jam database)",
+        "Mode baca saja: ini hitungan segar dari settlements, executions, dan",
+        "decisions - bukan isi tabel reconciliations. Tidak ada yang ditulis.",
+        "",
+        "Ringkasan:",
+    ]
+    for state in RECONCILIATION_STATES:
+        tanda = " " if state not in ALARM_STATES else "!"
+        lines.append(f"  {tanda} {state:<22} {counts[state]:>4}")
+
+    perlu = [f for f in findings if f.is_alarm]
+    lines.append("")
+    if not perlu:
+        lines.append(f"Tidak ada yang perlu tindakan dari {len(findings)} subjek.")
+    else:
+        lines.append(f"Perlu tindakan ({len(perlu)}):")
+        for finding in perlu:
+            lines.append(f"  {_action_line(finding)}")
+
+    kedaluwarsa = counts[STATE_EXPIRED]
+    if kedaluwarsa:
+        lines.append("")
+        lines.append(f"expired ({kedaluwarsa}) tidak perlu tindakan: keputusan")
+        lines.append("kedaluwarsa tanpa dieksekusi, dan jatahnya sudah dilepas.")
+    return "\n".join(lines)
+
+
+def _action_line(finding: Finding) -> str:
+    """Satu temuan dalam satu baris: state, subjek, hash pendek, dan sebabnya."""
+    detail = finding.detail
+    bagian = [f"{finding.state:<22}", f"{finding.subject_type} {finding.subject_id:<4}"]
+
+    tx_hash = detail.get("tx_hash")
+    if isinstance(tx_hash, str):
+        bagian.append(f"tx {short_hash(tx_hash)}")
+
+    differs = detail.get("differs")
+    if isinstance(differs, list):
+        bagian.append("beda: " + ", ".join(str(d) for d in differs))
+
+    deadline = detail.get("deadline_seconds")
+    if isinstance(deadline, int):
+        bagian.append(f"lewat batas {deadline} detik")
+
+    if finding.state == STATE_INVALIDATED:
+        bagian.append("pernah final lalu ter-reorg")
+
+    return "  ".join(bagian)
+
+
+def report_once(
+    config: ReconcilerConfig,
+    *,
+    out: TextIO | None = None,
+) -> ReconcileReport:
+    """Satu laporan **tanpa menulis apa pun**. Jalur ``guard reconcile --report``.
+
+    Memakai :func:`collect_findings`, yang sudah ``rollback()`` sendiri, dan
+    **tidak** memanggil :func:`record`. Jadi tidak ada baris
+    ``reconciliations`` dan tidak ada baris ``audit_log`` yang ditulis — ada
+    tes integrasi yang membandingkan kedua tabel sebelum dan sesudah.
+
+    ``ReconcileReport.changed`` tetap 0 di sini, dan itu benar: tidak ada yang
+    berubah karena memang tidak ada yang ditulis.
+    """
+    with connect(config.db_url, lock_timeout_ms=config.lock_timeout_ms) as conn:
+        findings = collect_findings(conn, config)
+        with conn.cursor() as cur:
+            cur.execute(SELECT_DB_CLOCK)
+            row = cur.fetchone()
+            db_time = "(waktu tidak terbaca)" if row is None else str(row[0])
+        conn.rollback()
+    report = ReconcileReport(findings=list(findings))
+    if out is not None:
+        print(render_report(report.findings, chain_id=config.chain_id, db_time=db_time), file=out)
+    return report
+
+
+def run_report(config: ReconcilerConfig, *, out: TextIO | None = None) -> int:
+    """Laporan baca saja. Kode keluar 1 bila ada yang perlu tindakan.
+
+    Konvensi kode keluarnya sama dengan ``guard reconcile`` dengan sengaja:
+    keduanya dijalankan dari cron, dan dua konvensi untuk satu perintah adalah
+    satu hal lagi yang harus diingat saat jam tiga pagi.
+    """
+    report = report_once(config, out=out)
+    return 1 if report.alarms else 0
+
+
 def reconcile_once(
     config: ReconcilerConfig,
     *,
@@ -392,6 +526,24 @@ def _settlement_findings(
         expected_to = str(row[7])
         expected_amount = to_int(row[8])
         decision_id = None if row[9] is None else str(row[9])
+        # Tautan ke execution dan decision ikut masuk ke `detail`, bukan hanya
+        # ke kolomnya.
+        #
+        # Alasannya kasus urutan terbalik (M7): settlement bisa terlihat
+        # SEBELUM baris `executions`-nya ada, dan kesimpulan pertamanya
+        # `unmatched_onchain` dengan `execution_id` NULL. Ketika execution-nya
+        # menyusul, state berubah menjadi `matched` — tapi `record()` hanya
+        # boleh meng-UPDATE `state`, `detail`, dan `updated_at`
+        # (`0002_roles.sql`), jadi kolom `execution_id` tetap NULL selamanya.
+        #
+        # Tanpa dua baris ini, baris `matched` itu tidak menyebutkan execution
+        # mana yang cocok, dan operator harus mencarinya sendiri lewat
+        # `tx_hash`. `detail` boleh di-UPDATE, jadi di situlah informasinya
+        # disimpan. Kolomnya tetap NULL; itu batas hak akses, bukan kelalaian.
+        detail["execution_id"] = execution_id
+        if decision_id is not None:
+            detail["decision_id"] = decision_id
+
         differences = []
         if settled_to != expected_to:
             differences.append("to_addr")
@@ -568,5 +720,9 @@ __all__ = [
     "collect_findings",
     "reconcile_once",
     "record",
+    "render_report",
+    "report_once",
     "run_reconcile",
+    "run_report",
+    "short_hash",
 ]

@@ -216,7 +216,7 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
     # Tanpa impor chain sama sekali: Reconciler membandingkan tabel dengan
     # tabel dan tidak pernah bertanya ke RPC.
     from payment_guard.config import load_reconciler_config
-    from payment_guard.reconciler import ReconcilerError, run_reconcile
+    from payment_guard.reconciler import ReconcilerError, run_reconcile, run_report
 
     try:
         config = load_reconciler_config(args.env_file)
@@ -225,6 +225,10 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
         return 1
 
     try:
+        if args.report:
+            # Jalur baca saja: menghitung ulang dari tabel, tanpa menulis satu
+            # baris pun ke `reconciliations` maupun `audit_log`.
+            return run_report(config, out=sys.stdout)
         return run_reconcile(config, out=sys.stdout)
     except ReconcilerError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -483,6 +487,15 @@ def build_parser() -> argparse.ArgumentParser:
     reconcile_parser = sub.add_parser(
         "reconcile",
         help="cocokkan settlements dengan executions dan decisions; satu siklus",
+    )
+    reconcile_parser.add_argument(
+        "--report",
+        action="store_true",
+        help=(
+            "hanya tampilkan laporan, jangan tulis apa pun. Menghitung ulang dari "
+            "settlements, executions, dan decisions; tidak menulis ke "
+            "reconciliations maupun audit_log."
+        ),
     )
     reconcile_parser.set_defaults(handler=_cmd_reconcile)
 

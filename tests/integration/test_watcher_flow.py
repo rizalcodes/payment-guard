@@ -46,6 +46,7 @@ from conftest_guard import RECIPIENT_A, RECIPIENT_B, USDC
 from fake_chain import TEST_WALLET_ADDRESS, TEST_WALLET_SEED, FakeChain
 from payment_guard.chain import ChainError
 from payment_guard.config import ExecutorConfig, ReconcilerConfig, WatcherConfig
+from payment_guard.events import Event
 from payment_guard.executor import execute_decision, open_runtime
 from payment_guard.reconciler import (
     STATE_EXECUTED_NOT_SETTLED,
@@ -58,6 +59,8 @@ from payment_guard.reconciler import (
     SUBJECT_EXECUTION,
     SUBJECT_SETTLEMENT,
     reconcile_once,
+    report_once,
+    run_report,
 )
 from payment_guard.watcher import (
     STATUS_FINAL,
@@ -1996,3 +1999,403 @@ class TestTheWatcherNeverLeaksSecrets:
         pesan = str(info.value)
         assert "devonly_not_a_secret" not in pesan
         assert "postgresql://" not in pesan
+
+
+# --------------------------------------------------------------------------- #
+# M7: laporan baca saja dan kasus tepi rekonsiliasi
+# --------------------------------------------------------------------------- #
+
+
+def audit_count(url: str) -> int:
+    with psycopg.connect(url) as conn, conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM audit_log")
+        row = cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+
+class TestReportWritesNothing:
+    """``guard reconcile --report`` tidak boleh menulis satu baris pun.
+
+    Ini pernyataan yang paling penting tentang mode itu, dan ia tidak bisa
+    dibuktikan dengan membaca kode saja: yang membuktikannya adalah
+    membandingkan kedua tabel sebelum dan sesudah.
+    """
+
+    def siapkan_temuan(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        chain: FakeChain,
+        decision_id: str,
+    ) -> None:
+        """Satu settlement final yang TIDAK cocok, supaya ada alarm."""
+        tx_hash = broadcast(executor_config, chain, decision_id)
+        chain.add_transfer(
+            tx_hash=tx_hash, to_addr=RECIPIENT_B, amount_base=AMOUNT, block_number=BLOCK
+        )
+        deep_enough(chain)
+        watch(watcher_config, chain, cycles=2)
+
+    def test_it_leaves_reconciliations_and_audit_log_untouched(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        reconciler_config: ReconcilerConfig,
+        executor_db: str,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        self.siapkan_temuan(executor_config, watcher_config, chain, seeded["decision_id"])
+        sebelum_rekon = reconciliation_rows(executor_db)
+        sebelum_audit = audit_count(executor_db)
+
+        out = io.StringIO()
+        laporan = report_once(reconciler_config, out=out)
+
+        assert laporan.alarms, "tes ini butuh minimal satu alarm"
+        assert reconciliation_rows(executor_db) == sebelum_rekon
+        assert audit_count(executor_db) == sebelum_audit
+        assert laporan.changed == 0
+
+    def test_running_it_twice_still_writes_nothing(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        reconciler_config: ReconcilerConfig,
+        executor_db: str,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        self.siapkan_temuan(executor_config, watcher_config, chain, seeded["decision_id"])
+        sebelum_audit = audit_count(executor_db)
+
+        report_once(reconciler_config, out=io.StringIO())
+        report_once(reconciler_config, out=io.StringIO())
+
+        assert audit_count(executor_db) == sebelum_audit
+        assert reconciliation_rows(executor_db) == []
+
+    def test_it_reports_findings_that_reconcile_has_never_recorded(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        reconciler_config: ReconcilerConfig,
+        executor_db: str,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """Inilah opsi A: hitungan segar, bukan isi tabel.
+
+        ``reconciliations`` masih kosong — ``guard reconcile`` belum pernah
+        dijalankan — tapi laporannya sudah menyebut temuannya.
+        """
+        self.siapkan_temuan(executor_config, watcher_config, chain, seeded["decision_id"])
+        assert reconciliation_rows(executor_db) == []
+
+        out = io.StringIO()
+        report_once(reconciler_config, out=out)
+
+        keluaran = out.getvalue()
+        assert "mismatch" in keluaran
+        assert "Perlu tindakan" in keluaran
+        assert "hitungan segar" in keluaran
+
+    def test_the_output_names_the_database_clock_and_chain(
+        self, reconciler_config: ReconcilerConfig
+    ) -> None:
+        out = io.StringIO()
+        report_once(reconciler_config, out=out)
+        keluaran = out.getvalue()
+        assert f"chain {CHAIN_ID}" in keluaran
+        assert "UTC" in keluaran
+        assert "jam database" in keluaran
+
+    def test_the_output_leaks_nothing(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        reconciler_config: ReconcilerConfig,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """URL database, kunci, dan hash penuh tidak boleh muncul."""
+        self.siapkan_temuan(executor_config, watcher_config, chain, seeded["decision_id"])
+        out = io.StringIO()
+        report_once(reconciler_config, out=out)
+        keluaran = out.getvalue()
+
+        assert "devonly_not_a_secret" not in keluaran
+        assert "postgresql://" not in keluaran
+        assert TEST_WALLET_SEED not in keluaran
+        assert re.search(r"0x[0-9a-fA-F]{64}", keluaran) is None, keluaran
+        assert keluaran.isascii()
+
+    def test_the_exit_code_is_one_when_something_needs_action(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        reconciler_config: ReconcilerConfig,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        self.siapkan_temuan(executor_config, watcher_config, chain, seeded["decision_id"])
+        assert run_report(reconciler_config, out=io.StringIO()) == 1
+
+    def test_the_exit_code_is_zero_when_nothing_needs_action(
+        self, reconciler_config: ReconcilerConfig
+    ) -> None:
+        assert run_report(reconciler_config, out=io.StringIO()) == 0
+
+    def test_the_cli_flag_reaches_the_report_path(self) -> None:
+        """``guard reconcile --report`` ada, dan bawaannya tetap menulis."""
+        from payment_guard.cli import build_parser
+
+        assert build_parser().parse_args(["reconcile", "--report"]).report is True
+        assert build_parser().parse_args(["reconcile"]).report is False
+
+
+class TestReconciliationEdgeCases:
+    """Kasus tepi yang diminta M7, di luar yang sudah bertes sejak M6."""
+
+    def test_a_settlement_seen_before_its_execution_flips_to_matched(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        reconciler_config: ReconcilerConfig,
+        executor_db: str,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """Urutan terbalik: Watcher melihat transfer sebelum ada execution-nya.
+
+        Bisa terjadi karena Watcher dan Executor adalah dua proses: Watcher
+        memindai blok yang sudah aman sementara baris ``executions`` baru
+        ditulis sesudahnya, atau karena operator menjalankan reconcile di
+        antara keduanya.
+
+        Yang diuji: kesimpulan pertama ``unmatched_onchain`` **berubah**
+        menjadi ``matched`` begitu execution-nya ada — bukan menetap sebagai
+        alarm palsu.
+        """
+        # Transfer dengan hash yang akan dipakai execution nanti belum bisa
+        # dibuat, jadi urutannya ditiru sebaliknya: execution dibuat, lalu
+        # barisnya disembunyikan dari Reconciler dengan menghapusnya? Tidak —
+        # yang dihapus tidak boleh. Sebagai gantinya: transfer asing dulu,
+        # lalu execution dengan tx_hash yang sama disisipkan admin.
+        tx_hash = FOREIGN_TX
+        chain.add_transfer(
+            tx_hash=tx_hash, to_addr=RECIPIENT_A, amount_base=AMOUNT, block_number=BLOCK
+        )
+        deep_enough(chain)
+        watch(watcher_config, chain, cycles=2)
+
+        pertama = reconcile_once(reconciler_config)
+        assert [f.state for f in pertama.findings] == [STATE_UNMATCHED_ONCHAIN]
+        assert reconciliation_rows(executor_db)[0]["state"] == STATE_UNMATCHED_ONCHAIN
+
+        # Execution-nya menyusul, dengan hash yang sama.
+        with psycopg.connect(executor_db) as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO executions (decision_id, tx_hash, from_addr, to_addr, "
+                "amount_base, nonce, raw_tx, status, broadcast_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s, now())",
+                (
+                    seeded["decision_id"],
+                    tx_hash,
+                    TEST_WALLET_ADDRESS,
+                    USDC_ADDRESS,
+                    str(AMOUNT),
+                    0,
+                    b"\x01",
+                    "broadcast",
+                ),
+            )
+            conn.commit()
+
+        kedua = reconcile_once(reconciler_config)
+
+        assert [f.state for f in kedua.findings] == [STATE_MATCHED]
+        assert kedua.changed == 1, "state harus berubah, bukan ditulis ulang"
+        baris = reconciliation_rows(executor_db)
+        assert len(baris) == 1, "satu baris per subjek, di-upsert"
+        assert baris[0]["state"] == STATE_MATCHED
+
+        # Kolom `execution_id` tetap NULL, dan itu BATAS HAK AKSES, bukan bug:
+        # `reconciler_rw` hanya boleh meng-UPDATE (state, detail, updated_at)
+        # di `0002_roles.sql`, jadi kolom tautan yang NULL saat INSERT pertama
+        # tidak bisa diisi belakangan. Informasinya tidak hilang — ia pindah ke
+        # `detail`, yang boleh di-UPDATE.
+        assert baris[0]["execution_id"] is None, "kolomnya tidak bisa di-UPDATE"
+        assert baris[0]["detail"]["execution_id"] is not None
+        assert baris[0]["detail"]["decision_id"] == seeded["decision_id"]
+
+    def test_the_flip_is_audited_as_a_state_change(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        reconciler_config: ReconcilerConfig,
+        executor_db: str,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """Perubahan kesimpulan harus terlihat di ``audit_log``."""
+        self.test_a_settlement_seen_before_its_execution_flips_to_matched(
+            executor_config, watcher_config, reconciler_config, executor_db, chain, seeded
+        )
+        payloads = audit_payloads_for(executor_db, "reconciliation_state_changed")
+        state_akhir = [p for p in payloads if p["state"] == STATE_MATCHED]
+        assert state_akhir, payloads
+        assert state_akhir[-1]["previous_state"] == STATE_UNMATCHED_ONCHAIN
+
+    def test_an_expired_decision_without_settlement_is_not_an_alarm(
+        self, reconciler_config: ReconcilerConfig, executor_db: str, seeded: dict
+    ) -> None:
+        """Sudah bertes sejak M6; di sini yang diperiksa adalah ia bukan alarm.
+
+        Laporan memisahkan ``expired`` dari daftar tindakan, jadi sifat "bukan
+        alarm" itu sekarang punya konsekuensi yang terlihat operator.
+        """
+        with psycopg.connect(executor_db) as conn, conn.cursor() as cur:
+            cur.execute(
+                "UPDATE decisions SET created_at = now() - make_interval(secs => %s), "
+                "decided_at = now() - make_interval(secs => %s), "
+                "approved_at = now() - make_interval(secs => %s), "
+                "valid_until = now() - make_interval(secs => %s) WHERE id = %s",
+                (10_800, 7200, 7200, 3600, seeded["decision_id"]),
+            )
+            conn.commit()
+
+        out = io.StringIO()
+        laporan = report_once(reconciler_config, out=out)
+
+        assert [f.state for f in laporan.findings] == [STATE_EXPIRED]
+        assert laporan.alarms == []
+        keluaran = out.getvalue()
+        assert "Tidak ada yang perlu tindakan" in keluaran
+        assert "jatahnya sudah dilepas" in keluaran
+
+
+class TestForbiddenTransitionsAreRefusedByTheDatabase:
+    """Transisi terlarang ditolak, dan baris di database tidak berubah."""
+
+    def pending_row(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        chain: FakeChain,
+        decision_id: str,
+    ) -> Any:
+        tx_hash = broadcast(executor_config, chain, decision_id)
+        chain.add_transfer(
+            tx_hash=tx_hash, to_addr=RECIPIENT_A, amount_base=AMOUNT, block_number=BLOCK
+        )
+        deep_enough(chain)
+        watch(watcher_config, chain, cycles=1)
+        return tx_hash
+
+    def row_of(self, executor_db: str) -> Any:
+        from payment_guard.watcher import SettlementRow
+
+        baris = settlement_rows(executor_db)[0]
+        return SettlementRow(
+            id=int(baris["id"]),
+            tx_hash=str(baris["tx_hash"]),
+            log_index=int(baris["log_index"]),
+            block_number=int(baris["block_number"]),
+            block_hash=str(baris["block_hash"]),
+            status=str(baris["status"]),
+        )
+
+    @pytest.mark.parametrize("tujuan", [STATUS_PENDING, STATUS_FINAL])
+    def test_a_final_row_cannot_go_back(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        executor_db: str,
+        chain: FakeChain,
+        seeded: dict,
+        tujuan: str,
+    ) -> None:
+        """``final -> pending`` dan ``final -> final`` ditolak di Python.
+
+        Keduanya ditolak sebelum database disentuh, jadi barisnya utuh.
+        """
+        from payment_guard.watcher import _set_status
+
+        self.pending_row(executor_config, watcher_config, chain, seeded["decision_id"])
+        watch(watcher_config, chain, cycles=1)
+        baris = self.row_of(executor_db)
+        assert baris.status == STATUS_FINAL
+
+        runtime = open_watcher(watcher_config, client=chain)
+        try:
+            with pytest.raises(WatcherError, match="tidak diizinkan"):
+                _set_status(runtime, baris, to=tujuan, event=Event.SETTLEMENT_FINALIZED)
+        finally:
+            close_runtime(runtime)
+
+        assert settlement_rows(executor_db)[0]["status"] == STATUS_FINAL
+
+    def test_a_reorged_row_cannot_jump_straight_to_final(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        executor_db: str,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """``reorged -> final`` harus lewat ``pending`` dulu."""
+        from payment_guard.watcher import _set_status
+
+        tx_hash = self.pending_row(executor_config, watcher_config, chain, seeded["decision_id"])
+        chain.reorg_block(BLOCK)
+        chain.drop_transaction(tx_hash)
+        watch(watcher_config, chain, cycles=1)
+        baris = self.row_of(executor_db)
+        assert baris.status == STATUS_REORGED
+
+        runtime = open_watcher(watcher_config, client=chain)
+        try:
+            with pytest.raises(WatcherError, match="tidak diizinkan"):
+                _set_status(runtime, baris, to=STATUS_FINAL, event=Event.SETTLEMENT_FINALIZED)
+        finally:
+            close_runtime(runtime)
+
+        assert settlement_rows(executor_db)[0]["status"] == STATUS_REORGED
+
+    def test_a_stale_row_status_writes_nothing(
+        self,
+        executor_config: ExecutorConfig,
+        watcher_config: WatcherConfig,
+        executor_db: str,
+        chain: FakeChain,
+        seeded: dict,
+    ) -> None:
+        """Penjaga tingkat baris: ``AND status = %s`` menolak baris yang sudah pindah.
+
+        Transisinya sah, tapi ``row.status`` yang dipegang pemanggil sudah
+        basi. UPDATE tidak menemukan baris, dan tidak ada audit yang ditulis.
+        """
+        import dataclasses as dc
+
+        from payment_guard.watcher import _set_status
+
+        self.pending_row(executor_config, watcher_config, chain, seeded["decision_id"])
+        watch(watcher_config, chain, cycles=1)
+        baris = self.row_of(executor_db)
+        assert baris.status == STATUS_FINAL
+
+        # Pemanggil mengira barisnya masih `pending`: transisi pending -> final
+        # diizinkan, tapi barisnya sudah `final`.
+        basi = dc.replace(baris, status=STATUS_PENDING)
+        sebelum = audit_count(executor_db)
+
+        runtime = open_watcher(watcher_config, client=chain)
+        try:
+            berubah = _set_status(runtime, basi, to=STATUS_FINAL, event=Event.SETTLEMENT_FINALIZED)
+        finally:
+            close_runtime(runtime)
+
+        assert berubah is False
+        assert audit_count(executor_db) == sebelum, "audit ditulis padahal tidak ada perubahan"

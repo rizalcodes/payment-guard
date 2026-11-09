@@ -26,6 +26,8 @@ from payment_guard.reconciler import (
     STATE_MATCHED,
     STATE_MISMATCH,
     STATE_UNMATCHED_ONCHAIN,
+    SUBJECT_DECISION,
+    SUBJECT_EXECUTION,
     SUBJECT_SETTLEMENT,
     SUBJECT_TYPES,
     Finding,
@@ -314,3 +316,206 @@ class TestSqlIsStatic:
     def test_duplicate_final_logs_are_detected(self) -> None:
         """PRD v2 bagian 11 menuntut "tepat satu log Transfer yang cocok"."""
         assert "HAVING count(*) > 1" in reconciler.SELECT_FINAL_LOG_COUNTS
+
+
+# --------------------------------------------------------------------------- #
+# M7: laporan baca saja
+# --------------------------------------------------------------------------- #
+
+
+class TestShortHash:
+    """Hash dipotong supaya satu baris laporan muat di satu layar.
+
+    Yang dipotong adalah **tampilannya**, bukan yang disimpan: baris
+    ``reconciliations`` dan ``audit_log`` tetap memuat hash penuh.
+    """
+
+    FULL = "0x9a6280ecc159423cb00c6a43457ddf252ad1be2c89b69c2b068fc378daa95200"
+
+    def test_it_keeps_both_ends(self) -> None:
+        pendek = reconciler.short_hash(self.FULL)
+        assert pendek.startswith(self.FULL[: reconciler.SHORT_HASH_HEAD])
+        assert pendek.endswith(self.FULL[-reconciler.SHORT_HASH_TAIL :])
+        assert "..." in pendek
+
+    def test_it_is_much_shorter_than_the_original(self) -> None:
+        assert len(reconciler.short_hash(self.FULL)) < len(self.FULL) // 2
+
+    def test_a_short_value_is_left_alone(self) -> None:
+        """Tidak ada yang dipotong kalau memotongnya tidak menolong."""
+        assert reconciler.short_hash("0xabc") == "0xabc"
+
+    def test_it_stays_ascii(self) -> None:
+        """Pemisah ASCII, bukan elipsis Unicode.
+
+        Laporan ini dibaca di konsol operator, yang di Windows bisa memakai
+        cp1252. Satu karakter non-ASCII di setiap baris adalah satu cara lagi
+        perintah ini bisa gagal di tempat yang tidak ada hubungannya dengan
+        rekonsiliasi.
+        """
+        assert reconciler.short_hash(self.FULL).isascii()
+
+
+class TestReportRendering:
+    """Laporan ``guard reconcile --report``: satu layar, bisa ditindaklanjuti."""
+
+    TX = "0x9a6280ecc159423cb00c6a43457ddf252ad1be2c89b69c2b068fc378daa95200"
+
+    def temuan(self, state: str, subject_id: str = "1", **detail: object) -> Finding:
+        subjek = {
+            STATE_EXECUTED_NOT_SETTLED: SUBJECT_EXECUTION,
+            STATE_EXPIRED: SUBJECT_DECISION,
+        }.get(state, SUBJECT_SETTLEMENT)
+        return Finding(subjek, subject_id, state, dict(detail))
+
+    def render(self, findings: list[Finding]) -> str:
+        return reconciler.render_report(findings, chain_id=84532, db_time="2026-11-09 14:02:11 UTC")
+
+    def test_the_header_names_the_chain_and_the_database_clock(self) -> None:
+        teks = self.render([])
+        assert "chain 84532" in teks
+        assert "2026-11-09 14:02:11 UTC" in teks
+        assert "jam database" in teks
+
+    def test_the_read_only_line_is_always_printed(self) -> None:
+        """Dicetak bahkan untuk laporan kosong.
+
+        Tanpa baris itu, laporan yang berbeda dari tabel ``reconciliations``
+        akan terlihat seperti kesalahan — padahal justru itu gunanya.
+        """
+        for findings in ([], [self.temuan(STATE_MATCHED)]):
+            teks = self.render(findings)
+            assert "Mode baca saja" in teks
+            assert "hitungan segar" in teks
+            assert "bukan isi tabel reconciliations" in teks
+            assert "Tidak ada yang ditulis" in teks
+
+    def test_every_state_appears_in_the_summary_even_at_zero(self) -> None:
+        """Nol yang terlihat berbeda dari state yang lupa dihitung."""
+        teks = self.render([self.temuan(STATE_MATCHED)])
+        for state in RECONCILIATION_STATES:
+            assert state in teks, state
+
+    def test_alarm_states_are_marked_in_the_summary(self) -> None:
+        teks = self.render([])
+        ditandai: dict[str, bool] = {}
+        for baris in teks.splitlines():
+            bagian = baris.strip().split()
+            if not bagian:
+                continue
+            if bagian[0] == "!" and len(bagian) > 1:
+                ditandai[bagian[1]] = True
+            elif bagian[0] in RECONCILIATION_STATES:
+                ditandai[bagian[0]] = False
+
+        assert set(ditandai) == set(RECONCILIATION_STATES), ditandai
+        for state in RECONCILIATION_STATES:
+            assert ditandai[state] is (state in ALARM_STATES), state
+
+    def test_an_empty_report_says_nothing_needs_action(self) -> None:
+        assert "Tidak ada yang perlu tindakan" in self.render([])
+
+    def test_only_matched_and_expired_needs_no_action(self) -> None:
+        teks = self.render([self.temuan(STATE_MATCHED), self.temuan(STATE_EXPIRED, "d1")])
+        assert "Tidak ada yang perlu tindakan" in teks
+        assert "Perlu tindakan" not in teks
+
+    @pytest.mark.parametrize("state", sorted(ALARM_STATES))
+    def test_every_alarm_state_reaches_the_action_list(self, state: str) -> None:
+        """Keempat state alarm, bukan hanya tiga yang disebut brief.
+
+        ``invalidated`` juga alarm: ia settlement yang pernah ``final`` lalu
+        ter-reorg. Menghilangkannya dari daftar tindakan berarti menyembunyikan
+        pembayaran yang berhenti berlaku.
+        """
+        teks = self.render([self.temuan(state, tx_hash=self.TX)])
+        assert "Perlu tindakan (1)" in teks
+        assert state in teks.split("Perlu tindakan")[1]
+
+    def test_a_mismatch_says_which_fields_differ(self) -> None:
+        teks = self.render(
+            [self.temuan(STATE_MISMATCH, tx_hash=self.TX, differs=["to_addr", "amount_base"])]
+        )
+        assert "beda: to_addr, amount_base" in teks
+
+    def test_an_unsettled_execution_says_the_deadline(self) -> None:
+        teks = self.render(
+            [self.temuan(STATE_EXECUTED_NOT_SETTLED, tx_hash=self.TX, deadline_seconds=3600)]
+        )
+        assert "lewat batas 3600 detik" in teks
+
+    def test_an_invalidated_row_says_why(self) -> None:
+        teks = self.render([self.temuan(STATE_INVALIDATED, tx_hash=self.TX)])
+        assert "pernah final lalu ter-reorg" in teks
+
+    def test_expired_is_explained_as_normal(self) -> None:
+        teks = self.render([self.temuan(STATE_EXPIRED, "d1")])
+        assert "tidak perlu tindakan" in teks
+        assert "jatahnya sudah dilepas" in teks
+
+    # -- Yang tidak boleh ada di keluaran ---------------------------------- #
+
+    def test_no_full_hash_reaches_the_report(self) -> None:
+        teks = self.render([self.temuan(STATE_MISMATCH, tx_hash=self.TX)])
+        assert self.TX not in teks
+        assert reconciler.short_hash(self.TX) in teks
+
+    def test_the_report_is_ascii_only(self) -> None:
+        """Konsol operator bisa cp1252; satu karakter aneh cukup untuk gagal."""
+        teks = self.render(
+            [
+                self.temuan(STATE_MISMATCH, tx_hash=self.TX, differs=["to_addr"]),
+                self.temuan(STATE_EXPIRED, "d1"),
+                self.temuan(STATE_MATCHED, "9"),
+            ]
+        )
+        assert teks.isascii(), [c for c in teks if not c.isascii()]
+
+    def test_it_fits_one_screen(self) -> None:
+        """Laporan yang tidak muat satu layar berhenti dibaca."""
+        banyak = [self.temuan(STATE_MATCHED, str(i)) for i in range(200)]
+        banyak += [self.temuan(STATE_EXPIRED, f"d{i}") for i in range(50)]
+        teks = self.render(banyak)
+        baris = teks.splitlines()
+        assert len(baris) <= 24, len(baris)
+        assert max(len(b) for b in baris) <= 100, max(len(b) for b in baris)
+
+    def test_nothing_that_looks_like_a_secret_is_printed(self) -> None:
+        teks = self.render([self.temuan(STATE_MISMATCH, tx_hash=self.TX)])
+        for dilarang in ("postgresql://", "http://", "https://", "RPC_URL", "private_key"):
+            assert dilarang not in teks, dilarang
+
+
+class TestTheReportPathNeverWrites:
+    """Penjaga statis: jalur ``--report`` tidak boleh memanggil ``record``.
+
+    Yang sesungguhnya membuktikannya adalah tes integrasi yang membandingkan
+    ``reconciliations`` dan ``audit_log`` sebelum dan sesudah. Tes ini
+    menangkapnya lebih awal, dan menyebut sebabnya.
+    """
+
+    def source_of(self, name: str) -> str:
+        import inspect
+
+        return inspect.getsource(getattr(reconciler, name))
+
+    def test_report_once_does_not_call_record(self) -> None:
+        sumber = self.source_of("report_once")
+        assert "record(" not in sumber
+        assert "collect_findings(" in sumber
+
+    def test_run_report_does_not_call_reconcile_once(self) -> None:
+        sumber = self.source_of("run_report")
+        assert "reconcile_once" not in sumber
+        assert "report_once" in sumber
+
+    def test_the_clock_query_reads_only(self) -> None:
+        sql = reconciler.SELECT_DB_CLOCK.upper()
+        assert sql.strip().startswith("SELECT")
+        for verb in ("INSERT", "UPDATE", "DELETE"):
+            assert verb not in sql
+
+    def test_the_clock_comes_from_the_database(self) -> None:
+        """Arsitektur v1.1 prinsip 5: jam database, bukan jam proses."""
+        assert "now()" in reconciler.SELECT_DB_CLOCK
+        assert "datetime" not in reconciler.SELECT_DB_CLOCK
