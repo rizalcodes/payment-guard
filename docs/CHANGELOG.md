@@ -39,6 +39,47 @@ bagian 2). Lihat `docs/decisions.md`.
 
 ---
 
+## M6.7 — Watcher mengingat lebar rentang yang diterima node
+
+Belum ditag. Perubahan kode di `watcher.py` saja; tanpa migrasi, tanpa
+perubahan hak akses, tanpa perubahan `SCAN_BATCH_SIZE` default maupun `.env`.
+
+Lebar `eth_getLogs` yang terakhir diterima node disimpan di memori proses dan
+dipakai sebagai lebar awal potongan berikutnya. Batas node ditemukan **sekali
+per proses**, bukan sekali per potongan.
+
+| Satu batch 2000 blok | Permintaan | Terbuang | Waktu |
+|---|---|---|---|
+| Sebelum | 52 | 38 (73%) | 9,4 menit |
+| Sesudah (lebar diketahui) | **10** | **0** | **8 detik** |
+
+**Koreksi atas catatan M6.6.** Catatan pelaksana di entri M6.6 memakai laju
+chain ~30 blok/menit (asumsi blok 2 detik) dan menyimpulkan `--loop` akan
+mengejar sendiri. Laju sebenarnya **~340 blok/menit**: Watcher berjalan 214
+blok/menit, yaitu **0,6× laju chain**, jadi ia tertinggal permanen dan `--loop`
+sendiri tidak cukup. Asumsi itu keliru 11× dan kesimpulannya terbalik.
+
+Diagnosis (read-only, endpoint publik bawaan karena `RPC_URL` kosong): node
+menerima sampai **200 blok** (batas sebenarnya 202–209), menolak di atasnya
+dengan `'too large'`. **Penolakan ~14,5 detik, penerimaan ~0,75 detik** — 19×
+lebih lambat, jadi setiap tebakan lebar yang salah sangat mahal.
+
+Yang tidak berubah: pengecilan separuh, `SCAN_RANGE_FLOOR`,
+`scan_max_attempts`, penanganan kegagalan non-rentang, dan `_store_batch`
+beserta aturan "kursor hanya maju bersama batch yang ditulis".
+
+Batas yang diketahui: cold start menemukan 125, bukan 200, dan ingatan tidak
+pernah mencoba naik lagi — 62% kapasitas, masih jauh di atas laju chain.
+Alasannya di `docs/decisions.md`.
+
+**Opsi (b), ganti endpoint RPC, tetap keputusan pemilik** dan tidak dikerjakan.
+
+Runbook §8.3 langkah 1 diperbaiki: ia menyuruh membuka berkas kunci untuk
+membaca alamat, padahal M6.3.1 sudah menyediakan `guard wallet`. Pola itu yang
+ditolak M6.3.1 sebagai opsi B.
+
+---
+
 ## M6.6 — kursor watcher dimajukan lagi (dokumen saja)
 
 Belum ditag. **Tidak ada perubahan kode, migrasi, maupun hak akses.**

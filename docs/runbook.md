@@ -293,8 +293,15 @@ yang besar hanya memperlambat siklus pertama.
 
 ### 8.3 Mencari nomor blok funding
 
-1. Buka berkas kunci wallet Executor dan ambil field `address`. **Jangan**
-   menampilkan `private_key`, dan jangan menyalin berkasnya ke mana pun.
+1. Ambil alamat wallet Executor:
+
+   ```bash
+   guard wallet
+   ```
+
+   Keluarannya satu baris, `wallet 0x<alamat>`. **Jangan** membuka berkas
+   kuncinya untuk ini: `guard wallet` membaca berkas itu dan mencetak
+   alamatnya saja, tanpa pernah menampilkan `private_key`.
 2. Buka `https://sepolia.basescan.org/address/<alamat>`.
 3. Pilih tab **Transactions**. Transaksi paling bawah (paling tua) adalah
    transfer ETH dari faucet.

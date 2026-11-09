@@ -9,6 +9,95 @@ yang ditolak dan mengapa.
 
 ---
 
+## M6.7 — Watcher mengingat lebar rentang yang diterima node
+
+Lebar `eth_getLogs` yang terakhir **diterima** node disimpan di memori proses
+(`WatcherRuntime.accepted_range_width`) dan dipakai sebagai lebar awal potongan
+berikutnya — dalam batch yang sama maupun batch sesudahnya. 7 Nov 2026.
+
+### Koreksi atas catatan M6.6 saya
+
+Catatan pelaksana di entri M6.6 menyebut chain menghasilkan **~30 blok/menit**
+(asumsi blok 2 detik) dan menyimpulkan Watcher 266× lebih cepat, sehingga
+`guard watch --loop` akan mengejar sendiri.
+
+**Itu salah.** Laju chain yang diamati **~340 blok/menit** — asumsi saya keliru
+11×, dan kesimpulannya terbalik:
+
+| | Blok/menit |
+|---|---|
+| Chain (diamati) | 340 |
+| Watcher sebelum M6.7 (terukur) | **214** → **0,6×** |
+
+Watcher **tertinggal secara permanen**, jadi `--loop` sendiri tidak akan
+mengejar. Itu sebabnya selisih kursor terus membesar di M6.5 dan M6.6, dan
+saran saya di M6.6 tidak akan menyelesaikannya.
+
+### Angka diagnosis
+
+Pengukuran read-only terhadap endpoint yang benar-benar dipakai Watcher
+(`RPC_URL` kosong di `.env`, jadi `DEFAULT_RPC_URL` — endpoint **publik**):
+
+| Lebar rentang | Hasil | Waktu |
+|---|---|---|
+| 100, 125, 150, **200**, 201 | diterima | **0,66–1,36s** |
+| 210, 220, 225, 250, 300, 500, 1000, 2000 | ditolak, `'too large'` | **13,98–15,19s** |
+
+Batas sebenarnya di **202–209**; 200 nilai bulat yang aman (diterima 4/4).
+`250` ditolak 3/3 — batasnya stabil, bukan acak.
+
+Yang menjelaskan segalanya: **penolakan 19× lebih lambat daripada penerimaan.**
+Node bekerja dulu lalu menyerah. Algoritme "coba lalu kecilkan" karena itu
+membayar sangat mahal untuk setiap tebakan yang salah.
+
+Penyebabnya satu baris: `_fetch_one_range` menghitung `width = last - first + 1`
+dari **sisa batch** setiap kali dipanggil, jadi batas node ditemukan ulang di
+setiap potongan.
+
+| Satu batch 2000 blok | Permintaan | Terbuang | Waktu |
+|---|---|---|---|
+| Sebelum M6.7 | 52 | **38 (73%)** | **9,4 menit** |
+| Sesudah M6.7 (lebar diketahui) | **10** | **0** | **8 detik** |
+
+9,4 menit cocok dengan ~10 menit yang diamati pemilik, jadi modelnya valid.
+
+### Dua sifat yang perlu dicatat
+
+**Ingatan tidak diturunkan oleh potongan yang kecil karena sisa rentang.**
+Potongan terakhir yang hanya 50 blok diterima bukan karena batas node 50,
+melainkan karena memang hanya 50 blok yang tersisa. Tanpa penjaga itu, setiap
+batch akan menurunkan ingatannya sendiri dan batch berikutnya memakai empat
+kali lebih banyak permintaan dari yang perlu.
+
+**Ingatan bisa turun, bukan hanya naik.** Penolakan menurunkan ingatan ke lebar
+yang akan dicoba berikutnya, jadi endpoint yang memperketat batasnya di tengah
+proses tidak membuat setiap potongan membayar satu penolakan.
+
+**Yang tidak dilakukan: menaikkan ingatan kembali.** Cold start menemukan 125
+(2000→1000→500→250 ditolak, 125 diterima), bukan 200, dan ia tidak akan pernah
+mencoba naik. Itu 62% kapasitas — 16 permintaan alih-alih 10 untuk 2000 blok,
+12 detik alih-alih 8. Cukup jauh di atas laju chain, jadi menambah mekanisme
+probe-naik berarti kerumitan untuk masalah yang sudah tidak ada. Dicatat
+sebagai batas yang diketahui, bukan sebagai hal yang terlupa.
+
+**Tidak disimpan ke database.** Lebar itu pengetahuan tentang endpoint yang
+sedang dipakai, bukan tentang keadaan chain, dan endpoint bisa berganti di
+antara dua proses tanpa ada yang memberi tahu.
+
+### Opsi (b) tetap keputusan pemilik
+
+Mengganti endpoint RPC ke penyedia berbayar **tidak** dikerjakan. Penyedia
+berbayar biasanya menerima 10.000 blok per permintaan, yang akan membuat batas
+atas `SCAN_BATCH_SIZE` berguna dan menghapus pemecahan rentang hampir
+seluruhnya. Biayanya: `RPC_URL` menjadi **rahasia** (kunci API di URL), dan
+Arsitektur §2.1 sudah menandainya begitu.
+
+Keduanya tidak saling menggantikan: M6.7 membuat endpoint apa pun dipakai
+efisien, opsi (b) menaikkan plafonnya. M6.7 dikerjakan lebih dulu karena ia
+memperbaiki pemborosan yang akan tetap ada di endpoint baru.
+
+`SCAN_BATCH_SIZE` default dan `.env` operator **tidak** diubah.
+
 ## M6.6 — kursor watcher dimajukan lagi (tambahan atas M6.5)
 
 Tambahan atas [M6.5](#m65--pengecualian-kursor-watcher-dimajukan-opsi-b).
