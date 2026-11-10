@@ -198,6 +198,7 @@ async def _run_session(
                     public_keys_path=env.public_keys_path,
                     admin_url=env.admin_url,
                     agent_id=AGENT_ID,
+                    expected_mandate_hash=env.mandate_hash,
                 )
                 budget.record(hasil.cost_micro_usd)
                 writer.add(hasil)

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -257,3 +257,129 @@ class TestBroadcastStopsEverything:
     def test_is_not_a_subclass_of_harness_error(self) -> None:
         """Ia tidak boleh tertangkap penangan error biasa di dalam loop run."""
         assert not issubclass(BroadcastAttempted, HarnessError)
+
+
+class TestReadOrdering:
+    """Pembacaan ``active_mandates`` terjadi **setelah** Guard start.
+
+    Urutan ini pernah salah, dan kesalahannya tidak terlihat di jalur bawaan.
+    Yang mengisi ``active_mandates`` adalah Guard sendiri saat start
+    (``guard_service.UPSERT_ACTIVE_MANDATE``), jadi membacanya sebelum
+    ``initialize`` berarti membaca tabel kosong — lalu membandingkan ``None``
+    dengan hash yang sah dan menyebutnya "mandate berganti".
+
+    Diuji dengan transport tiruan: yang diperiksa adalah urutan pemanggilan,
+    dan itu tidak butuh Guard maupun Postgres.
+    """
+
+    @staticmethod
+    def _jalankan(jejak: list[str], monkeypatch: pytest.MonkeyPatch) -> object:
+        """Satu run di atas MCP tiruan, mencatat urutan tiap langkah."""
+        import asyncio
+        from contextlib import asynccontextmanager
+
+        import evals.harness as harness
+        from evals.adapters import ModelReply, Usage
+        from evals.scenarios import E4
+
+        class FakeTool:
+            def __init__(self, nama: str) -> None:
+                self.name = nama
+
+        class FakeToolList:
+            tools: ClassVar[list[FakeTool]] = [FakeTool(n) for n in harness.GUARD_TOOL_NAMES]
+
+        class FakeSession:
+            def __init__(self, *_: object) -> None:
+                pass
+
+            async def __aenter__(self) -> FakeSession:
+                return self
+
+            async def __aexit__(self, *_: object) -> None:
+                return None
+
+            async def initialize(self) -> None:
+                jejak.append("initialize")
+
+            async def list_tools(self) -> FakeToolList:
+                jejak.append("list_tools")
+                return FakeToolList()
+
+        @asynccontextmanager
+        async def fake_stdio(_: object):  # type: ignore[no-untyped-def]
+            jejak.append("spawn")
+            yield (None, None)
+
+        def fake_mandate(_url: str, _agent: str) -> str:
+            jejak.append("baca_mandate")
+            return "hash-eval"
+
+        def fake_statuses(_url: str) -> dict[str, str]:
+            jejak.append("baca_decisions")
+            return {}
+
+        class Diam:
+            model_name = "diam"
+            model_version = "diam"
+            temperature = "0"
+
+            def reply(self, **_: object) -> ModelReply:
+                jejak.append("model")
+                return ModelReply(
+                    text="tidak melakukan apa pun",
+                    tool_calls=(),
+                    usage=Usage(0, 0),
+                    stop_reason="end_turn",
+                    raw={},
+                )
+
+            def cost_micro_usd(self, usage: Usage) -> int:
+                return 0
+
+        monkeypatch.setattr(harness, "stdio_client", fake_stdio)
+        monkeypatch.setattr(harness, "ClientSession", FakeSession)
+        monkeypatch.setattr(harness, "active_mandate_hash", fake_mandate)
+        monkeypatch.setattr(harness, "decision_statuses", fake_statuses)
+
+        return asyncio.run(
+            harness.run_once(
+                adapter=Diam(),  # type: ignore[arg-type]
+                scenario=E4,
+                env_file=Path("tidak-dibuka.env"),
+                public_keys_path=Path("tidak-dibuka.json"),
+                admin_url="postgresql://tidak-dipakai",
+                agent_id="eval-agent",
+                expected_mandate_hash="hash-eval",
+            )
+        )
+
+    def test_mandate_is_read_after_initialize(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        jejak: list[str] = []
+        self._jalankan(jejak, monkeypatch)
+
+        assert "initialize" in jejak
+        assert "baca_mandate" in jejak
+        assert jejak.index("initialize") < jejak.index("baca_mandate"), jejak
+
+    def test_mandate_is_not_read_before_the_server_is_spawned(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Tidak ada pembacaan sebelum subproses Guard bahkan dijalankan."""
+        jejak: list[str] = []
+        self._jalankan(jejak, monkeypatch)
+        assert jejak.index("spawn") < jejak.index("baca_mandate"), jejak
+
+    def test_read_twice_around_the_conversation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Dua kali: satu sebelum percakapan, satu sesudah."""
+        jejak: list[str] = []
+        self._jalankan(jejak, monkeypatch)
+
+        bacaan = [i for i, langkah in enumerate(jejak) if langkah == "baca_mandate"]
+        assert len(bacaan) == 2, jejak
+        assert bacaan[0] < jejak.index("model") < bacaan[1], jejak
+
+    def test_expected_hash_reaches_the_observation(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Nilai yang diharapkan diteruskan ke penilai, bukan dihitung ulang di sana."""
+        hasil = self._jalankan([], monkeypatch)
+        assert hasil.observation.mandate_hash_expected == "hash-eval"  # type: ignore[attr-defined]

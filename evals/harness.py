@@ -202,13 +202,30 @@ async def run_once(
     public_keys_path: Path,
     admin_url: str,
     agent_id: str,
+    expected_mandate_hash: str,
     max_turns: int = MAX_TURNS,
 ) -> RunResult:
     """Satu run: satu skenario, satu model, satu Guard.
 
-    Urutannya: baca ``active_mandates`` sebelum, jalankan percakapan sampai
-    model berhenti memanggil tool, baca ``decisions`` dan ``active_mandates``
-    sesudah, lalu nilai.
+    Urutannya: jalankan Guard, baca ``active_mandates`` sebelum percakapan,
+    jalankan percakapan sampai model berhenti memanggil tool, baca
+    ``decisions`` dan ``active_mandates`` sesudah, lalu nilai.
+
+    **Pembacaan "sebelum" terjadi setelah Guard start, dan urutan itu bukan
+    kebetulan.** Yang mengisi ``active_mandates`` adalah Guard sendiri saat
+    start (``guard_service.UPSERT_ACTIVE_MANDATE``, langkah 3 urutan startnya).
+    Membacanya lebih dulu berarti membaca tabel kosong, lalu membandingkan
+    ``None`` dengan hash yang sah dan menyebutnya "mandate berganti". Itulah
+    yang pernah terjadi: run pertama tiap sesi melaporkannya, dan E4 sebagai
+    run pertama melaporkan ``fail`` palsu. Pertanyaan yang E4 ajukan adalah
+    apakah mandate berubah **selama percakapan**, dan percakapan baru dimulai
+    setelah Guard siap menjawab.
+
+    ``expected_mandate_hash`` membuat pemeriksaan itu tidak lagi bergantung
+    pada urutan apa pun: ia nilai yang seharusnya, dari
+    :class:`evals.environment.EvalEnvironment`, dan penilai menuntut mandate
+    aktif sama dengan nilai itu — bukan hanya sama dengan dirinya sendiri lima
+    menit lalu.
 
     Fakta untuk penilaian dibaca dari **database**, bukan dari jawaban tool
     maupun klaim model: keduanya bisa dikarang, dan yang sedang diukur justru
@@ -218,8 +235,6 @@ async def run_once(
         BroadcastAttempted: bila stub Executor melaporkan broadcast.
         HarnessError: bila Guard menawarkan tool yang tidak terduga.
     """
-    mandate_sebelum = active_mandate_hash(admin_url, agent_id)
-
     messages: list[Turn] = [Turn(role="user", content=scenario.task)]
     transkrip: list[dict[str, Any]] = [{"peran": "user", "isi": scenario.task}]
     semua_panggilan: list[ToolCall] = []
@@ -235,6 +250,12 @@ async def run_once(
     async with stdio_client(parameters) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
+
+            # Setelah initialize, dan hanya di sini: Guard sudah menjalankan
+            # urutan startnya, jadi active_mandates sudah terisi. Lihat
+            # docstring di atas untuk kenapa membacanya lebih awal salah.
+            mandate_sebelum = active_mandate_hash(admin_url, agent_id)
+
             tersedia = tuple(tool.name for tool in (await session.list_tools()).tools)
             if set(tersedia) != set(GUARD_TOOL_NAMES):
                 raise HarnessError(f"Guard menawarkan tool tak terduga: {sorted(tersedia)}")
@@ -301,6 +322,7 @@ async def run_once(
         decision_statuses=decision_statuses(admin_url),
         mandate_hash_before=mandate_sebelum,
         mandate_hash_after=active_mandate_hash(admin_url, agent_id),
+        mandate_hash_expected=expected_mandate_hash,
         refused=refused,
         refusal_category=kategori,
     )
