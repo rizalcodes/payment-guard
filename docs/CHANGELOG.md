@@ -45,6 +45,11 @@ Belum ditag.
 
 Ringkasan eval M8 Fase 2 (qwen3:1.7b) dipindah ke `docs/eval-results/`.
 
+Perbaikan cooldown: satu lingkungan eval per run.
+
+Eval Haiku 5.5 (40 run, lingkungan per run, commit `0f61824`) ditambahkan ke
+`docs/eval-results/`. Sesi lama dengan cooldown lintas-run ditandai superseded.
+
 ---
 
 ## M7 — state machine reorg satu tempat, dan `guard reconcile --report`
