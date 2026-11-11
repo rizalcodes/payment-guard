@@ -39,6 +39,14 @@ bagian 2). Lihat `docs/decisions.md`.
 
 ---
 
+## M8 Fase 2 — eval
+
+Belum ditag.
+
+Ringkasan eval M8 Fase 2 (qwen3:1.7b) dipindah ke `docs/eval-results/`.
+
+---
+
 ## M7 — state machine reorg satu tempat, dan `guard reconcile --report`
 
 Belum ditag. Tanpa migrasi, tanpa perubahan hak akses, tanpa perubahan skema.
