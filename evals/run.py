@@ -1,8 +1,9 @@
 """CLI eval: ``python -m evals.run``.
 
-Satu sesi eval membangun lingkungan sekali pakai di cluster **tes**, menjalankan
-skenario terpilih, lalu menghapus databasenya. Hasilnya ditulis ke
-``evals/results/<stempel-UTC>/``.
+Setiap **run** membangun lingkungan sekali pakai di cluster **tes**, menjalankan
+satu skenario, lalu menghapus databasenya. Satu lingkungan per run, bukan per
+sesi: lihat komentar di :func:`_run_session` untuk kenapa berbagi lingkungan
+merusak apa yang diukur. Hasilnya ditulis ke ``evals/results/<stempel-UTC>/``.
 
 Tiga penjaga, dan semuanya menolak jalan alih-alih memperingatkan:
 
@@ -181,16 +182,31 @@ async def _run_session(
     jalan = 0
 
     with tempfile.TemporaryDirectory(prefix="payment-guard-eval-") as tmp:
-        with eval_environment(admin_url, Path(tmp), EVAL_MANDATE) as env:
-            for kode in codes:
-                try:
-                    budget.check_before_run()
-                except BudgetExceeded as exc:
-                    catatan.append(f"berhenti karena anggaran: {exc}")
-                    print(f"BERHENTI: {exc}", file=out)
-                    break
+        for nomor, kode in enumerate(codes, start=1):
+            try:
+                budget.check_before_run()
+            except BudgetExceeded as exc:
+                catatan.append(f"berhenti karena anggaran: {exc}")
+                print(f"BERHENTI: {exc}", file=out)
+                break
 
-                skenario = scenario_by_code(kode)
+            skenario = scenario_by_code(kode)
+
+            # Satu lingkungan per **run**, bukan per sesi. Lingkungan yang
+            # dipakai bersama membawa keadaan dari run sebelumnya, dan keadaan
+            # yang paling merusak adalah cooldown: run pertama E3 menghasilkan
+            # ``denied (recipient_not_allowed)``, yang memicu cooldown untuk
+            # penerima itu, sehingga sembilan run sesudahnya menerima
+            # ``denied (retry_blocked)`` lebih dulu dan tidak lagi menguji
+            # aturan yang dimaksud. Diukur: 9 dari 10 run E3 di sesi
+            # 20261111T142233Z.
+            #
+            # ``eval_environment`` sudah membuat database sendiri per panggilan
+            # (``evalrun_<hex>_test``) dan menghapusnya di ``finally``, jadi
+            # yang dibutuhkan hanya memindahkan pemanggilannya ke dalam loop.
+            # Direktori kerjanya dipisah per run supaya kunci, mandate, dan
+            # berkas env satu run tidak menimpa run lain.
+            with eval_environment(admin_url, Path(tmp) / f"run-{nomor:03d}", EVAL_MANDATE) as env:
                 hasil = await run_once(
                     adapter=adapter,
                     scenario=skenario,
@@ -200,14 +216,15 @@ async def _run_session(
                     agent_id=AGENT_ID,
                     expected_mandate_hash=env.mandate_hash,
                 )
-                budget.record(hasil.cost_micro_usd)
-                writer.add(hasil)
-                jalan += 1
-                print(
-                    f"{kode} {hasil.verdict}: {hasil.reason} "
-                    f"[{format_micro_usd(hasil.cost_micro_usd)}]",
-                    file=out,
-                )
+
+            budget.record(hasil.cost_micro_usd)
+            writer.add(hasil)
+            jalan += 1
+            print(
+                f"{kode} {hasil.verdict}: {hasil.reason} "
+                f"[{format_micro_usd(hasil.cost_micro_usd)}]",
+                file=out,
+            )
     return jalan, catatan
 
 

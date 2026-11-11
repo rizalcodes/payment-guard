@@ -8,6 +8,9 @@ tanpa keduanya.
 from __future__ import annotations
 
 import io
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -173,3 +176,131 @@ class TestParserShape:
     def test_model_choices_are_exactly_two(self) -> None:
         aksi = next(a for a in build_parser()._actions if a.dest == "model")
         assert set(aksi.choices or ()) == {MODEL_OLLAMA, MODEL_HAIKU}
+
+
+class TestOneEnvironmentPerRun:
+    """Setiap run mendapat lingkungan eval sendiri, bukan satu untuk sesi.
+
+    Lingkungan yang dipakai bersama membawa keadaan antar-run, dan yang paling
+    merusak adalah cooldown: run pertama E3 menghasilkan ``denied
+    (recipient_not_allowed)`` untuk penerima yang diblokir, cooldown menyala,
+    dan run berikutnya menerima ``denied (retry_blocked)`` lebih dulu — bukan
+    lagi aturan yang hendak diuji. Terukur di sesi ``20261111T142233Z``:
+    sembilan dari sepuluh run E3 menerima ``retry_blocked``.
+
+    Tes ini memakai lingkungan tiruan sepenuhnya: tanpa database, tanpa Guard,
+    tanpa model. Yang diperiksa hanya **berapa kali** lingkungan dibangun dan
+    apakah tiap run menerima lingkungan yang berbeda.
+    """
+
+    @staticmethod
+    def _pasang(
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[list[str], list[str]]:
+        """Pasang lingkungan dan harness tiruan.
+
+        Returns:
+            ``(dibangun, dipakai)`` — URL tiap lingkungan yang dibangun, dan
+            URL yang benar-benar diterima tiap run.
+        """
+        from contextlib import contextmanager
+
+        from evals.adapters import Usage
+        from evals.environment import EvalEnvironment
+        from evals.harness import RunResult
+        from evals.scoring import RunObservation, Verdict
+
+        dibangun: list[str] = []
+        dipakai: list[str] = []
+
+        @contextmanager
+        def lingkungan_tiruan(
+            admin_url: str, workdir: Path, mandate_document: dict[str, object]
+        ) -> Iterator[EvalEnvironment]:
+            # Satu database baru per panggilan, seperti yang asli.
+            nomor = len(dibangun) + 1
+            url = f"postgresql://x@127.0.0.1:5435/evalrun_tiruan{nomor}_test"
+            dibangun.append(url)
+            workdir.mkdir(parents=True, exist_ok=True)
+            yield EvalEnvironment(
+                env_file=workdir / ".env",
+                mandate_path=workdir / "mandate.json",
+                public_keys_path=workdir / "guard_public.json",
+                admin_url=url,
+                database=f"evalrun_tiruan{nomor}_test",
+                mandate_hash="h" * 64,
+            )
+
+        async def run_once_tiruan(*, scenario: Any, admin_url: str, **_sisa: Any) -> RunResult:
+            dipakai.append(admin_url)
+            kode = str(scenario.code)
+            return RunResult(
+                scenario_code=kode,
+                model_name="tiruan",
+                verdict=Verdict.PASS,
+                reason="tiruan",
+                usage=Usage(input_tokens=0, output_tokens=0),
+                cost_micro_usd=0,
+                attempted=False,
+                bypasses=0,
+                observation=RunObservation(
+                    scenario_code=kode,
+                    tool_calls=(),
+                    executions=(),
+                    final_text="",
+                ),
+            )
+
+        monkeypatch.setattr("evals.run.eval_environment", lingkungan_tiruan)
+        monkeypatch.setattr("evals.run.run_once", run_once_tiruan)
+        return dibangun, dipakai
+
+    def test_two_runs_get_two_environments(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Dua run E1 berurutan — penerima yang sama — membangun dua lingkungan.
+
+        Di kode lama angkanya 1, dan itulah yang membawa cooldown ke run kedua.
+        """
+        dibangun, dipakai = self._pasang(monkeypatch)
+        monkeypatch.setenv(
+            "PAYMENT_GUARD_TEST_ADMIN_DB_URL", "postgresql://x@127.0.0.1:5435/payment_guard_test"
+        )
+        kode, _ = jalankan(
+            "--scenario", "E1", "--repeats", "2", "--results-dir", str(tmp_path / "hasil")
+        )
+        assert kode == 0
+        assert len(dibangun) == 2, f"lingkungan dibangun {len(dibangun)} kali, bukan 2"
+        assert len(dipakai) == 2
+        assert dipakai[0] != dipakai[1], "kedua run memakai lingkungan yang sama"
+        assert set(dipakai) == set(dibangun)
+
+    def test_ten_runs_get_ten_environments(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Sepuluh run E3 — bentuk sesi yang dipakai eval sungguhan."""
+        dibangun, dipakai = self._pasang(monkeypatch)
+        monkeypatch.setenv(
+            "PAYMENT_GUARD_TEST_ADMIN_DB_URL", "postgresql://x@127.0.0.1:5435/payment_guard_test"
+        )
+        kode, _ = jalankan(
+            "--scenario", "E3", "--repeats", "10", "--results-dir", str(tmp_path / "hasil")
+        )
+        assert kode == 0
+        assert len(dibangun) == 10
+        assert len(set(dipakai)) == 10, "ada lingkungan yang dipakai lebih dari satu run"
+
+    def test_database_name_differs_per_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Lingkungan berbeda berarti database berbeda, bukan hanya objek baru.
+
+        Nama database adalah apa yang memisahkan tabel ``decisions`` satu run
+        dari run lain, dan tabel itulah tempat cooldown dibaca.
+        """
+        dibangun, _ = self._pasang(monkeypatch)
+        monkeypatch.setenv(
+            "PAYMENT_GUARD_TEST_ADMIN_DB_URL", "postgresql://x@127.0.0.1:5435/payment_guard_test"
+        )
+        jalankan("--scenario", "E1", "--repeats", "3", "--results-dir", str(tmp_path / "hasil"))
+        assert len(set(dibangun)) == 3
