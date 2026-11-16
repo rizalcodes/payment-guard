@@ -9,6 +9,68 @@ yang ditolak dan mengapa.
 
 ---
 
+## Tag `m6` dipasang tanpa bukti on-chain — aturan penahan DIBATALKAN
+
+Keputusan CoS, 16 Nov 2026. Ini **membatalkan** aturan yang sebelumnya ditulis
+di tiga tempat, dan ketiganya harus dibaca bersama entri ini:
+
+| Tempat | Bunyi aturan yang dibatalkan |
+|---|---|
+| `docs/PRD_v2.1.md` §14, baris M7 | "Tag `m6` hanya setelah bukti itu ada." |
+| `docs/CHANGELOG.md`, bagian M6 | "Belum ditag. Tag `m6` hanya setelah tes live dan bukti on-chain ada." |
+| `docs/decisions.md`, entri "Bukti on-chain dan tes reorg terhadap node sungguhan: DITUNDA" (9 Nov 2026) | "**Tag `m6` tetap ditahan** sampai bukti itu ada." |
+
+Aturan itu dibuat supaya tag tidak menyiratkan sesuatu yang belum diuji. Yang
+dibatalkan adalah **penahanan tagnya**, bukan fakta yang menyebabkannya: bukti
+on-chain tetap belum ada, dan entri 9 Nov tetap berlaku sebagai catatan
+keadaan.
+
+**Tag dipasang di `3184482`** (M6.7, commit berlabel M6 terakhir sebelum M7),
+bukan di HEAD. HEAD saat keputusan ini adalah `7c37159`, yang sudah memuat M7
+dan M8 di atasnya — menandai HEAD sebagai `m6` akan membuat tag itu memuat
+pekerjaan dua milestone yang bukan miliknya.
+
+**Yang membuat pembatalan ini bisa dipertanggungjawabkan adalah pesan tagnya,
+bukan diamnya.** Pesan anotasi `m6` menyatakan batasnya sendiri:
+
+```
+M6 terverifikasi pada tes unit dan integrasi (PostgreSQL 16, chain tiruan).
+Bukti on-chain testnet BELUM ADA. Devnet lokal BELUM ADA.
+```
+
+Tag yang mengaku apa yang belum diujinya tidak menyesatkan siapa pun; tag yang
+diam tentangnya menyesatkan. Itu alasan pembatalan ini diterima, dan sekaligus
+syaratnya: `m6` tidak boleh di-reword menjadi pesan yang menghilangkan dua
+kalimat terakhir itu.
+
+**Diverifikasi sebelum tag**, di worktree detached bersih di luar repo dengan
+dependensi dari lockfile ber-hash (prosedur `docs/runbook.md` §7 pilihan A),
+pada `3184482`:
+
+| Pemeriksaan | Hasil |
+|---|---|
+| `pytest tests/ -q` | 2.625 lulus, 0 gagal, 5 di-deselect, 946 detik |
+| — unit / integrasi | 2.086 / 539 |
+| `ruff check`, `ruff format --check` | bersih, 98 berkas |
+| `mypy --strict` | nol isu di 9 berkas, cakupan hook **di commit itu** |
+
+Kelima tes yang di-deselect adalah tes live di `tests/integration/test_live.py`,
+di-deselect oleh `addopts` (`-m "not live"`), dan kelimanya hanya **membaca**
+dari chain.
+
+**Yang tetap belum ada, dan tidak diklaim tag ini:** devnet lokal, transaksi
+apa pun di Base Sepolia (wallet Executor punya 20 USDC tapi belum punya ETH
+gas, dan `executions` masih kosong), demo on-chain yang dijalankan sampai
+selesai, bukti on-chain untuk `unmatched_onchain` dan `mismatch`, dan tes
+ketahanan reorg terhadap node sungguhan. Definition of Done di PRD v2 §15 item
+pertama — "`docker compose up` + satu perintah demo menjalankan alur lengkap di
+testnet" — **belum terpenuhi**, dan tag `m6` tidak mengubah itu.
+
+Draf bagian "Status Verifikasi" untuk README ada di scratchpad sesi, belum
+masuk repo.
+
+---
+
 ## M7 — state machine reorg satu tempat, dan `guard reconcile --report`
 
 9 Nov 2026.
