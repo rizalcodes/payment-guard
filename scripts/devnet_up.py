@@ -486,8 +486,26 @@ def write_executor_wallet(path: Path, akun: AkunDevnet) -> None:
     Berkas ini memuat kunci **publik-diketahui** (akun Anvil), dan itu sebabnya
     ``load_wallet`` menolaknya di luar jaringan devnet.
 
+    Berkas yang sudah ada **tidak pernah ditimpa**, menyelaraskan fungsi ini
+    dengan ``guard keygen``. Sebelumnya ia memanggil ``write_text`` langsung,
+    yang memotong dan mengganti isi tanpa bertanya. Itu tidak berbahaya selama
+    kuncinya diturunkan deterministik dari mnemonic Anvil indeks 1 — isinya
+    selalu sama — tapi begitu indeks atau mnemonic-nya berubah, berkas kunci
+    akan tergantikan dalam diam sementara kunci Guard di sebelahnya dilindungi
+    penolakan.
+
+    Tiga keadaan:
+
+    * belum ada → ditulis
+    * sudah ada, isinya **identik** → dibiarkan, dianggap sukses. Menulis ulang
+      byte yang sama tidak menambah apa pun, dan tidak menimpa berarti satu hal
+      lebih sedikit yang bisa salah.
+    * sudah ada, isinya **berbeda** → **ditolak**. Keputusan menggantikan kunci
+      milik operator, bukan milik skrip.
+
     Raises:
-        DevnetError: bila path-nya berada di dalam akar repo.
+        DevnetError: bila path-nya di dalam akar repo, atau bila berkas yang
+            sudah ada memuat kunci yang berbeda.
     """
     akar = Path(__file__).resolve().parent.parent
     try:
@@ -501,11 +519,34 @@ def write_executor_wallet(path: Path, akun: AkunDevnet) -> None:
             "bisa ter-commit."
         )
 
+    isi = json.dumps({"address": akun.address, "private_key": akun.private_key}, indent=2) + "\n"
+
+    if path.exists():
+        try:
+            lama = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise DevnetError(
+                f"berkas kunci wallet {path} sudah ada tapi tidak bisa dibaca "
+                f"({exc.strerror}), jadi tidak bisa dipastikan sama. Kunci lama "
+                "tidak ditimpa."
+            ) from None
+        if lama == isi:
+            return
+        # Pesan ini TIDAK pernah mengutip isi berkas maupun kunci yang akan
+        # ditulis: ia hanya menyebut path dan apa yang harus dilakukan
+        # operator. Perbandingannya pun di memori, tidak dicetak.
+        raise DevnetError(
+            f"berkas kunci wallet {path} sudah ada dan memuat kunci yang "
+            "BERBEDA dari yang akan ditulis. Kunci lama TIDAK ditimpa.\n"
+            "Menggantikan kunci wallet adalah keputusan operator, bukan "
+            "keputusan skrip ini: alamat yang berbeda berarti saldo, nonce, "
+            "dan baris `executions` yang berbeda.\n"
+            "Pindahkan berkas itu ke tempat aman lalu jalankan ulang bila "
+            "penggantian memang dimaksudkan."
+        )
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps({"address": akun.address, "private_key": akun.private_key}, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    path.write_text(isi, encoding="utf-8")
     # Hak akses dipersempit bila OS-nya mendukung. Di Windows ini no-op yang
     # tidak berbahaya; di POSIX ia menutup berkas dari pengguna lain.
     try:
@@ -660,9 +701,16 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"  {baris}")
 
         executor = akun_anvil(INDEKS_EXECUTOR)
+        # Dicatat SEBELUM menulis: `write_executor_wallet` membiarkan berkas
+        # yang isinya sudah identik, jadi "ditulis" dan "dipakai ulang" adalah
+        # dua hal berbeda dan laporannya tidak boleh menyamakan keduanya.
+        sudah_ada = wallet_key.exists()
         write_executor_wallet(wallet_key, executor)
         print(f"wallet Executor devnet: {executor.address}")
-        print(f"  kunci ditulis ke {wallet_key} (di luar repo; kuncinya tidak dicetak)")
+        if sudah_ada:
+            print(f"  kunci sudah ada dan identik, dibiarkan: {wallet_key}")
+        else:
+            print(f"  kunci ditulis ke {wallet_key} (di luar repo; kuncinya tidak dicetak)")
     except DevnetError as exc:
         print(f"gagal: {exc}", file=sys.stderr)
         return 1

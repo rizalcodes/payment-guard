@@ -590,3 +590,133 @@ class TestKeygenDecision:
         publik = tmp_path / "p.json"
         publik.write_text('{"keys": []}', encoding="utf-8")
         assert keygen_decision(tmp_path / "s.json", publik) == "buat"
+
+
+class TestTheWalletFileIsNeverOverwritten:
+    """`write_executor_wallet` menyelaraskan diri dengan `guard keygen`.
+
+    Sebelum perbaikan ini ia memanggil ``write_text`` langsung, yang memotong
+    dan mengganti isi tanpa bertanya — sementara ``guard keygen`` di sebelahnya
+    menolak menimpa. Asimetri itu tidak berbahaya selama kunci diturunkan
+    deterministik dari mnemonic indeks 1, tapi berhenti aman begitu indeksnya
+    berubah.
+    """
+
+    @staticmethod
+    def _wallet(tmp_path: Path) -> Path:
+        return tmp_path / "luar" / "wallet.json"
+
+    def test_a_missing_file_is_written(self, tmp_path: Path) -> None:
+        import json
+
+        from scripts.devnet_up import INDEKS_EXECUTOR, akun_anvil, write_executor_wallet
+
+        path = self._wallet(tmp_path)
+        akun = akun_anvil(INDEKS_EXECUTOR)
+        write_executor_wallet(path, akun)
+
+        assert path.exists()
+        assert json.loads(path.read_text(encoding="utf-8"))["address"] == akun.address
+
+    def test_an_identical_file_is_left_alone_and_counts_as_success(self, tmp_path: Path) -> None:
+        """Tidak menimpa berarti satu hal lebih sedikit yang bisa salah."""
+        from scripts.devnet_up import INDEKS_EXECUTOR, akun_anvil, write_executor_wallet
+
+        path = self._wallet(tmp_path)
+        akun = akun_anvil(INDEKS_EXECUTOR)
+        write_executor_wallet(path, akun)
+        sebelum = path.read_bytes()
+        mtime_sebelum = path.stat().st_mtime_ns
+
+        # Tidak melempar: isinya identik.
+        write_executor_wallet(path, akun)
+
+        assert path.read_bytes() == sebelum
+        assert path.stat().st_mtime_ns == mtime_sebelum, "berkas identik tidak boleh ditulis ulang"
+
+    def test_a_different_key_is_refused(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import (
+            INDEKS_DEPLOYER,
+            INDEKS_EXECUTOR,
+            akun_anvil,
+            write_executor_wallet,
+        )
+
+        path = self._wallet(tmp_path)
+        write_executor_wallet(path, akun_anvil(INDEKS_EXECUTOR))
+        sebelum = path.read_bytes()
+
+        with pytest.raises(DevnetError) as info:
+            write_executor_wallet(path, akun_anvil(INDEKS_DEPLOYER))
+
+        pesan = str(info.value)
+        assert str(path) in pesan
+        assert "TIDAK ditimpa" in pesan
+        assert path.read_bytes() == sebelum, "berkas lama harus utuh setelah penolakan"
+
+    def test_the_refusal_quotes_neither_key(self, tmp_path: Path) -> None:
+        """Pesan penolakan tidak boleh memuat hex kunci, lama maupun baru."""
+        from scripts.devnet_up import (
+            INDEKS_DEPLOYER,
+            INDEKS_EXECUTOR,
+            akun_anvil,
+            write_executor_wallet,
+        )
+
+        lama = akun_anvil(INDEKS_EXECUTOR)
+        baru = akun_anvil(INDEKS_DEPLOYER)
+        path = self._wallet(tmp_path)
+        write_executor_wallet(path, lama)
+
+        with pytest.raises(DevnetError) as info:
+            write_executor_wallet(path, baru)
+
+        pesan = str(info.value)
+        for kunci in (lama.private_key, baru.private_key):
+            assert kunci not in pesan
+            assert kunci[2:] not in pesan
+
+    def test_the_refusal_message_has_no_64_hex_run_at_all(self, tmp_path: Path) -> None:
+        """Penjaga yang lebih luas: tidak ada 64 hex berurutan di pesannya."""
+        import re
+
+        from scripts.devnet_up import (
+            INDEKS_DEPLOYER,
+            INDEKS_EXECUTOR,
+            akun_anvil,
+            write_executor_wallet,
+        )
+
+        path = self._wallet(tmp_path)
+        write_executor_wallet(path, akun_anvil(INDEKS_EXECUTOR))
+        with pytest.raises(DevnetError) as info:
+            write_executor_wallet(path, akun_anvil(INDEKS_DEPLOYER))
+        assert re.search(r"[0-9a-fA-F]{64}", str(info.value)) is None
+
+    def test_the_refusal_tells_the_operator_what_to_do(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import (
+            INDEKS_DEPLOYER,
+            INDEKS_EXECUTOR,
+            akun_anvil,
+            write_executor_wallet,
+        )
+
+        path = self._wallet(tmp_path)
+        write_executor_wallet(path, akun_anvil(INDEKS_EXECUTOR))
+        with pytest.raises(DevnetError) as info:
+            write_executor_wallet(path, akun_anvil(INDEKS_DEPLOYER))
+        pesan = str(info.value)
+        assert "Pindahkan" in pesan
+        assert "hapus" not in pesan.lower()
+
+    def test_a_corrupt_existing_file_is_refused_not_overwritten(self, tmp_path: Path) -> None:
+        """Isi yang bukan JSON pun tetap berbeda, jadi tetap ditolak."""
+        from scripts.devnet_up import INDEKS_EXECUTOR, akun_anvil, write_executor_wallet
+
+        path = self._wallet(tmp_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("bukan json", encoding="utf-8")
+
+        with pytest.raises(DevnetError):
+            write_executor_wallet(path, akun_anvil(INDEKS_EXECUTOR))
+        assert path.read_text(encoding="utf-8") == "bukan json"
