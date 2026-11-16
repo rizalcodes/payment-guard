@@ -833,3 +833,7 @@ hash-nya ada di `docs/CHANGELOG.md`.
 Commit `b675851` (M5.1) ternyata sudah benar dan **tidak** disentuh. Menulis
 ulang commit yang tidak perlu ditulis ulang hanya memindahkan hash dan
 membatalkan tag tanpa memperbaiki apa pun.
+
+## 2026-11-17 — kunci devnet yatim dihapus
+
+2026-11-17: Kunci devnet yatim guard-2026-11-dfb8 dihapus oleh pemilik. Bukti: tidak cocok dengan registri aktif cb0a, tidak dirujuk .env.devnet, nol envelope di payment_guard_devnet.
