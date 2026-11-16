@@ -9,6 +9,39 @@ yang ditolak dan mengapa.
 
 ---
 
+## Commit yang menyentuh `.env*` atau `tests/` wajib lewat suite integrasi
+
+Keputusan CoS, 16 Nov 2026, setelah `master` merah selama satu commit.
+
+**Aturannya:** setiap commit yang menyentuh berkas `.env*` atau apa pun di
+`tests/` **wajib** menjalankan suite integrasi penuh lebih dulu, sesuai
+prosedur `docs/runbook.md` §7. `pre-commit run --all-files` **tidak cukup**.
+
+**Kejadiannya.** Commit `772012f` menambahkan `.env.devnet.example` ke indeks
+git. Pre-commit hijau, `git status` bersih, dan commit itu masuk. Suite
+integrasi tidak dijalankan — dan di dalamnya ada
+`tests/integration/test_gitignore.py::TestNoSecretsInTheIndex::test_only_example_env_files_are_tracked`,
+yang menegaskan bahwa satu-satunya berkas ber-awalan `.env` di indeks adalah
+contoh yang terdaftar di `MUST_BE_TRACKABLE`. Berkas baru itu tidak terdaftar,
+jadi `master` merah sejak `772012f` sampai perbaikannya masuk.
+
+**Yang membuatnya pantas menjadi aturan, bukan sekadar catatan:** berkas tes
+itu sudah memperingatkan jebakan ini, di komentar tepat di atas daftarnya,
+lengkap dengan preseden M5.1 di mana hal yang sama terjadi pada
+`.env.test.example`. Peringatan yang ditulis dan tetap dilanggar berarti
+peringatannya berada di tempat yang hanya terbaca oleh orang yang sudah
+curiga. Aturan ini memindahkannya ke tempat yang dibaca sebelum commit.
+
+**Kenapa pre-commit tidak bisa menggantikannya.** Tes itu membaca **indeks
+git**, bukan direktori kerja. Berkas `.env*` baru lolos selama ia masih
+untracked, dan baru gagal setelah masuk indeks — yaitu setelah commit. Hook
+yang berjalan sebelum commit secara struktural tidak bisa melihatnya.
+
+Dua commit terkait: `772012f` yang memperkenalkan kegagalannya, dan commit
+perbaikan yang mendaftarkan `.env.devnet.example` serta menyebut sebabnya.
+
+---
+
 ## Tag `m6` dipasang tanpa bukti on-chain — aturan penahan DIBATALKAN
 
 Keputusan CoS, 16 Nov 2026. Ini **membatalkan** aturan yang sebelumnya ditulis
