@@ -9,6 +9,38 @@ yang ditolak dan mengapa.
 
 ---
 
+## Footer `Co-Authored-By` menjadi netral: `Claude <noreply@anthropic.com>`
+
+Keputusan CoS dan pemilik repo, 17 Nov 2026. Titik ganti kebijakan yang
+disengaja, berlaku untuk commit **baru**.
+
+**Sebelum:** `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`. Audit
+read-only atas seluruh riwayat (17 Nov 2026) menemukan 45 dari 48 commit
+memakai baris itu, nol memakai bentuk lain, dan tiga commit paling awal
+(`9949418`, `f29547b`, `76785ef`) tanpa footer sama sekali.
+
+**Sesudah:** `Co-Authored-By: Claude <noreply@anthropic.com>` — tanpa versi
+model. Commit pertama dengan bentuk ini adalah `01e88b9`.
+
+**Konsekuensi yang diterima:** `git log` kini memuat dua gaya, dan itu memang
+tanda di mana kebijakannya berganti. Commit lama **tidak** ditulis ulang.
+Menulis ulang 45 commit hanya untuk menyeragamkan footer akan memindahkan 45
+hash dan membatalkan sembilan tag, demi sesuatu yang tidak salah — persis
+pertimbangan yang dipakai di entri "M6.0 — atribusi commit yang keliru", di
+mana `b675851` dibiarkan karena ia sudah benar.
+
+**Kenapa netral.** Versi model di footer adalah klaim yang bisa jadi salah dan
+sulit diperiksa belakangan. Riwayat repo ini sudah pernah memuat satu footer
+yang keliru — `6c8adf6` menyebut Claude Haiku 5.5 untuk pekerjaan yang
+dikerjakan model lain, dan commit itu harus ditulis ulang menjadi `2c72a1d`
+untuk memperbaikinya. Baris netral menghapus seluruh kelas kesalahan itu: ia
+menyebut yang bisa dipertanggungjawabkan, dan tidak lebih.
+
+Yang **tidak** berubah: trailer `Claude-Session`, dan kewajiban bahwa pesan
+commit menyebut apa yang diuji dan apa yang belum.
+
+---
+
 ## `network` diteruskan sebagai parameter, bukan dibaca dari environment
 
 Keputusan CoS, 16 Nov 2026. Diimplementasi di `c194405`.
