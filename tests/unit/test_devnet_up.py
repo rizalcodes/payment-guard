@@ -1036,3 +1036,124 @@ class TestTheTokenAddressIsCheckedAgainstTheEnv:
         with pytest.raises(DevnetError) as info:
             require_token_matches_env(env, "0xabc")
         assert "belum terisi" in str(info.value)
+
+
+class TestWatcherAndReconcilerSettingsAreExplicit:
+    """Kelima setelan numerik wajib tertulis di `.env.devnet`, bukan diwarisi.
+
+    `.env.devnet` dibuat `bootstrap-roles`, yang hanya menulis lima URL
+    runtime. Kelima setelan di sini karena itu tidak pernah ada di berkas, dan
+    Watcher serta Reconciler memakai bawaan `config.py` **tanpa ada yang
+    menyadarinya** — ditemukan saat prapemeriksaan skenario (a).
+
+    Nilainya dibandingkan dengan konstanta `DEFAULT_*`, **bukan dengan angka
+    yang ditulis ulang di tes ini**: dua salinan angka yang sama akan
+    menyimpang, dan tes yang menyalin angka hanya menjaga salinannya sendiri.
+    """
+
+    def test_all_five_keys_are_present(self) -> None:
+        from scripts.devnet_up import watcher_and_reconciler_settings
+
+        from payment_guard.config import RECONCILER_ENV_VARS, WATCHER_ENV_VARS
+
+        setelan = watcher_and_reconciler_settings()
+        wajib = {
+            WATCHER_ENV_VARS["confirmations"],
+            WATCHER_ENV_VARS["reorg_lookback"],
+            WATCHER_ENV_VARS["scan_batch_size"],
+            WATCHER_ENV_VARS["interval_seconds"],
+            RECONCILER_ENV_VARS["deadline_seconds"],
+        }
+        assert set(setelan) == wajib
+
+    def test_each_value_equals_the_config_default(self) -> None:
+        """Diambil dari konstanta, bukan ditulis ulang sebagai angka."""
+        from scripts.devnet_up import watcher_and_reconciler_settings
+
+        from payment_guard.config import (
+            DEFAULT_CONFIRMATIONS,
+            DEFAULT_RECONCILE_DEADLINE_SECONDS,
+            DEFAULT_REORG_LOOKBACK,
+            DEFAULT_SCAN_BATCH_SIZE,
+            DEFAULT_WATCHER_INTERVAL_SECONDS,
+            RECONCILER_ENV_VARS,
+            WATCHER_ENV_VARS,
+        )
+
+        setelan = watcher_and_reconciler_settings()
+        assert setelan[WATCHER_ENV_VARS["confirmations"]] == str(DEFAULT_CONFIRMATIONS)
+        assert setelan[WATCHER_ENV_VARS["reorg_lookback"]] == str(DEFAULT_REORG_LOOKBACK)
+        assert setelan[WATCHER_ENV_VARS["scan_batch_size"]] == str(DEFAULT_SCAN_BATCH_SIZE)
+        assert setelan[WATCHER_ENV_VARS["interval_seconds"]] == str(
+            DEFAULT_WATCHER_INTERVAL_SECONDS
+        )
+        assert setelan[RECONCILER_ENV_VARS["deadline_seconds"]] == str(
+            DEFAULT_RECONCILE_DEADLINE_SECONDS
+        )
+
+    def test_reorg_lookback_exceeds_confirmations(self) -> None:
+        """`config.py` menolak konfigurasi Watcher bila tidak begitu."""
+        from scripts.devnet_up import watcher_and_reconciler_settings
+
+        from payment_guard.config import RECONCILER_ENV_VARS, WATCHER_ENV_VARS
+
+        setelan = watcher_and_reconciler_settings()
+        assert int(setelan[WATCHER_ENV_VARS["reorg_lookback"]]) > int(
+            setelan[WATCHER_ENV_VARS["confirmations"]]
+        )
+        assert RECONCILER_ENV_VARS["deadline_seconds"] in setelan
+
+    def test_the_deadline_is_not_the_misleading_template_value(self) -> None:
+        """60 detik bisa memunculkan `executed_not_settled` palsu.
+
+        Templat lama memuat 60, dan itu nilai yang tidak pernah berlaku. Tes
+        ini menolak nilai itu secara khusus, karena ia yang paling berbahaya
+        dari ketiga nilai templat lama.
+        """
+        from scripts.devnet_up import watcher_and_reconciler_settings
+
+        from payment_guard.config import RECONCILER_ENV_VARS
+
+        assert watcher_and_reconciler_settings()[RECONCILER_ENV_VARS["deadline_seconds"]] != "60"
+
+    def test_every_value_is_a_positive_integer_string(self) -> None:
+        from scripts.devnet_up import watcher_and_reconciler_settings
+
+        for kunci, nilai in watcher_and_reconciler_settings().items():
+            assert nilai.isdigit(), kunci
+            assert int(nilai) > 0, kunci
+
+    def test_applying_them_adds_exactly_those_keys(self) -> None:
+        """Terapkan ke env tiruan: kelima kunci bertambah, sisanya utuh."""
+        from scripts.devnet_up import apply_env_updates, watcher_and_reconciler_settings
+
+        setelan = watcher_and_reconciler_settings()
+        sebelum = "GUARD_DB_URL=postgresql://rahasia\nUSDC_ADDRESS=0xabc\n"
+        sesudah = apply_env_updates(sebelum, setelan)
+
+        assert "GUARD_DB_URL=postgresql://rahasia" in sesudah
+        assert "USDC_ADDRESS=0xabc" in sesudah
+        for kunci, nilai in setelan.items():
+            assert f"{kunci}={nilai}" in sesudah
+
+        kunci_sebelum = {b.split("=", 1)[0] for b in sebelum.splitlines() if "=" in b}
+        kunci_sesudah = {b.split("=", 1)[0] for b in sesudah.splitlines() if "=" in b}
+        assert kunci_sesudah - kunci_sebelum == set(setelan)
+
+    def test_the_template_matches_the_settings(self) -> None:
+        """`.env.devnet.example` tidak boleh menjanjikan nilai lain.
+
+        Templat yang menjanjikan setelan yang tidak berlaku lebih buruk
+        daripada templat yang diam.
+        """
+        from scripts.devnet_up import watcher_and_reconciler_settings
+
+        akar = Path(__file__).resolve().parent.parent.parent
+        teks = (akar / ".env.devnet.example").read_text(encoding="utf-8")
+        baris = {
+            b.split("=", 1)[0]: b.split("=", 1)[1].strip()
+            for b in teks.splitlines()
+            if "=" in b and not b.strip().startswith("#")
+        }
+        for kunci, nilai in watcher_and_reconciler_settings().items():
+            assert baris.get(kunci) == nilai, f"{kunci}: templat {baris.get(kunci)!r} != {nilai!r}"

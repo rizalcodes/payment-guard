@@ -767,6 +767,45 @@ def apply_env_updates(text: str, updates: Mapping[str, str]) -> str:
     return "\n".join(keluaran) + "\n"
 
 
+def watcher_and_reconciler_settings() -> dict[str, str]:
+    """Setelan numerik Watcher dan Reconciler, dari konstanta bawaan produksi.
+
+    **Kenapa ini ada.** ``.env.devnet`` dibuat ``bootstrap-roles``, yang hanya
+    menulis lima URL runtime. Kelima setelan di bawah karena itu tidak pernah
+    ada di berkas, dan Watcher serta Reconciler memakai bawaan ``config.py``
+    tanpa ada yang menyadarinya. Templat ``.env.devnet.example`` memuat nilai
+    lain lagi (20, 2, 60), sehingga berkas templat **menyesatkan**: ia
+    menjanjikan setelan yang tidak pernah berlaku.
+
+    Nilainya diambil dari konstanta ``DEFAULT_*``, bukan ditulis ulang sebagai
+    angka, dan namanya dari ``WATCHER_ENV_VARS``/``RECONCILER_ENV_VARS``, bukan
+    ditulis ulang sebagai string. Dua salinan angka yang sama akan menyimpang;
+    satu sumber tidak bisa.
+
+    Nilai **templat** (`REORG_LOOKBACK=20`, `WATCHER_INTERVAL_SECONDS=2`,
+    `RECONCILE_DEADLINE_SECONDS=60`) sengaja **tidak** dipakai. Deadline 60
+    detik bisa memunculkan ``executed_not_settled`` palsu di skenario jalur
+    bahagia, sebelum Watcher sempat menaikkan settlement menjadi ``final``.
+    """
+    from payment_guard.config import (
+        DEFAULT_CONFIRMATIONS,
+        DEFAULT_RECONCILE_DEADLINE_SECONDS,
+        DEFAULT_REORG_LOOKBACK,
+        DEFAULT_SCAN_BATCH_SIZE,
+        DEFAULT_WATCHER_INTERVAL_SECONDS,
+        RECONCILER_ENV_VARS,
+        WATCHER_ENV_VARS,
+    )
+
+    return {
+        WATCHER_ENV_VARS["confirmations"]: str(DEFAULT_CONFIRMATIONS),
+        WATCHER_ENV_VARS["reorg_lookback"]: str(DEFAULT_REORG_LOOKBACK),
+        WATCHER_ENV_VARS["scan_batch_size"]: str(DEFAULT_SCAN_BATCH_SIZE),
+        WATCHER_ENV_VARS["interval_seconds"]: str(DEFAULT_WATCHER_INTERVAL_SECONDS),
+        RECONCILER_ENV_VARS["deadline_seconds"]: str(DEFAULT_RECONCILE_DEADLINE_SECONDS),
+    }
+
+
 def update_env_file(path: Path, updates: Mapping[str, str]) -> None:
     """Terapkan ``updates`` ke berkas env, tanpa pernah mencetak isinya.
 
@@ -1135,6 +1174,10 @@ def main(argv: list[str] | None = None) -> int:
                 "RPC_URL": args.rpc_url,
                 "CHAIN_ID": str(DEVNET_CHAIN_ID),
                 NETWORK_ENV_VAR: NETWORK_DEVNET,
+                # Setelan Watcher dan Reconciler, eksplisit. Tanpa ini mereka
+                # mewarisi bawaan config.py secara kebetulan, dan devnet
+                # berubah tanpa suara begitu bawaan itu berubah.
+                **watcher_and_reconciler_settings(),
             },
         )
         print(f"  {env_file.name} diperbarui (nilainya tidak dicetak)")
