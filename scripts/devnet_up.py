@@ -44,7 +44,7 @@ from typing import Any, Final
 
 from psycopg import conninfo
 
-from payment_guard.chains import NETWORK_DEVNET, NETWORK_ENV_VAR
+from payment_guard.chains import DEVNET_LOCAL, NETWORK_DEVNET, NETWORK_ENV_VAR
 
 #: Chain id devnet. Bawaan Anvil, tidak pernah muncul di jaringan publik.
 DEVNET_CHAIN_ID: Final = 31337
@@ -785,6 +785,168 @@ def update_env_file(path: Path, updates: Mapping[str, str]) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Mandate devnet
+# --------------------------------------------------------------------------- #
+#
+# Mandate **tidak ditandatangani**. Yang ada hanya `mandate_hash`: SHA-256 atas
+# JSON kanonik dengan awalan domain `payment-guard/mandate/v1\n`, tanpa kunci
+# sama sekali (`payment_guard.mandate.compute_mandate_hash`). Kunci tanda
+# tangan Guard tetap berperan, tapi perannya berbeda: `start_guard` memuat dan
+# memvalidasinya supaya Guard bisa menandatangani **envelope** sesudahnya, jadi
+# kunci yang rusak membuat Guard menolak start dan mandate pun tidak tertulis.
+#
+# Penulisannya lewat `guard_service.start_guard`, jalur resmi yang sama dengan
+# `guard serve`: satu transaksi dengan advisory lock `mandate:<agent_id>` yang
+# menyisipkan ke `mandates`, meng-upsert `active_mandates`, dan menulis audit
+# `mandate_loaded`. Bukan SQL tangan, dan bukan lewat subproses `guard serve` —
+# server MCP itu proses panjang, dan devnet hanya butuh efek startnya.
+#
+# Skema mandate TIDAK punya field alamat token: alamat tUSDC hidup di
+# `USDC_ADDRESS` di env, dipakai Executor dan Watcher. Kaitan mandate ke token
+# hasil deploy ditegakkan sebagai **pemeriksaan**, bukan sebagai field.
+
+#: Indeks akun Anvil yang menjadi penerima yang diizinkan di mandate devnet.
+#:
+#: Bukan 0 (deployer) dan bukan 1 (Executor): penerima yang sama dengan
+#: pengirim akan membuat saldo tidak berubah setelah pembayaran, dan skenario
+#: jalur bahagia tidak bisa membedakan "terkirim" dari "tidak terkirim".
+INDEKS_PENERIMA: Final = 2
+
+#: Identitas mandate devnet. Tetap, karena devnet selalu satu agent.
+DEVNET_AGENT_ID: Final = "devnet-agent"
+DEVNET_MANDATE_ID: Final = "devnet-m-001"
+
+
+def devnet_mandate_document(*, recipient: str) -> dict[str, object]:
+    """Dokumen mandate devnet, dibangun di runtime.
+
+    **Bukan berkas statis yang ter-commit**: penerimanya diturunkan dari
+    mnemonic Anvil saat skrip berjalan, jadi tidak ada alamat yang ditulis
+    sebagai literal di repo.
+
+    ``chain`` adalah ``devnet-local``, yang hanya sah di jaringan devnet dan
+    memetakan ke chain id 31337. Mandate ini **ditolak** Guard produksi, dan
+    itu memang pengamannya (lihat ``payment_guard.chains``).
+    """
+    return {
+        "mandate_id": DEVNET_MANDATE_ID,
+        "agent_id": DEVNET_AGENT_ID,
+        "chain": DEVNET_LOCAL,
+        "max_per_tx": "50",
+        "max_per_day": "200",
+        "human_approval_above": "25",
+        "allowed_recipients": [recipient],
+        "retry_cooldown_seconds": 600,
+        "aggregation_window_seconds": 3600,
+        "decision_ttl_seconds": 900,
+        "human_wait_ttl_seconds": 3600,
+    }
+
+
+def mandate_hash_of(document: dict[str, object]) -> str:
+    """Hash mandate lewat jalur yang **sama** dengan Guard.
+
+    Mendelegasikan ke ``payment_guard.mandate``, bukan menghitung SHA-256
+    sendiri: hash yang hampir benar — misalnya tanpa awalan domain — tidak akan
+    pernah cocok dengan yang dipakai Guard, dan perbedaannya hanya terlihat
+    jauh di hilir.
+    """
+    from payment_guard.mandate import compute_mandate_hash, load_mandate
+
+    return compute_mandate_hash(load_mandate(document, network=NETWORK_DEVNET))
+
+
+def write_devnet_mandate(path: Path, document: dict[str, object]) -> str:
+    """Tulis berkas mandate devnet. Mengembalikan ``mandate_hash``-nya.
+
+    Berbeda dari berkas kunci, mandate **boleh** ditimpa: ia bukan rahasia,
+    isinya deterministik dari akun Anvil, dan mandate yang berganti memang
+    hal yang Guard tangani lewat ``active_mandates``.
+
+    Raises:
+        DevnetError: bila dokumennya tidak sah sebagai mandate devnet.
+    """
+    from payment_guard.mandate import MandateError
+
+    try:
+        hash_mandate = mandate_hash_of(document)
+    except (MandateError, ValueError) as exc:
+        raise DevnetError(f"mandate devnet tidak sah: {exc}") from None
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return hash_mandate
+
+
+def require_token_matches_env(env_file: Path, token_address: str) -> None:
+    """Pastikan ``USDC_ADDRESS`` di env cocok dengan token hasil deploy.
+
+    Inilah kaitan mandate devnet ke alamat tUSDC: bukan sebuah field di
+    mandate — skema mandate tidak punya tempat untuk alamat token — melainkan
+    pemeriksaan bahwa lingkungan yang akan dipakai Guard, Executor, dan Watcher
+    menunjuk ke kontrak yang baru saja dideploy.
+
+    Tanpa pemeriksaan ini, devnet bisa berjalan dengan mandate baru di atas
+    ``USDC_ADDRESS`` basi — tepatnya keadaan yang terjadi setelah Docker
+    restart pada 17 Nov 2026.
+
+    Raises:
+        DevnetError: bila tidak cocok, atau bila nilainya tidak ada.
+    """
+    from payment_guard.config import read_env_file
+
+    nilai = (read_env_file(env_file).get("USDC_ADDRESS") or "").strip().lower()
+    if not nilai:
+        raise DevnetError(f"USDC_ADDRESS belum terisi di {env_file.name}")
+    if nilai != token_address.lower():
+        raise DevnetError(
+            f"USDC_ADDRESS di {env_file.name} menunjuk ke {nilai}, bukan ke token "
+            f"yang baru dideploy ({token_address.lower()}). Lingkungan basi."
+        )
+
+
+def install_devnet_mandate(env_file: Path, repo_root: Path) -> tuple[str, str]:
+    """Tulis mandate ke database lewat ``start_guard``, lalu tutup sesinya.
+
+    Jalur resminya, dan karena itu ia juga yang: mengambil advisory lock
+    ``mandate:<agent_id>``, menyisipkan ke ``mandates``, meng-upsert
+    ``active_mandates``, dan menulis audit ``mandate_loaded`` — semuanya dalam
+    satu transaksi.
+
+    Sesi Guard memegang lock sesi ``guard:<agent_id>`` di koneksi dedikasi,
+    jadi ia **wajib** ditutup; kalau tidak, Approvals CLI akan melihat Guard
+    masih hidup dan skenario berikutnya menilai keadaan yang salah.
+
+    Returns:
+        ``(mandate_hash, agent_id)``.
+
+    Raises:
+        DevnetError: bila Guard menolak start.
+    """
+    from payment_guard.config import load_guard_config
+    from payment_guard.guard_service import GuardStartupError, start_guard
+
+    try:
+        config = load_guard_config(env_file, repo_root=repo_root)
+    except Exception as exc:
+        raise DevnetError(
+            f"konfigurasi Guard devnet ditolak: {type(exc).__name__}: {exc}"
+        ) from None
+
+    try:
+        session = start_guard(config)
+    except GuardStartupError as exc:
+        raise DevnetError(f"Guard devnet menolak start: {exc}") from None
+
+    try:
+        return session.mandate_hash, session.agent_id
+    finally:
+        # Lock sesi dilepas di sini. Tanpa ini, `guard approvals` akan
+        # menyimpulkan Guard masih hidup.
+        session.close()
+
+
+# --------------------------------------------------------------------------- #
 # Langkah-langkah
 # --------------------------------------------------------------------------- #
 
@@ -969,17 +1131,40 @@ def main(argv: list[str] | None = None) -> int:
                 "EXECUTOR_KEY_PATH": str(wallet_key),
                 "GUARD_SIGNING_KEY_PATH": str(signing_key),
                 "GUARD_PUBLIC_KEYS_PATH": str(public_keys),
+                "GUARD_MANDATE_PATH": str(rahasia / "mandate_devnet.json"),
                 "RPC_URL": args.rpc_url,
                 "CHAIN_ID": str(DEVNET_CHAIN_ID),
                 NETWORK_ENV_VAR: NETWORK_DEVNET,
             },
         )
         print(f"  {env_file.name} diperbarui (nilainya tidak dicetak)")
+
+        # Kaitan mandate ke token hasil deploy: pemeriksaan, bukan field.
+        # Skema mandate tidak punya tempat untuk alamat token.
+        require_token_matches_env(env_file, token)
+
+        mandate_path = rahasia / "mandate_devnet.json"
+        penerima = akun_anvil(INDEKS_PENERIMA)
+        dokumen = devnet_mandate_document(recipient=penerima.address)
+        hash_berkas = write_devnet_mandate(mandate_path, dokumen)
+        print(f"mandate devnet: chain {DEVNET_LOCAL} (chain id {DEVNET_CHAIN_ID})")
+        print(f"  penerima diizinkan      : {penerima.address} (akun Anvil {INDEKS_PENERIMA})")
+        print(f"  berkas                  : {mandate_path}")
+        print(f"  mandate_hash dari berkas: {hash_berkas}")
+
+        hash_db, agent_id = install_devnet_mandate(env_file, akar)
+        print(f"  ditulis lewat start_guard, agent_id {agent_id}")
+        print(f"  mandate_hash di database: {hash_db}")
+        if hash_db != hash_berkas:
+            raise DevnetError(
+                f"mandate_hash berkas ({hash_berkas}) berbeda dari yang dimuat "
+                f"Guard ({hash_db}). Jalur hash skrip dan jalur Guard menyimpang."
+            )
     except DevnetError as exc:
         print(f"gagal: {exc}", file=sys.stderr)
         return 1
 
-    print("\nLangkah berikutnya (mandate devnet) belum diimplementasi di revisi ini.")
+    print("\ndevnet lokal siap. Skenario (a)-(e) belum dijalankan.")
     return 0
 
 

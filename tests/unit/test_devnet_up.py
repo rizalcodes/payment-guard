@@ -878,3 +878,161 @@ class TestEnvUpdatesArePreciseAndQuiet:
         with pytest.raises(DevnetError) as info:
             update_env_file(tmp_path / "tidak-ada", {"A": "1"})
         assert "bootstrap-roles" in str(info.value)
+
+
+class TestDevnetMandateIsBuiltAtRuntime:
+    """Mandate devnet dibangun skrip, bukan berkas statis yang ter-commit.
+
+    Dua sifat yang dijaga di sini, keduanya diminta pemilik: **tidak ada alamat
+    yang di-hardcode**, dan **chain 31337 yang dipakai**.
+    """
+
+    def test_the_chain_is_devnet_local_which_maps_to_31337(self) -> None:
+        from scripts.devnet_up import DEVNET_CHAIN_ID, devnet_mandate_document
+
+        from payment_guard.chains import NETWORK_DEVNET, chain_id_for
+
+        dokumen = devnet_mandate_document(recipient="0x" + "11" * 20)
+        assert dokumen["chain"] == "devnet-local"
+        assert chain_id_for(str(dokumen["chain"]), network=NETWORK_DEVNET) == DEVNET_CHAIN_ID
+        assert DEVNET_CHAIN_ID == 31337
+
+    def test_the_mandate_is_refused_on_the_production_network(self) -> None:
+        """Pengamannya: mandate devnet tidak bisa dimuat Guard produksi."""
+        from scripts.devnet_up import devnet_mandate_document
+
+        from payment_guard.mandate import MandateError, load_mandate
+
+        dokumen = devnet_mandate_document(recipient="0x" + "11" * 20)
+        with pytest.raises(MandateError):
+            load_mandate(dokumen)
+
+    def test_the_recipient_is_whatever_the_caller_passes(self) -> None:
+        """Penerima adalah parameter, bukan konstanta di dalam fungsi."""
+        from scripts.devnet_up import devnet_mandate_document
+
+        alamat = "0x" + "ab" * 20
+        assert devnet_mandate_document(recipient=alamat)["allowed_recipients"] == [alamat]
+
+    def test_the_recipient_is_derived_not_hardcoded(self) -> None:
+        """Pemanggil nyata menurunkannya dari mnemonic Anvil, indeks 2."""
+        from scripts.devnet_up import INDEKS_PENERIMA, akun_anvil
+
+        from payment_guard.chains import is_anvil_default_address
+
+        akun = akun_anvil(INDEKS_PENERIMA)
+        assert is_anvil_default_address(akun.address)
+
+    def test_the_recipient_is_neither_the_deployer_nor_the_executor(self) -> None:
+        """Penerima = pengirim membuat saldo tidak berubah setelah pembayaran.
+
+        Skenario jalur bahagia tidak bisa membedakan "terkirim" dari "tidak
+        terkirim" kalau itu terjadi.
+        """
+        from scripts.devnet_up import (
+            INDEKS_DEPLOYER,
+            INDEKS_EXECUTOR,
+            INDEKS_PENERIMA,
+            akun_anvil,
+        )
+
+        assert INDEKS_PENERIMA not in (INDEKS_DEPLOYER, INDEKS_EXECUTOR)
+        alamat = {
+            akun_anvil(i).address for i in (INDEKS_DEPLOYER, INDEKS_EXECUTOR, INDEKS_PENERIMA)
+        }
+        assert len(alamat) == 3
+
+    def test_the_script_hardcodes_no_ethereum_address(self) -> None:
+        """Nol literal alamat 40-hex di sumber skrip, kecuali daftar akun Anvil.
+
+        Daftar akun Anvil ada di `payment_guard.chains`, bukan di skrip ini, dan
+        ia memang harus literal: gunanya mengenali kunci publik supaya ditolak.
+        """
+        import re
+
+        akar = Path(__file__).resolve().parent.parent.parent
+        sumber = (akar / "scripts" / "devnet_up.py").read_text(encoding="utf-8")
+        assert re.search(r"0x[0-9a-fA-F]{40}", sumber) is None
+
+    def test_the_script_hardcodes_no_deployed_token_address(self) -> None:
+        """Alamat token hasil deploy berubah bila nonce deployer berbeda."""
+        akar = Path(__file__).resolve().parent.parent.parent
+        sumber = (akar / "scripts" / "devnet_up.py").read_text(encoding="utf-8")
+        for pernah_dipakai in (
+            "5fbdb2315678afecb367f032d93f642f64180aa3",
+            "9fe46736679d2d9a65f0992f2272de9f3c7fa6e0",
+        ):
+            assert pernah_dipakai not in sumber
+
+    def test_the_hash_goes_through_the_same_path_as_guard(self) -> None:
+        """Hash skrip harus identik dengan hash Guard untuk dokumen yang sama.
+
+        Hash yang hampir benar — misalnya tanpa awalan domain — tidak akan
+        pernah cocok, dan selisihnya hanya terlihat jauh di hilir.
+        """
+        from scripts.devnet_up import devnet_mandate_document, mandate_hash_of
+
+        from payment_guard.chains import NETWORK_DEVNET
+        from payment_guard.mandate import compute_mandate_hash, load_mandate
+
+        dokumen = devnet_mandate_document(recipient="0x" + "11" * 20)
+        langsung = compute_mandate_hash(load_mandate(dokumen, network=NETWORK_DEVNET))
+        assert mandate_hash_of(dokumen) == langsung
+
+    def test_writing_returns_the_hash_and_the_file_parses_back(self, tmp_path: Path) -> None:
+        import json
+
+        from scripts.devnet_up import devnet_mandate_document, mandate_hash_of, write_devnet_mandate
+
+        dokumen = devnet_mandate_document(recipient="0x" + "11" * 20)
+        path = tmp_path / "mandate.json"
+        hash_ditulis = write_devnet_mandate(path, dokumen)
+
+        assert hash_ditulis == mandate_hash_of(dokumen)
+        assert json.loads(path.read_text(encoding="utf-8")) == dokumen
+
+    def test_an_invalid_mandate_is_refused_before_writing(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import write_devnet_mandate
+
+        path = tmp_path / "mandate.json"
+        with pytest.raises(DevnetError) as info:
+            write_devnet_mandate(path, {"mandate_id": "x"})
+        assert "tidak sah" in str(info.value)
+        assert not path.exists(), "berkas tidak boleh ditulis kalau dokumennya ditolak"
+
+
+class TestTheTokenAddressIsCheckedAgainstTheEnv:
+    """Kaitan mandate ke tUSDC adalah pemeriksaan, bukan field.
+
+    Skema mandate tidak punya tempat untuk alamat token; alamat itu hidup di
+    `USDC_ADDRESS` di env, dipakai Executor dan Watcher.
+    """
+
+    def test_a_matching_address_passes(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import require_token_matches_env
+
+        env = tmp_path / ".env.devnet"
+        env.write_text("USDC_ADDRESS=0xAbC123\n", encoding="utf-8")
+        require_token_matches_env(env, "0xabc123")
+
+    def test_a_stale_address_is_refused(self, tmp_path: Path) -> None:
+        """Keadaan nyata setelah Docker restart 17 Nov 2026."""
+        from scripts.devnet_up import require_token_matches_env
+
+        env = tmp_path / ".env.devnet"
+        env.write_text(
+            "USDC_ADDRESS=0x1111111111111111111111111111111111111111\n", encoding="utf-8"
+        )
+        with pytest.raises(DevnetError) as info:
+            require_token_matches_env(env, "0x2222222222222222222222222222222222222222")
+        pesan = str(info.value)
+        assert "basi" in pesan
+
+    def test_an_empty_address_is_refused(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import require_token_matches_env
+
+        env = tmp_path / ".env.devnet"
+        env.write_text("USDC_ADDRESS=\n", encoding="utf-8")
+        with pytest.raises(DevnetError) as info:
+            require_token_matches_env(env, "0xabc")
+        assert "belum terisi" in str(info.value)
