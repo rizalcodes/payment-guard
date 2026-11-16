@@ -720,3 +720,161 @@ class TestTheWalletFileIsNeverOverwritten:
         with pytest.raises(DevnetError):
             write_executor_wallet(path, akun_anvil(INDEKS_EXECUTOR))
         assert path.read_text(encoding="utf-8") == "bukan json"
+
+
+class TestTokenArtifactIsValidated:
+    """Artefak forge diperiksa bentuknya, bukan hanya dibaca.
+
+    Artefak yang ada tapi tanpa bytecode menghasilkan transaksi deploy kosong
+    yang "berhasil" dan meninggalkan alamat tanpa kode di dalamnya — kegagalan
+    yang baru terlihat jauh di hilir.
+    """
+
+    @staticmethod
+    def _artefak(**ganti: object) -> dict[str, object]:
+        dasar: dict[str, object] = {
+            "abi": [
+                {"type": "function", "name": n}
+                for n in ("mint", "transfer", "balanceOf", "decimals")
+            ],
+            "bytecode": {"object": "0x60a06040"},
+        }
+        dasar.update(ganti)
+        return dasar
+
+    def test_a_well_formed_artifact_is_accepted(self, tmp_path: Path) -> None:
+        import json
+
+        from scripts.devnet_up import load_token_artifact
+
+        path = tmp_path / "TestUSDC.json"
+        path.write_text(json.dumps(self._artefak()), encoding="utf-8")
+        artefak = load_token_artifact(path)
+        assert artefak.bytecode == "0x60a06040"
+        assert len(artefak.abi) == 4
+
+    def test_a_missing_file_names_forge_build(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import load_token_artifact
+
+        with pytest.raises(DevnetError) as info:
+            load_token_artifact(tmp_path / "tidak-ada.json")
+        assert "forge build" in str(info.value)
+
+    def test_a_non_json_file_is_refused(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import load_token_artifact
+
+        path = tmp_path / "a.json"
+        path.write_text("bukan json", encoding="utf-8")
+        with pytest.raises(DevnetError):
+            load_token_artifact(path)
+
+    @pytest.mark.parametrize("bytecode", [{"object": ""}, {"object": None}, {}, None, ""])
+    def test_a_missing_bytecode_is_refused(self, tmp_path: Path, bytecode: object) -> None:
+        import json
+
+        from scripts.devnet_up import load_token_artifact
+
+        path = tmp_path / "a.json"
+        path.write_text(json.dumps(self._artefak(bytecode=bytecode)), encoding="utf-8")
+        with pytest.raises(DevnetError) as info:
+            load_token_artifact(path)
+        assert "bytecode" in str(info.value)
+
+    @pytest.mark.parametrize("abi", [[], None, "bukan list"])
+    def test_a_missing_abi_is_refused(self, tmp_path: Path, abi: object) -> None:
+        import json
+
+        from scripts.devnet_up import load_token_artifact
+
+        path = tmp_path / "a.json"
+        path.write_text(json.dumps(self._artefak(abi=abi)), encoding="utf-8")
+        with pytest.raises(DevnetError) as info:
+            load_token_artifact(path)
+        assert "ABI" in str(info.value)
+
+    @pytest.mark.parametrize("hilang", ["mint", "transfer", "balanceOf", "decimals"])
+    def test_a_missing_required_function_is_refused(self, tmp_path: Path, hilang: str) -> None:
+        """Keempat fungsi itu yang benar-benar dipakai devnet."""
+        import json
+
+        from scripts.devnet_up import load_token_artifact
+
+        abi = [
+            {"type": "function", "name": n}
+            for n in ("mint", "transfer", "balanceOf", "decimals")
+            if n != hilang
+        ]
+        path = tmp_path / "a.json"
+        path.write_text(json.dumps(self._artefak(abi=abi)), encoding="utf-8")
+        with pytest.raises(DevnetError) as info:
+            load_token_artifact(path)
+        assert hilang in str(info.value)
+
+    def test_the_real_artifact_in_the_repo_is_valid(self) -> None:
+        """Artefak nyata hasil `forge build` harus lolos pemeriksaan ini."""
+        from scripts.devnet_up import ARTEFAK_TOKEN, DESIMAL_WAJIB, load_token_artifact
+
+        akar = Path(__file__).resolve().parent.parent.parent
+        path = akar / ARTEFAK_TOKEN
+        if not path.exists():
+            pytest.skip("contracts/out belum dibangun di mesin ini")
+        artefak = load_token_artifact(path)
+        assert artefak.bytecode.startswith("0x")
+        assert DESIMAL_WAJIB == 6
+
+
+class TestEnvUpdatesArePreciseAndQuiet:
+    """`apply_env_updates` murni atas teks, supaya tes tidak menyentuh berkas
+    yang memuat kredensial.
+    """
+
+    def test_an_existing_key_is_replaced_in_place(self) -> None:
+        from scripts.devnet_up import apply_env_updates
+
+        hasil = apply_env_updates("A=1\nB=2\nC=3\n", {"B": "baru"})
+        assert hasil == "A=1\nB=baru\nC=3\n"
+
+    def test_order_and_comments_survive(self) -> None:
+        from scripts.devnet_up import apply_env_updates
+
+        teks = "# komentar\nA=1\n\n# lain\nB=2\n"
+        hasil = apply_env_updates(teks, {"A": "x"})
+        assert hasil.splitlines() == ["# komentar", "A=x", "", "# lain", "B=2"]
+
+    def test_a_new_key_is_appended(self) -> None:
+        from scripts.devnet_up import apply_env_updates
+
+        hasil = apply_env_updates("A=1\n", {"Z": "9"})
+        assert hasil.splitlines() == ["A=1", "Z=9"]
+
+    def test_untouched_lines_keep_their_values(self) -> None:
+        """Berkas ini memuat lima URL runtime berkredensial.
+
+        Menulis ulangnya dari nol akan kehilangan apa pun yang tidak dikenali
+        fungsi ini.
+        """
+        from scripts.devnet_up import apply_env_updates
+
+        teks = "GUARD_DB_URL=postgresql://rahasia\nUSDC_ADDRESS=\n"
+        hasil = apply_env_updates(teks, {"USDC_ADDRESS": "0xabc"})
+        assert "GUARD_DB_URL=postgresql://rahasia" in hasil
+        assert "USDC_ADDRESS=0xabc" in hasil
+
+    def test_a_commented_out_key_is_not_treated_as_a_setting(self) -> None:
+        from scripts.devnet_up import apply_env_updates
+
+        hasil = apply_env_updates("# A=lama\n", {"A": "baru"})
+        assert "# A=lama" in hasil
+        assert "A=baru" in hasil
+
+    def test_an_empty_value_is_filled(self) -> None:
+        from scripts.devnet_up import apply_env_updates
+
+        assert apply_env_updates("USDC_ADDRESS=\n", {"USDC_ADDRESS": "0x1"}) == "USDC_ADDRESS=0x1\n"
+
+    def test_update_file_refuses_a_missing_file(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import update_env_file
+
+        with pytest.raises(DevnetError) as info:
+            update_env_file(tmp_path / "tidak-ada", {"A": "1"})
+        assert "bootstrap-roles" in str(info.value)

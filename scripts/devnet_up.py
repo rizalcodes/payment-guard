@@ -37,11 +37,14 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 
 from psycopg import conninfo
+
+from payment_guard.chains import NETWORK_DEVNET, NETWORK_ENV_VAR
 
 #: Chain id devnet. Bawaan Anvil, tidak pernah muncul di jaringan publik.
 DEVNET_CHAIN_ID: Final = 31337
@@ -556,6 +559,232 @@ def write_executor_wallet(path: Path, akun: AkunDevnet) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Token uji: deploy dan pendanaan
+# --------------------------------------------------------------------------- #
+#
+# Deploy lewat web3 dari Python, **bukan** `forge create`. Alasannya jaringan
+# container: dari dalam container Foundry, `127.0.0.1` adalah container itu
+# sendiri, jadi `--rpc-url http://127.0.0.1:8545` menunjuk ke tempat yang
+# salah, dan `--network host` tidak bisa diandalkan di Docker Desktop Windows.
+# `forge build` tetap dipakai — ia berjalan offline dan menghasilkan artefak —
+# tapi transaksi deploy-nya dikirim dari proses ini.
+
+#: Artefak forge untuk kontrak token uji, relatif terhadap akar repo.
+ARTEFAK_TOKEN: Final = Path("contracts") / "out" / "TestUSDC.sol" / "TestUSDC.json"
+
+#: Desimal yang WAJIB dimiliki token devnet. Guard menolak start bila bukan 6.
+DESIMAL_WAJIB: Final = 6
+
+
+@dataclass(frozen=True)
+class ArtefakToken:
+    """ABI dan bytecode kontrak token uji."""
+
+    abi: list[Any]
+    bytecode: str
+
+
+def load_token_artifact(path: Path) -> ArtefakToken:
+    """Baca artefak ``forge build`` untuk ``TestUSDC``.
+
+    Memeriksa bentuknya, bukan hanya membacanya: artefak yang ada tapi tidak
+    memuat bytecode akan menghasilkan transaksi deploy kosong yang "berhasil"
+    dan meninggalkan alamat tanpa kode di dalamnya.
+
+    Raises:
+        DevnetError: bila berkasnya tidak ada, bukan JSON, atau bentuknya
+            tidak seperti artefak forge.
+    """
+    if not path.exists():
+        raise DevnetError(
+            f"artefak kontrak {path} tidak ada. Jalankan `forge build` lebih dulu "
+            "(lihat docs/devnet.md); ia berjalan offline dengan solc yang dipin."
+        )
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DevnetError(f"artefak kontrak {path} tidak bisa dibaca: {exc}") from None
+
+    abi = document.get("abi")
+    if not isinstance(abi, list) or not abi:
+        raise DevnetError(f"artefak {path} tidak memuat ABI")
+
+    mentah = document.get("bytecode")
+    objek = mentah.get("object") if isinstance(mentah, dict) else mentah
+    if not isinstance(objek, str) or len(objek) < 4:
+        raise DevnetError(f"artefak {path} tidak memuat bytecode")
+
+    nama_fungsi = {e.get("name") for e in abi if e.get("type") == "function"}
+    for wajib in ("mint", "transfer", "balanceOf", "decimals"):
+        if wajib not in nama_fungsi:
+            raise DevnetError(f"ABI di {path} tidak punya fungsi {wajib!r}")
+
+    return ArtefakToken(abi=abi, bytecode=objek)
+
+
+def _web3(rpc_url: str) -> Any:
+    """Klien web3 untuk devnet. Skema dan host diperiksa lebih dulu."""
+    require_devnet_rpc(rpc_url)
+    from web3 import Web3
+
+    return Web3(Web3.HTTPProvider(rpc_url, request_kwargs={"timeout": 30}))
+
+
+def deploy_test_usdc(rpc_url: str, deployer: AkunDevnet, artefak: ArtefakToken) -> str:
+    """Deploy ``TestUSDC`` dari ``deployer``. Mengembalikan alamatnya, lowercase.
+
+    Raises:
+        DevnetError: bila transaksinya gagal, atau alamat hasilnya tidak
+            memuat kode.
+    """
+    from eth_account import Account
+
+    w3 = _web3(rpc_url)
+    akun = Account.from_key(deployer.private_key)
+    kontrak = w3.eth.contract(abi=artefak.abi, bytecode=artefak.bytecode)
+
+    tx = kontrak.constructor().build_transaction(
+        {
+            "from": akun.address,
+            "nonce": w3.eth.get_transaction_count(akun.address),
+            "chainId": DEVNET_CHAIN_ID,
+            "gas": 2_000_000,
+            "gasPrice": w3.eth.gas_price,
+        }
+    )
+    ditandatangani = akun.sign_transaction(tx)
+    tx_hash = w3.eth.send_raw_transaction(ditandatangani.raw_transaction)
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+
+    if receipt["status"] != 1:
+        raise DevnetError(f"deploy TestUSDC gagal, status receipt {receipt['status']}")
+    alamat = str(receipt["contractAddress"]).lower()
+
+    # Alamat tanpa kode berarti deploy yang "berhasil" tapi kosong.
+    if w3.eth.get_code(receipt["contractAddress"]) in (b"", b"0x"):
+        raise DevnetError(f"alamat {alamat} tidak memuat kode setelah deploy")
+
+    desimal = (
+        w3.eth.contract(address=receipt["contractAddress"], abi=artefak.abi)
+        .functions.decimals()
+        .call()
+    )
+    if desimal != DESIMAL_WAJIB:
+        raise DevnetError(
+            f"token di {alamat} punya decimals() {desimal}, bukan {DESIMAL_WAJIB}. "
+            "Guard menolak start dengan desimal lain."
+        )
+    return alamat
+
+
+def fund_executor_eth(rpc_url: str, address: str, wei: int) -> None:
+    """Setel saldo ETH wallet Executor lewat ``anvil_setBalance``.
+
+    Memakai cheatcode, bukan transfer: devnet tidak perlu mensimulasikan dari
+    mana ETH-nya datang, dan transfer akan menghabiskan nonce deployer yang
+    lebih berguna untuk hal lain.
+    """
+    rpc(rpc_url, "anvil_setBalance", [address, hex(wei)])
+
+
+def mint_tusdc(
+    rpc_url: str,
+    deployer: AkunDevnet,
+    token_address: str,
+    to: str,
+    amount: int,
+    abi: list[Any],
+) -> str:
+    """Cetak ``amount`` base unit tUSDC ke ``to``. Mengembalikan hash transaksi.
+
+    ``mint`` hanya boleh owner, dan owner-nya deployer.
+
+    Raises:
+        DevnetError: bila transaksinya gagal.
+    """
+    from eth_account import Account
+    from web3 import Web3
+
+    w3 = _web3(rpc_url)
+    akun = Account.from_key(deployer.private_key)
+    kontrak = w3.eth.contract(address=Web3.to_checksum_address(token_address), abi=abi)
+
+    tx = kontrak.functions.mint(Web3.to_checksum_address(to), amount).build_transaction(
+        {
+            "from": akun.address,
+            "nonce": w3.eth.get_transaction_count(akun.address),
+            "chainId": DEVNET_CHAIN_ID,
+            "gas": 200_000,
+            "gasPrice": w3.eth.gas_price,
+        }
+    )
+    ditandatangani = akun.sign_transaction(tx)
+    tx_hash = w3.eth.send_raw_transaction(ditandatangani.raw_transaction)
+    receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=60)
+    if receipt["status"] != 1:
+        raise DevnetError(f"mint tUSDC gagal, status receipt {receipt['status']}")
+    return "0x" + bytes(tx_hash).hex()
+
+
+def token_balance(rpc_url: str, token_address: str, holder: str, abi: list[Any]) -> int:
+    """Saldo tUSDC ``holder``, dalam base unit."""
+    from web3 import Web3
+
+    w3 = _web3(rpc_url)
+    kontrak = w3.eth.contract(address=Web3.to_checksum_address(token_address), abi=abi)
+    return int(kontrak.functions.balanceOf(Web3.to_checksum_address(holder)).call())
+
+
+# --------------------------------------------------------------------------- #
+# Menulis nilai ke .env.devnet
+# --------------------------------------------------------------------------- #
+
+
+def apply_env_updates(text: str, updates: Mapping[str, str]) -> str:
+    """Setel ``KEY=value`` di isi berkas env, pertahankan sisanya.
+
+    Fungsi murni atas teks, bukan atas berkas, supaya bisa diuji tanpa menulis
+    apa pun — dan supaya tidak ada tes yang perlu menyentuh berkas yang memuat
+    kredensial.
+
+    Baris yang kuncinya sudah ada **diganti di tempat**, menjaga urutan dan
+    komentar. Kunci yang belum ada ditambahkan di akhir. Baris lain tidak
+    disentuh: berkas ini memuat lima URL runtime berkredensial, dan menulis
+    ulangnya dari nol berarti kehilangan apa pun yang tidak dikenali fungsi
+    ini.
+    """
+    sisa = dict(updates)
+    keluaran: list[str] = []
+    for baris in text.splitlines():
+        telanjang = baris.strip()
+        if telanjang and not telanjang.startswith("#") and "=" in telanjang:
+            kunci = telanjang.split("=", 1)[0].strip()
+            if kunci in sisa:
+                keluaran.append(f"{kunci}={sisa.pop(kunci)}")
+                continue
+        keluaran.append(baris)
+    keluaran.extend(f"{kunci}={nilai}" for kunci, nilai in sisa.items())
+    return "\n".join(keluaran) + "\n"
+
+
+def update_env_file(path: Path, updates: Mapping[str, str]) -> None:
+    """Terapkan ``updates`` ke berkas env, tanpa pernah mencetak isinya.
+
+    Raises:
+        DevnetError: bila berkasnya tidak ada atau tidak bisa ditulis.
+    """
+    if not path.exists():
+        raise DevnetError(
+            f"{path} tidak ada. Jalankan bootstrap-roles lebih dulu; ia yang membuat berkas itu."
+        )
+    try:
+        lama = path.read_text(encoding="utf-8")
+        path.write_text(apply_env_updates(lama, updates), encoding="utf-8")
+    except OSError as exc:
+        raise DevnetError(f"{path} tidak bisa ditulis: {exc.strerror}") from None
+
+
+# --------------------------------------------------------------------------- #
 # Langkah-langkah
 # --------------------------------------------------------------------------- #
 
@@ -715,10 +944,42 @@ def main(argv: list[str] | None = None) -> int:
         print(f"gagal: {exc}", file=sys.stderr)
         return 1
 
-    print(
-        "\nLangkah berikutnya (deploy token uji, pendanaan, .env.devnet "
-        "lengkap, mandate devnet) belum diimplementasi di revisi ini."
-    )
+    try:
+        artefak = load_token_artifact(akar / ARTEFAK_TOKEN)
+        deployer = akun_anvil(INDEKS_DEPLOYER)
+        print(f"deploy TestUSDC dari {deployer.address} (akun Anvil 0)")
+        token = deploy_test_usdc(args.rpc_url, deployer, artefak)
+        print(f"  token uji (BUKAN USDC) di {token}, decimals() = {DESIMAL_WAJIB}")
+
+        fund_executor_eth(args.rpc_url, executor.address, ETH_UNTUK_EXECUTOR_WEI)
+        print(f"  ETH untuk Executor: {ETH_UNTUK_EXECUTOR_WEI / 10**18:.0f} ETH")
+
+        tx = mint_tusdc(
+            args.rpc_url, deployer, token, executor.address, TUSDC_UNTUK_EXECUTOR, artefak.abi
+        )
+        saldo = token_balance(args.rpc_url, token, executor.address, artefak.abi)
+        print(f"  mint tUSDC: tx {tx}")
+        print(f"  saldo Executor: {saldo} base unit ({saldo / 10**DESIMAL_WAJIB:.6f} tUSDC)")
+
+        update_env_file(
+            env_file,
+            {
+                "USDC_ADDRESS": token,
+                "EXECUTOR_WALLET_ADDRESS": executor.address,
+                "EXECUTOR_KEY_PATH": str(wallet_key),
+                "GUARD_SIGNING_KEY_PATH": str(signing_key),
+                "GUARD_PUBLIC_KEYS_PATH": str(public_keys),
+                "RPC_URL": args.rpc_url,
+                "CHAIN_ID": str(DEVNET_CHAIN_ID),
+                NETWORK_ENV_VAR: NETWORK_DEVNET,
+            },
+        )
+        print(f"  {env_file.name} diperbarui (nilainya tidak dicetak)")
+    except DevnetError as exc:
+        print(f"gagal: {exc}", file=sys.stderr)
+        return 1
+
+    print("\nLangkah berikutnya (mandate devnet) belum diimplementasi di revisi ini.")
     return 0
 
 
