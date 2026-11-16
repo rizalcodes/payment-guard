@@ -35,7 +35,16 @@ MUST_BE_IGNORED = (".env", ".env.migrator", ".env.test")
 #: commit, lalu berkasnya masuk indeks dan tes ini mulai gagal di master.
 #: Menambahkan berkas ``.env*`` berarti menambahkannya ke salah satu daftar di
 #: sini, pada commit yang sama.
-MUST_BE_TRACKABLE = (".env.example", ".env.migrator.example", ".env.test.example")
+MUST_BE_TRACKABLE = (
+    ".env.example",
+    ".env.migrator.example",
+    ".env.test.example",
+    # Templat devnet lokal. Ditambahkan di sini SETELAH commit yang
+    # menambahkannya ke indeks, bukan pada commit yang sama — persis kesalahan
+    # yang diperingatkan komentar di atas, diulangi sekali lagi. Lihat catatan
+    # M6.devnet di docs/CHANGELOG.md.
+    ".env.devnet.example",
+)
 
 
 @pytest.fixture(scope="module", autouse=True)

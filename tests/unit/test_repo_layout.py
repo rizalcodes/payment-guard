@@ -146,7 +146,7 @@ class TestCanonicalDocs:
     DERIVED = ("events.md", "schema.md")
 
     #: Prosedur manual operator.
-    OPERATIONAL = ("runbook.md",)
+    OPERATIONAL = ("runbook.md", "devnet.md")
 
     #: Catatan riwayat: keputusan dan apa yang terjadi per tag.
     #:
