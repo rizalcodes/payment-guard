@@ -1,0 +1,25 @@
+# Foundry untuk kontrak token UJI devnet lokal.
+#
+# Versi solc DIPIN. Tanpa pin, forge memilih versi yang cocok dengan pragma
+# dan hasil kompilasinya bisa berubah antar mesin — bytecode yang berbeda
+# berarti devnet yang berbeda, dan "berhasil di mesin saya" menjadi kalimat
+# yang tidak bisa diperiksa.
+#
+# Versi forge/anvil-nya sendiri dipin di docker-compose.yml lewat digest
+# image; lihat docs/devnet.md.
+
+[profile.default]
+src = "src"
+test = "test"
+out = "out"
+libs = []
+solc = "0.8.28"
+optimizer = true
+optimizer_runs = 200
+
+# Semua peringatan dijadikan error. Kontrak ini kecil dan ditulis sendiri,
+# jadi tidak ada alasan membiarkan satu peringatan pun lewat.
+#
+# Kuncinya `deny`, bukan `deny_warnings`: yang terakhir sudah deprecated di
+# build yang dipin dan mencetak peringatan sendiri.
+deny = "warnings"

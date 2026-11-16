@@ -28,6 +28,12 @@ executor_wallet*.json
 # --- Hasil eval (bisa memuat transkrip mentah) ---
 evals/results/
 
+# --- Artefak build kontrak devnet (forge) ---
+# Bytecode dan ABI dibangun ulang dari sumber dengan solc yang dipin di
+# contracts/foundry.toml, jadi ia tidak perlu ikut repo.
+contracts/out/
+contracts/cache/
+
 # --- Python ---
 .venv/
 venv/

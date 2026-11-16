@@ -119,6 +119,55 @@ Karena `anvil_reorg` ada di build ini, skenario reorg memakainya, bukan
 `anvil_reorg` menghasilkan hal yang sebenarnya ingin diuji — transaksi yang
 hilang dari rantai kanonik lalu bisa muncul lagi.
 
+## Kontrak token uji — BUKAN USDC
+
+Sumbernya di [../contracts/src/TestUSDC.sol](../contracts/src/TestUSDC.sol).
+
+> **Kontrak ini token UJI.** Ia **bukan** USDC, tidak diaudit, dan tidak
+> berhubungan dengan Circle maupun kontrak USDC mana pun. Ia hanya untuk devnet
+> lokal (chain id 31337) dan tidak boleh di-deploy ke jaringan lain.
+>
+> **Alamatnya berubah setiap devnet dibangun ulang.** Setiap `devnet_up`
+> men-deploy ulang dari nol, jadi `USDC_ADDRESS` di `.env.devnet` adalah nilai
+> sekali pakai. Alamat yang di-hardcode di mana pun akan salah pada build
+> berikutnya.
+
+| | |
+|---|---|
+| Nama | `Test USDC (devnet lokal)` |
+| Simbol | **`tUSDC`** — sengaja bukan `USDC`, supaya tidak mengundang salah baca di log maupun penjelajah blok |
+| `decimals()` | **6** — satu-satunya kesamaan yang disengaja dengan USDC, dan ia wajib: Guard menolak start bila bukan 6, dan seluruh aritmetika uangnya memakai base unit `10**6` |
+| Fungsi | `mint` (hanya owner), `transfer`, `approve`, `transferFrom`, `balanceOf`, `allowance`, `totalSupply` |
+| Yang **tidak** ada | pause, blocklist, permit, upgrade, burn, batas pasokan |
+
+Permukaannya sengaja kecil. Setiap fitur tambahan adalah hal yang harus dibaca
+ulang oleh orang yang meninjau devnet ini, tanpa menambah satu pun jaminan
+yang Payment Guard butuhkan.
+
+### Kompilasi dan tes, tanpa dependensi eksternal
+
+solc 0.8.28 sudah ada di dalam image Foundry yang dipin, dan versinya dipin
+lagi di `contracts/foundry.toml` — tanpa itu, bytecode bisa berbeda antar
+mesin, dan "berhasil di mesin saya" menjadi kalimat yang tidak bisa diperiksa.
+
+Tesnya **tidak** memakai `forge-std`. Pustaka itu harus diunduh
+(`forge install`), dan devnet ini dibangun di mesin yang jaringannya terbatas.
+Tiga cheatcode yang dibutuhkan (`prank`, `expectRevert`, `expectEmit`)
+dideklarasikan sebagai antarmuka kecil di berkas tesnya sendiri, sehingga
+seluruh kompilasi dan tes berjalan **offline**.
+
+```bash
+docker run --rm -v "D:\payment guard\contracts:/work" -w /work \
+  --entrypoint forge \
+  ghcr.io/foundry-rs/foundry:nightly-cd3767105be7fa27eae63743c26359cefa0214fb \
+  test -vv
+```
+
+Hasil pada 16 Nov 2026: **15 lulus, 0 gagal, 0 skipped**.
+
+Artefak build (`contracts/out/`, `contracts/cache/`) di-gitignore: ia dibangun
+ulang dari sumber dengan solc yang dipin.
+
 ## Catatan untuk yang menjalankan dari shell terbatas
 
 Pada mesin tempat devnet ini dibangun, `curl` tidak bisa menjangkau
