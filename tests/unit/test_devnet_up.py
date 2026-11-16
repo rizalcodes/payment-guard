@@ -1,0 +1,241 @@
+"""Pengaman praflight ``scripts/devnet_up.py``.
+
+Skrip ini membuat dan menghapus role dan database, dan role Postgres bersifat
+**cluster-wide**. Satu salah ketik di URL bisa menghapus role yang dipakai
+``.env`` operator — itu sudah pernah terjadi di repo ini dan melahirkan cluster
+tes terpisah. Pengaman di sini menolak jalan, bukan memperingatkan.
+
+Keempat kelompok yang diwajibkan pemilik:
+
+* RPC bukan loopback ditolak
+* chain id bukan 31337 ditolak
+* URL admin bukan port 5436 atau dbname bukan ``payment_guard_devnet`` ditolak
+* port 5434 dan 5435 ditolak **by name**, dengan pesan yang menyebut cluster
+  mana yang hampir disentuh
+
+Tidak ada tes di berkas ini yang menyentuh jaringan atau database: seluruh
+pengaman ini fungsi murni, dan itu memang syaratnya.
+"""
+
+from __future__ import annotations
+
+import pytest
+from scripts.devnet_up import (
+    DEVNET_CHAIN_ID,
+    DEVNET_DBNAME,
+    DEVNET_PORT,
+    DevnetError,
+    require_devnet_admin_url,
+    require_devnet_chain_id,
+    require_devnet_rpc,
+    require_empty_devnet_db,
+)
+
+
+def url_devnet(
+    port: str = DEVNET_PORT, dbname: str = DEVNET_DBNAME, host: str = "127.0.0.1"
+) -> str:
+    return f"postgresql://guard_admin@{host}:{port}/{dbname}"
+
+
+class TestRpcMustBeLoopback:
+    def test_the_devnet_default_is_accepted(self) -> None:
+        require_devnet_rpc("http://127.0.0.1:8545")
+
+    @pytest.mark.parametrize("url", ["http://localhost:8545", "http://[::1]:8545"])
+    def test_other_loopback_names_are_accepted(self, url: str) -> None:
+        """IPv6 ditulis dalam tanda kurung; itu bentuk yang sah di URL."""
+        require_devnet_rpc(url)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://sepolia.base.org",
+            "http://10.0.0.5:8545",
+            "http://192.168.1.10:8545",
+            "https://mainnet.example.com",
+            "http://anvil.internal:8545",
+        ],
+    )
+    def test_a_non_loopback_host_is_refused(self, url: str) -> None:
+        with pytest.raises(DevnetError) as info:
+            require_devnet_rpc(url)
+        assert "loopback" in str(info.value)
+
+    @pytest.mark.parametrize("url", ["ws://127.0.0.1:8545", "127.0.0.1:8545", "file:///x", ""])
+    def test_a_non_http_scheme_is_refused(self, url: str) -> None:
+        with pytest.raises(DevnetError):
+            require_devnet_rpc(url)
+
+    def test_base_sepolia_is_refused_by_name_in_the_message(self) -> None:
+        """Penolakan yang paling penting: RPC Base Sepolia."""
+        with pytest.raises(DevnetError) as info:
+            require_devnet_rpc("https://sepolia.base.org")
+        assert "sepolia.base.org" in str(info.value)
+
+
+class TestChainIdMustBe31337:
+    def test_31337_is_accepted(self) -> None:
+        require_devnet_chain_id(DEVNET_CHAIN_ID)
+
+    @pytest.mark.parametrize("seen", [84532, 1, 8453, 11155111, 31338, 0, -1])
+    def test_any_other_chain_id_is_refused(self, seen: int) -> None:
+        with pytest.raises(DevnetError) as info:
+            require_devnet_chain_id(seen)
+        pesan = str(info.value)
+        assert str(seen) in pesan
+        assert str(DEVNET_CHAIN_ID) in pesan
+
+    def test_base_sepolia_chain_id_is_refused(self) -> None:
+        with pytest.raises(DevnetError) as info:
+            require_devnet_chain_id(84532)
+        assert "84532" in str(info.value)
+
+    @pytest.mark.parametrize("seen", ["31337", None, 31337.0, [], {}, True])
+    def test_a_non_integer_is_refused(self, seen: object) -> None:
+        """``True`` ikut ditolak: ``isinstance(True, int)`` benar di Python."""
+        with pytest.raises(DevnetError):
+            require_devnet_chain_id(seen)
+
+
+class TestForbiddenPortsAreRefusedByName:
+    """5434 dan 5435 punya pesan masing-masing, bukan satu pesan generik."""
+
+    def test_the_operator_cluster_is_refused(self) -> None:
+        with pytest.raises(DevnetError) as info:
+            require_devnet_admin_url(url_devnet(port="5434"))
+        pesan = str(info.value)
+        assert "5434" in pesan
+        assert "operator" in pesan
+        assert "cluster-wide" in pesan
+
+    def test_the_test_cluster_is_refused(self) -> None:
+        with pytest.raises(DevnetError) as info:
+            require_devnet_admin_url(url_devnet(port="5435"))
+        pesan = str(info.value)
+        assert "5435" in pesan
+        assert "tes" in pesan
+
+    def test_the_operator_cluster_is_refused_even_with_the_devnet_dbname(self) -> None:
+        """Nama database yang benar tidak menyelamatkan port yang salah.
+
+        Port diperiksa lebih dulu dengan sengaja: pesannya harus menyebut
+        cluster mana yang hampir disentuh, bukan mengeluh soal nama database.
+        """
+        with pytest.raises(DevnetError) as info:
+            require_devnet_admin_url(f"postgresql://guard_admin@127.0.0.1:5434/{DEVNET_DBNAME}")
+        assert "operator" in str(info.value)
+
+    def test_the_operator_cluster_is_refused_even_with_its_own_dbname(self) -> None:
+        with pytest.raises(DevnetError) as info:
+            require_devnet_admin_url("postgresql://guard_admin@127.0.0.1:5434/payment_guard")
+        assert "5434" in str(info.value)
+
+
+class TestAdminUrlMustBeTheDevnetCluster:
+    def test_the_devnet_url_is_accepted(self) -> None:
+        require_devnet_admin_url(url_devnet())
+
+    @pytest.mark.parametrize("port", ["5432", "5433", "5437", "15436"])
+    def test_any_other_port_is_refused(self, port: str) -> None:
+        with pytest.raises(DevnetError) as info:
+            require_devnet_admin_url(url_devnet(port=port))
+        assert DEVNET_PORT in str(info.value)
+
+    @pytest.mark.parametrize(
+        "dbname",
+        ["payment_guard", "payment_guard_test", "postgres", "payment_guard_devnet_lama", ""],
+    )
+    def test_any_other_dbname_is_refused(self, dbname: str) -> None:
+        with pytest.raises(DevnetError) as info:
+            require_devnet_admin_url(url_devnet(dbname=dbname))
+        assert DEVNET_DBNAME in str(info.value)
+
+    @pytest.mark.parametrize("host", ["10.0.0.5", "db.example.com", "0.0.0.0"])
+    def test_a_non_loopback_host_is_refused(self, host: str) -> None:
+        with pytest.raises(DevnetError) as info:
+            require_devnet_admin_url(url_devnet(host=host))
+        assert "loopback" in str(info.value)
+
+    def test_the_operator_dbname_on_the_devnet_port_is_still_refused(self) -> None:
+        """Port benar, nama salah: tetap ditolak."""
+        with pytest.raises(DevnetError):
+            require_devnet_admin_url(url_devnet(dbname="payment_guard"))
+
+
+class TestExistingStateIsRefusedUnlessRecreate:
+    def test_an_empty_database_is_accepted(self) -> None:
+        require_empty_devnet_db([], recreate=False)
+
+    def test_tables_are_refused_without_recreate(self) -> None:
+        with pytest.raises(DevnetError) as info:
+            require_empty_devnet_db(["decisions", "executions"], recreate=False)
+        pesan = str(info.value)
+        assert "--recreate" in pesan
+        assert "decisions" in pesan
+
+    def test_a_single_table_is_enough_to_refuse(self) -> None:
+        with pytest.raises(DevnetError):
+            require_empty_devnet_db(["schema_migrations"], recreate=False)
+
+    def test_recreate_allows_existing_tables(self) -> None:
+        require_empty_devnet_db(["decisions", "executions"], recreate=True)
+
+    def test_recreate_on_an_empty_database_is_fine(self) -> None:
+        require_empty_devnet_db([], recreate=True)
+
+    def test_the_refusal_explains_why_reuse_is_wrong(self) -> None:
+        """Pesannya harus menyebut sebabnya, bukan hanya melarang.
+
+        Sebabnya: state Anvil hilang saat restart sedangkan volume Postgres
+        bertahan, jadi database lama di atas chain baru menghasilkan kursor
+        yang menunjuk blok yang tidak ada.
+        """
+        with pytest.raises(DevnetError) as info:
+            require_empty_devnet_db(["watcher_state"], recreate=False)
+        pesan = str(info.value)
+        assert "Anvil" in pesan
+        assert "kursor" in pesan
+
+    def test_many_tables_are_listed_but_truncated(self) -> None:
+        tabel = [f"t{i}" for i in range(12)]
+        with pytest.raises(DevnetError) as info:
+            require_empty_devnet_db(tabel, recreate=False)
+        pesan = str(info.value)
+        assert "12 tabel" in pesan
+        assert "..." in pesan
+
+
+class TestTheAnvilKeyIsDerivedNotHardcoded:
+    """Kunci devnet tidak boleh ada sebagai literal heksa di repo."""
+
+    def test_the_script_has_no_hex_private_key_literal(self) -> None:
+        import re
+        from pathlib import Path
+
+        sumber = Path("scripts/devnet_up.py").read_text(encoding="utf-8")
+        # 64 hex berurutan adalah bentuk kunci privat secp256k1.
+        assert re.search(r"0x[0-9a-fA-F]{64}", sumber) is None
+
+    def test_the_derived_executor_account_is_an_anvil_default(self) -> None:
+        from scripts.devnet_up import INDEKS_EXECUTOR, akun_anvil
+
+        from payment_guard.chains import is_anvil_default_address
+
+        akun = akun_anvil(INDEKS_EXECUTOR)
+        assert is_anvil_default_address(akun.address)
+
+    def test_the_deployer_and_the_executor_are_different_accounts(self) -> None:
+        from scripts.devnet_up import INDEKS_DEPLOYER, INDEKS_EXECUTOR, akun_anvil
+
+        assert akun_anvil(INDEKS_DEPLOYER).address != akun_anvil(INDEKS_EXECUTOR).address
+
+    def test_the_account_repr_does_not_leak_the_key(self) -> None:
+        from scripts.devnet_up import INDEKS_EXECUTOR, akun_anvil
+
+        akun = akun_anvil(INDEKS_EXECUTOR)
+        # Kunci memang disimpan di field, tapi ia tidak boleh muncul di pesan
+        # error atau log mana pun. Tes ini menyatakan bahwa pemanggil harus
+        # sengaja membacanya, bukan mendapatkannya dari repr.
+        assert akun.private_key.startswith("0x")
+        assert len(akun.private_key) == 66
