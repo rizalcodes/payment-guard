@@ -7,6 +7,10 @@
 !.env.example
 !.env.migrator.example
 !.env.test.example
+# .env.devnet -> devnet LOKAL (chain id 31337). Ter-ignore oleh `.env.*` di
+# atas; hanya templatnya yang di-track. Berkas itu memuat kunci default Anvil,
+# yang PUBLIK — lihat docs/devnet.md.
+!.env.devnet.example
 
 # File kunci (tanda tangan Guard, wallet Executor)
 *.key

@@ -79,8 +79,93 @@ services:
       timeout: 3s
       retries: 20
 
+  # --- DEVNET LOKAL ---------------------------------------------------------
+  #
+  # Chain lokal sekali pakai untuk membuktikan alur lengkap tanpa testnet
+  # publik. Profile `devnet`, jadi `docker compose up -d` biasa tidak
+  # menyentuhnya:
+  #
+  #     docker compose --profile devnet up -d anvil postgres_devnet
+  #
+  # Ini **devnet lokal**, bukan testnet. Chain id 31337, dan tidak ada
+  # hubungannya dengan Base Sepolia (84532).
+  #
+  # KUNCI DEFAULT ANVIL ADALAH PUBLIK. Mnemonic bawaannya diterbitkan di
+  # dokumentasi Foundry dan dipakai setiap pengembang di dunia. Jangan pernah
+  # memakainya di jaringan sungguhan, termasuk testnet publik: alamat-alamat
+  # itu dikuras bot dalam hitungan detik. Lihat docs/devnet.md.
+  anvil:
+    profiles: ["devnet"]
+    # Versi dipin ke satu commit, bukan `latest` dan bukan `nightly`.
+    # Foundry tidak lagi merilis tag semver stabil; yang ada hanya nightly
+    # bernama commit, jadi commit itulah pinnya.
+    #
+    #   anvil/forge 1.9.1-nightly
+    #   commit      cd3767105be7fa27eae63743c26359cefa0214fb
+    #   digest      sha256:d41b25e26c3b63f415a0e425115f57ac372299902cdeeaf521ecd6cf595bab0b
+    #
+    # Versi dan digest itu juga ditulis di docs/devnet.md, dan ada tes yang
+    # menjaga keduanya tidak menyimpang.
+    image: ghcr.io/foundry-rs/foundry:nightly-cd3767105be7fa27eae63743c26359cefa0214fb
+    container_name: payment-guard-anvil
+    # Tanpa `restart`: devnet tidak perlu hidup di luar sesi devnet, dan
+    # state-nya memang sekali pakai.
+    #
+    # `entrypoint` WAJIB di-override. ENTRYPOINT image ini adalah
+    # ["/bin/sh","-c"], jadi `command: ["anvil", "--host", "0.0.0.0"]` membuat
+    # hanya "anvil" menjadi skrip `-c` dan **seluruh flag sesudahnya hilang
+    # tanpa pesan error** — anvil lalu mendengar di 127.0.0.1 di dalam
+    # container, docker-proxy menerima koneksi, dan setiap permintaan RPC mati
+    # dengan "Remote end closed connection". Itu sudah terjadi sekali saat
+    # bagian ini dibangun.
+    entrypoint: ["anvil"]
+    command:
+      - "--host"
+      - "0.0.0.0"
+      - "--chain-id"
+      - "31337"
+    ports:
+      # Host 8545. Bukan 5434 (operator), bukan 5435 (tes), bukan 5436
+      # (Postgres devnet), dan bukan 3000/8000/5433/6380 yang dipakai project
+      # lain di mesin ini. Bind 127.0.0.1 saja.
+      - "127.0.0.1:8545:8545"
+    healthcheck:
+      # `cast` ada di image yang sama. Chain id dibandingkan apa adanya:
+      # 0x7a69 = 31337.
+      test: ["CMD-SHELL", "cast chain-id --rpc-url http://127.0.0.1:8545 | grep -qx 31337"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Cluster KETIGA, khusus devnet lokal. Terpisah dari cluster operator (5434)
+  # dan cluster tes (5435) karena alasan yang sama seperti postgres_test: role
+  # Postgres bersifat cluster-wide, dan skrip devnet membuat serta menghapus
+  # role. Devnet tidak boleh bisa merusak `.env` operator.
+  postgres_devnet:
+    profiles: ["devnet"]
+    image: postgres:16.10-alpine
+    container_name: payment-guard-postgres-devnet
+    environment:
+      POSTGRES_DB: payment_guard_devnet
+      POSTGRES_USER: guard_admin
+      POSTGRES_PASSWORD: devonly_not_a_secret
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      # Host 5436. BUKAN 5434 (operator) dan BUKAN 5435 (tes).
+      - "127.0.0.1:5436:5432"
+    volumes:
+      - payment-guard-pgdata-devnet:/var/lib/postgresql/data
+    command: ["postgres", "-c", "log_statement=none", "-c", "log_min_messages=warning"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guard_admin -d payment_guard_devnet"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
 volumes:
   payment-guard-pgdata:
     name: payment-guard-pgdata
   payment-guard-pgdata-test:
     name: payment-guard-pgdata-test
+  payment-guard-pgdata-devnet:
+    name: payment-guard-pgdata-devnet
