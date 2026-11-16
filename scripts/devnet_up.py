@@ -389,6 +389,132 @@ def recreate_devnet_database(admin_url: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Kunci: Guard signing, dan wallet Executor
+# --------------------------------------------------------------------------- #
+#
+# Ketiga berkas kunci WAJIB di luar akar repo. Itu bukan preferensi: config.py
+# menolaknya lewat `_require_outside_repo` di tiga tempat — kunci tanda tangan
+# Guard (baris 309), kunci tanda tangan Approvals (407), dan kunci wallet
+# Executor (537).
+#
+# Perlu dicatat karena membingungkan: **bawaan `guard keygen` justru di dalam
+# repo** (`keys/guard_signing.json`), dan path itu akan ditolak Guard saat
+# start. Devnet karena itu selalu memberi path eksplisit.
+
+#: Nama direktori rahasia devnet, **di samping** akar repo.
+#:
+#: Di luar repo, jadi ia tidak bisa ter-commit bahkan karena kecelakaan — lebih
+#: kuat daripada mengandalkan `.gitignore`, yang hanya menahan berkas yang
+#: secara teknis masih bisa di-`git add -f`.
+DEVNET_KEY_DIRNAME: Final = "payment-guard-devnet-rahasia"
+
+
+def devnet_key_dir(repo_root: Path) -> Path:
+    """Direktori rahasia devnet, di samping akar repo.
+
+    Bukan di dalam repo: ``config.py`` menolak kunci di dalam akar repo, dan
+    di luar repo berarti git tidak pernah melihatnya sama sekali.
+    """
+    return repo_root.parent / DEVNET_KEY_DIRNAME
+
+
+def keygen_command(signing_key_file: Path, public_keys_file: Path) -> list[str]:
+    """Argumen ``guard keygen`` untuk devnet.
+
+    Flagnya dari ``--help``: ``--signing-key-file`` dan ``--public-keys-file``.
+    Keduanya **selalu** diberikan eksplisit — bawaan keygen menaruh kunci
+    rahasia di ``keys/`` di dalam repo, dan Guard akan menolak path itu saat
+    start.
+    """
+    return [
+        sys.executable,
+        "-m",
+        "payment_guard.cli",
+        "keygen",
+        "--signing-key-file",
+        str(signing_key_file),
+        "--public-keys-file",
+        str(public_keys_file),
+    ]
+
+
+def keygen_decision(signing_key_file: Path, public_keys_file: Path) -> str:
+    """Apakah keygen perlu dijalankan: ``"buat"``, ``"pakai-ulang"``, atau tolak.
+
+    ``guard keygen`` **menolak menimpa** kunci tanda tangan yang sudah ada, dan
+    penolakan itu benar: menimpanya menghilangkan kunci yang mungkin masih
+    dipakai envelope yang beredar, dan itu tidak bisa dibatalkan (Security v1.1
+    runbook 8.1). Jadi ``--recreate`` tidak boleh mengakalinya dengan menghapus
+    berkas kunci — ia harus memutuskan dengan sadar.
+
+    * belum ada keduanya → ``"buat"``
+    * ada keduanya → ``"pakai-ulang"``. Database devnet memang dihapus, tapi
+      kunci tanda tangan tidak perlu berganti: envelope dari devnet lama tidak
+      berlaku di database yang baru, jadi memakai ulang kuncinya tidak
+      menyembunyikan apa pun.
+    * kunci rahasia ada tapi registri publiknya tidak → **ditolak**. Keadaan
+      itu tidak bisa diperbaiki skrip: keygen tidak akan menimpa kuncinya, dan
+      menulis registri baru dari kunci lama bukan pekerjaannya. Operator yang
+      memindahkan kuncinya, sesuai prosedur rotasi.
+
+    Raises:
+        DevnetError: pada keadaan yang tidak bisa diperbaiki skrip.
+    """
+    ada_rahasia = signing_key_file.exists()
+    ada_publik = public_keys_file.exists()
+    if ada_rahasia and ada_publik:
+        return "pakai-ulang"
+    if ada_rahasia and not ada_publik:
+        raise DevnetError(
+            f"kunci tanda tangan {signing_key_file} ada, tapi registri publik "
+            f"{public_keys_file} tidak.\n"
+            "keygen tidak akan menimpa kunci yang sudah ada, dan skrip ini "
+            "tidak menulis registri dari kunci lama.\n"
+            "Pindahkan berkas kunci itu ke tempat aman lalu jalankan ulang "
+            "(prosedur rotasi, Security v1.1 runbook 8.1)."
+        )
+    return "buat"
+
+
+def write_executor_wallet(path: Path, akun: AkunDevnet) -> None:
+    """Tulis berkas kunci wallet Executor devnet.
+
+    Bentuknya yang dituntut :func:`payment_guard.chain.load_wallet`: tepat dua
+    field, ``address`` dan ``private_key``, dan alamatnya wajib cocok dengan
+    kunci yang diturunkannya.
+
+    Berkas ini memuat kunci **publik-diketahui** (akun Anvil), dan itu sebabnya
+    ``load_wallet`` menolaknya di luar jaringan devnet.
+
+    Raises:
+        DevnetError: bila path-nya berada di dalam akar repo.
+    """
+    akar = Path(__file__).resolve().parent.parent
+    try:
+        path.resolve().relative_to(akar)
+    except ValueError:
+        pass  # Di luar repo: inilah yang benar.
+    else:
+        raise DevnetError(
+            f"berkas kunci wallet tidak boleh di dalam akar repo ({path}). "
+            "config.py menolaknya, dan kunci di dalam repo adalah kunci yang "
+            "bisa ter-commit."
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"address": akun.address, "private_key": akun.private_key}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    # Hak akses dipersempit bila OS-nya mendukung. Di Windows ini no-op yang
+    # tidak berbahaya; di POSIX ia menutup berkas dari pengguna lain.
+    try:
+        path.chmod(0o600)
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------- #
 # Langkah-langkah
 # --------------------------------------------------------------------------- #
 
@@ -508,9 +634,42 @@ def main(argv: list[str] | None = None) -> int:
         print(f"gagal: {exc}", file=sys.stderr)
         return 1
 
+    rahasia = devnet_key_dir(akar)
+    signing_key = rahasia / "guard_signing_devnet.json"
+    # Registri kunci publik juga di luar repo, meski ia bukan rahasia.
+    # Alasannya bukan kerahasiaan melainkan kebersihan: ia berubah setiap
+    # devnet dibangun ulang, dan di akar repo ia muncul sebagai berkas
+    # untracked yang mencemari `git status` dan bisa ter-commit karena
+    # kecelakaan. Revisi pertama menaruhnya di akar repo dan langsung
+    # menghasilkan tepat itu.
+    public_keys = rahasia / "guard_public_devnet.json"
+    wallet_key = rahasia / "executor_wallet_devnet.json"
+
+    try:
+        putusan = keygen_decision(signing_key, public_keys)
+        if putusan == "pakai-ulang":
+            print(
+                f"keygen dilewati: {signing_key.name} dan {public_keys.name} "
+                "sudah ada, dipakai ulang. keygen tidak pernah menimpa kunci."
+            )
+        else:
+            print(f"keygen -> {signing_key.name} (di luar repo), {public_keys.name}")
+            keluaran = jalankan(keygen_command(signing_key, public_keys), label="guard keygen")
+            for baris in keluaran.splitlines():
+                if baris.strip():
+                    print(f"  {baris}")
+
+        executor = akun_anvil(INDEKS_EXECUTOR)
+        write_executor_wallet(wallet_key, executor)
+        print(f"wallet Executor devnet: {executor.address}")
+        print(f"  kunci ditulis ke {wallet_key} (di luar repo; kuncinya tidak dicetak)")
+    except DevnetError as exc:
+        print(f"gagal: {exc}", file=sys.stderr)
+        return 1
+
     print(
-        "\nLangkah berikutnya (keygen, wallet Executor, deploy token uji, "
-        "pendanaan, .env.devnet lengkap) belum diimplementasi di revisi ini."
+        "\nLangkah berikutnya (deploy token uji, pendanaan, .env.devnet "
+        "lengkap, mandate devnet) belum diimplementasi di revisi ini."
     )
     return 0
 

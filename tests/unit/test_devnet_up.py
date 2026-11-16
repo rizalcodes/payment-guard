@@ -375,3 +375,218 @@ class TestMaintenanceUrlStillGuardsTheCluster:
         with pytest.raises(DevnetError) as info:
             maintenance_url_for(url_devnet(host=host))
         assert "loopback" in str(info.value)
+
+
+class TestKeygenCommand:
+    """Flag keygen dari ``--help``, dan path selalu eksplisit."""
+
+    def test_it_uses_the_documented_flags(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import keygen_command
+
+        argv = keygen_command(tmp_path / "s.json", tmp_path / "p.json")
+        assert argv[1:4] == ["-m", "payment_guard.cli", "keygen"]
+        assert "--signing-key-file" in argv
+        assert "--public-keys-file" in argv
+
+    def test_both_paths_are_always_explicit(self, tmp_path: Path) -> None:
+        """Bawaan keygen menaruh kunci rahasia DI DALAM repo.
+
+        ``config.py`` menolak path itu saat Guard start
+        (``_require_outside_repo``), jadi devnet tidak boleh pernah memakai
+        bawaannya.
+        """
+        from scripts.devnet_up import keygen_command
+
+        signing = tmp_path / "s.json"
+        public = tmp_path / "p.json"
+        argv = keygen_command(signing, public)
+        assert argv[argv.index("--signing-key-file") + 1] == str(signing)
+        assert argv[argv.index("--public-keys-file") + 1] == str(public)
+
+    def test_it_uses_the_running_interpreter(self, tmp_path: Path) -> None:
+        import sys
+
+        from scripts.devnet_up import keygen_command
+
+        assert keygen_command(tmp_path / "s", tmp_path / "p")[0] == sys.executable
+
+
+class TestTheSecretDirectoryIsOutsideTheRepo:
+    """Kunci di luar repo lebih kuat daripada kunci yang di-gitignore.
+
+    ``.gitignore`` hanya menahan berkas yang secara teknis masih bisa
+    di-``git add -f``. Berkas di luar akar repo tidak pernah dilihat git.
+    """
+
+    def test_it_sits_beside_the_repo_not_inside(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import devnet_key_dir
+
+        akar = tmp_path / "repo"
+        akar.mkdir()
+        rahasia = devnet_key_dir(akar)
+        with pytest.raises(ValueError):
+            rahasia.relative_to(akar)
+
+    def test_its_name_says_what_it_holds(self) -> None:
+        from scripts.devnet_up import DEVNET_KEY_DIRNAME
+
+        assert "rahasia" in DEVNET_KEY_DIRNAME
+        assert "devnet" in DEVNET_KEY_DIRNAME
+
+    def test_the_real_secret_dir_is_outside_the_real_repo(self) -> None:
+        from scripts.devnet_up import devnet_key_dir
+
+        akar = Path(__file__).resolve().parent.parent.parent
+        with pytest.raises(ValueError):
+            devnet_key_dir(akar).relative_to(akar)
+
+
+class TestTheExecutorWalletFile:
+    """Bentuk berkas kunci, dan penolakan path di dalam repo."""
+
+    def test_a_key_inside_the_repo_is_refused(self) -> None:
+        from scripts.devnet_up import INDEKS_EXECUTOR, akun_anvil, write_executor_wallet
+
+        akar = Path(__file__).resolve().parent.parent.parent
+        with pytest.raises(DevnetError) as info:
+            write_executor_wallet(akar / "wallet.json", akun_anvil(INDEKS_EXECUTOR))
+        assert "akar repo" in str(info.value)
+
+    def test_the_file_has_exactly_the_two_fields_load_wallet_wants(self, tmp_path: Path) -> None:
+        import json
+
+        from scripts.devnet_up import INDEKS_EXECUTOR, akun_anvil, write_executor_wallet
+
+        path = tmp_path / "luar" / "wallet.json"
+        write_executor_wallet(path, akun_anvil(INDEKS_EXECUTOR))
+        document = json.loads(path.read_text(encoding="utf-8"))
+        assert set(document) == {"address", "private_key"}
+
+    def test_load_wallet_accepts_it_on_devnet(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import INDEKS_EXECUTOR, akun_anvil, write_executor_wallet
+
+        from payment_guard.chain import load_wallet
+        from payment_guard.chains import NETWORK_DEVNET
+
+        akun = akun_anvil(INDEKS_EXECUTOR)
+        path = tmp_path / "luar" / "wallet.json"
+        write_executor_wallet(path, akun)
+
+        wallet = load_wallet(path, network=NETWORK_DEVNET)
+        assert wallet.address == akun.address
+
+    def test_load_wallet_refuses_it_outside_devnet(self, tmp_path: Path) -> None:
+        """Pengaman kunci publik: akun Anvil hanya boleh di devnet."""
+        from scripts.devnet_up import INDEKS_EXECUTOR, akun_anvil, write_executor_wallet
+
+        from payment_guard.chain import ChainError, load_wallet
+
+        path = tmp_path / "luar" / "wallet.json"
+        write_executor_wallet(path, akun_anvil(INDEKS_EXECUTOR))
+
+        with pytest.raises(ChainError) as info:
+            load_wallet(path)
+        pesan = str(info.value)
+        assert "PUBLIK" in pesan
+        assert "PAYMENT_GUARD_NETWORK" in pesan
+
+    def test_the_refusal_does_not_quote_the_key(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import INDEKS_EXECUTOR, akun_anvil, write_executor_wallet
+
+        from payment_guard.chain import ChainError, load_wallet
+
+        akun = akun_anvil(INDEKS_EXECUTOR)
+        path = tmp_path / "luar" / "wallet.json"
+        write_executor_wallet(path, akun)
+
+        with pytest.raises(ChainError) as info:
+            load_wallet(path)
+        assert akun.private_key not in str(info.value)
+        assert akun.private_key[2:] not in str(info.value)
+
+    def test_the_address_matches_the_key_it_was_derived_from(self, tmp_path: Path) -> None:
+        """``load_wallet`` menolak berkas yang alamat dan kuncinya tidak cocok."""
+        from scripts.devnet_up import INDEKS_DEPLOYER, akun_anvil, write_executor_wallet
+
+        from payment_guard.chain import load_wallet
+        from payment_guard.chains import NETWORK_DEVNET
+
+        akun = akun_anvil(INDEKS_DEPLOYER)
+        path = tmp_path / "luar" / "deployer.json"
+        write_executor_wallet(path, akun)
+        assert load_wallet(path, network=NETWORK_DEVNET).address == akun.address
+
+
+class TestNoDevnetArtefactLandsInTheRepo:
+    """Artefak run devnet tidak boleh muncul di `git status`.
+
+    Revisi pertama bagian keygen menaruh registri kunci publik devnet di akar
+    repo — keygen sendiri menyebutnya "boleh di-commit", jadi ia tidak
+    ter-gitignore. Hasilnya berkas untracked yang mencemari `git status` dan
+    bisa ter-commit karena kecelakaan. Registri itu berubah setiap devnet
+    dibangun ulang, jadi tempatnya di luar repo bersama kunci lainnya.
+    """
+
+    def test_the_repo_root_holds_no_devnet_public_keys_file(self) -> None:
+        akar = Path(__file__).resolve().parent.parent.parent
+        assert not (akar / "guard_public_devnet.json").exists()
+
+    def test_the_script_writes_the_public_registry_outside_the_repo(self) -> None:
+        """Dibaca dari sumbernya: path-nya dibangun dari direktori kunci."""
+        akar = Path(__file__).resolve().parent.parent.parent
+        sumber = (akar / "scripts" / "devnet_up.py").read_text(encoding="utf-8")
+        assert 'rahasia / "guard_public_devnet.json"' in sumber
+        assert 'akar / "guard_public_devnet.json"' not in sumber
+
+
+class TestKeygenDecision:
+    """`guard keygen` menolak menimpa kunci; --recreate harus menghormatinya.
+
+    Menghapus berkas kunci supaya keygen mau jalan adalah mengakali pengaman
+    yang alasannya benar: menimpa kunci tanda tangan menghilangkan kunci yang
+    mungkin masih dipakai envelope yang beredar, dan itu tidak bisa dibatalkan
+    (Security v1.1 runbook 8.1).
+    """
+
+    def test_neither_present_means_generate(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import keygen_decision
+
+        assert keygen_decision(tmp_path / "s.json", tmp_path / "p.json") == "buat"
+
+    def test_both_present_means_reuse(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import keygen_decision
+
+        rahasia = tmp_path / "s.json"
+        publik = tmp_path / "p.json"
+        rahasia.write_text("{}", encoding="utf-8")
+        publik.write_text("{}", encoding="utf-8")
+        assert keygen_decision(rahasia, publik) == "pakai-ulang"
+
+    def test_a_secret_without_its_registry_is_refused(self, tmp_path: Path) -> None:
+        """Keadaan yang tidak bisa diperbaiki skrip; operator yang memutuskan."""
+        from scripts.devnet_up import keygen_decision
+
+        rahasia = tmp_path / "s.json"
+        rahasia.write_text("{}", encoding="utf-8")
+        with pytest.raises(DevnetError) as info:
+            keygen_decision(rahasia, tmp_path / "p.json")
+        pesan = str(info.value)
+        assert "rotasi" in pesan.lower()
+        assert "Pindahkan" in pesan
+
+    def test_the_refusal_does_not_offer_to_delete_the_key(self, tmp_path: Path) -> None:
+        """Pesannya tidak boleh menyarankan menghapus kunci."""
+        from scripts.devnet_up import keygen_decision
+
+        rahasia = tmp_path / "s.json"
+        rahasia.write_text("{}", encoding="utf-8")
+        with pytest.raises(DevnetError) as info:
+            keygen_decision(rahasia, tmp_path / "p.json")
+        assert "hapus" not in str(info.value).lower()
+
+    def test_a_registry_without_its_secret_means_generate(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import keygen_decision
+
+        publik = tmp_path / "p.json"
+        publik.write_text('{"keys": []}', encoding="utf-8")
+        assert keygen_decision(tmp_path / "s.json", publik) == "buat"
