@@ -34,32 +34,60 @@ CHAIN_IDS: Final[dict[str, int]] = {
 #: Satu-satunya chain yang didukung v1.
 BASE_SEPOLIA: Final = "base-sepolia"
 
+#: Nama jaringan produksi. Ini yang berlaku bila tidak ada yang memilih.
+#:
+#: Didefinisikan di sini, di atas fungsi-fungsi di bawah, supaya keduanya bisa
+#: memakainya sebagai nilai bawaan alih-alih menuliskan ulang stringnya.
+NETWORK_PRODUCTION: Final = BASE_SEPOLIA
+
 
 class ChainError(ValueError):
     """Nama chain tidak dikenal. Error input, bukan keputusan."""
 
 
-def is_supported_chain(name: object) -> bool:
-    """True bila ``name`` adalah nama chain yang didukung."""
-    return isinstance(name, str) and name in CHAIN_IDS
+def is_supported_chain(name: object, *, network: str = NETWORK_PRODUCTION) -> bool:
+    """True bila ``name`` adalah nama chain yang didukung di ``network``.
+
+    ``network`` bersifat keyword-only dan bawaannya produksi, jadi pemanggil
+    yang tidak tahu soal devnet berperilaku persis seperti sebelum devnet ada.
+    """
+    return isinstance(name, str) and name in chains_for_network(network)
 
 
-def chain_id_for(name: str) -> int:
-    """``chain_id`` EIP-155 untuk ``name``.
+def chain_id_for(name: str, *, network: str = NETWORK_PRODUCTION) -> int:
+    """``chain_id`` EIP-155 untuk ``name`` di ``network``.
+
+    Jaringan diteruskan sebagai parameter, **tidak** dibaca dari environment di
+    dalam fungsi ini. Itu pilihan yang disengaja: ini jalur uang, dan
+    ``chain_id`` yang ikut ditandatangani ke envelope harus bisa ditelusuri
+    dari pemanggilnya, bukan dari variabel lingkungan yang tidak terlihat di
+    tempat pemanggilan. Lihat entri di ``docs/decisions.md``.
 
     Raises:
-        ChainError: bila chain-nya tidak didukung.
+        ChainError: bila chain-nya tidak didukung di jaringan itu.
+        NetworkError: bila jaringannya tidak dikenal.
     """
-    if not is_supported_chain(name):
+    tersedia = chains_for_network(network)
+    # ``is_supported_chain`` lebih dulu, bukan ``name not in tersedia``
+    # langsung: ``in`` atas dict melempar ``TypeError: unhashable type`` untuk
+    # list dan dict, dan pemanggil berhak mendapat ``ChainError`` untuk setiap
+    # masukan yang bukan chain — termasuk yang tipenya salah. Versi pertama
+    # perubahan ini melewatkan penjaga itu, dan dua tes di test_chains.py
+    # menangkapnya.
+    if not is_supported_chain(name, network=network):
         raise ChainError(
-            f"chain {name!r} tidak didukung; yang didukung: {', '.join(sorted(CHAIN_IDS))}"
+            f"chain {name!r} tidak didukung di jaringan {network!r}; "
+            f"yang didukung: {', '.join(sorted(tersedia))}"
         )
-    return CHAIN_IDS[name]
+    return tersedia[name]
 
 
-def supported_chains() -> tuple[str, ...]:
-    """Nama chain yang didukung, terurut. Dipakai pesan error dan tes."""
-    return tuple(sorted(CHAIN_IDS))
+def supported_chains(*, network: str = NETWORK_PRODUCTION) -> tuple[str, ...]:
+    """Nama chain yang didukung di ``network``, terurut.
+
+    Dipakai pesan error dan tes.
+    """
+    return tuple(sorted(chains_for_network(network)))
 
 
 # --------------------------------------------------------------------------- #
@@ -75,9 +103,6 @@ def supported_chains() -> tuple[str, ...]:
 # Jadi devnet hidup di peta terpisah yang hanya aktif bila konfigurasi
 # **eksplisit** memilihnya. Tanpa flag itu, perilakunya identik dengan sebelum
 # devnet ada: satu chain, 84532.
-
-#: Nama jaringan produksi. Ini yang berlaku bila tidak ada yang memilih.
-NETWORK_PRODUCTION: Final = "base-sepolia"
 
 #: Nama jaringan devnet lokal.
 NETWORK_DEVNET: Final = "devnet"
@@ -174,6 +199,21 @@ def chains_for_network(network: str) -> dict[str, int]:
         NetworkError: bila jaringannya tidak dikenal.
     """
     return dict(_NETWORK_CHAINS[normalize_network(network)])
+
+
+def chain_for_network(network: str) -> str:
+    """Satu-satunya **nama** chain yang sah di ``network``.
+
+    Pasangan dari :func:`expected_chain_id_for_network`: yang satu memberi
+    angkanya, yang ini memberi namanya. Dipakai pemanggil yang hanya memegang
+    nama jaringan tapi harus menyebut nama chain, seperti jalur verifikasi
+    envelope di Executor.
+
+    Raises:
+        NetworkError: bila jaringannya tidak dikenal.
+    """
+    (nama,) = chains_for_network(network)
+    return nama
 
 
 def expected_chain_id_for_network(network: str) -> int:

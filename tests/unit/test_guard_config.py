@@ -295,6 +295,10 @@ class TestShape:
             "public_keys_path",
             "heartbeat_seconds",
             "lock_timeout_ms",
+            # Jaringan yang dipilih konfigurasi. Bukan URL proses lain:
+            # ia memilih nama chain mana yang sah di mandate dan chain_id mana
+            # yang masuk envelope. Lihat docs/devnet.md.
+            "network",
         }
         assert not [f for f in fields if "migrator" in f]
         assert not [f for f in fields if f.startswith(("approver", "executor", "watcher"))]

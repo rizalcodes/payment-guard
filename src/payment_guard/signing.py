@@ -57,7 +57,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from payment_guard.canonical import CanonicalError, canonical_bytes
-from payment_guard.chains import BASE_SEPOLIA, chain_id_for
+from payment_guard.chains import BASE_SEPOLIA, NETWORK_PRODUCTION, chain_id_for
 from payment_guard.money import BaseUnits, format_base_units
 
 #: Awalan domain untuk tanda tangan envelope (PRD v2 bagian 7).
@@ -210,6 +210,7 @@ def build_payload(
     valid_until: int,
     mandate_hash: str,
     chain: str = BASE_SEPOLIA,
+    network: str = NETWORK_PRODUCTION,
     status: str = SIGNED_STATUS,
 ) -> Payload:
     """Susun payload dari nilai internal.
@@ -232,7 +233,7 @@ def build_payload(
         decision_id=decision_id,
         mandate_id=mandate_id,
         agent_id=agent_id,
-        chain_id=chain_id_for(chain),
+        chain_id=chain_id_for(chain, network=network),
         recipient=recipient,
         amount_base=format_base_units(amount_base),
         status=status,
@@ -456,6 +457,7 @@ def verify(
     registry: Mapping[str, PublicKeyEntry],
     *,
     chain: str = BASE_SEPOLIA,
+    network: str = NETWORK_PRODUCTION,
 ) -> Payload:
     """Verifikasi envelope dengan public key saja. Mengembalikan payload-nya.
 
@@ -495,9 +497,11 @@ def verify(
         raise VerificationError(
             f"versi envelope {payload.v!r} tidak dikenal; yang didukung: {ENVELOPE_VERSION!r}"
         )
-    expected_chain_id = chain_id_for(chain)
+    expected_chain_id = chain_id_for(chain, network=network)
     if payload.chain_id != expected_chain_id:
-        raise VerificationError(f"chain_id {payload.chain_id} bukan {expected_chain_id} ({chain})")
+        raise VerificationError(
+            f"chain_id {payload.chain_id} bukan {expected_chain_id} ({chain} di jaringan {network})"
+        )
     if payload.status != SIGNED_STATUS:
         raise VerificationError(
             f"status {payload.status!r} bukan {SIGNED_STATUS!r}; "

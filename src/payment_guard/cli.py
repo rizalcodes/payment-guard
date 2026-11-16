@@ -34,6 +34,7 @@ from pathlib import Path
 
 from payment_guard import __version__
 from payment_guard.bootstrap import read_admin_url, run_bootstrap_roles
+from payment_guard.chains import NETWORK_PRODUCTION, supported_networks
 from payment_guard.config import (
     MIGRATOR_ENV_FILENAME,
     RUNTIME_ENV_FILENAME,
@@ -277,7 +278,7 @@ def _cmd_wallet(args: argparse.Namespace) -> int:
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
-    outcome = verify_envelope_file(args.envelope, args.pubkey, args.mandate)
+    outcome = verify_envelope_file(args.envelope, args.pubkey, args.mandate, network=args.network)
     print(outcome.render())
     if outcome.valid and outcome.payload is not None:
         for line in describe(outcome.payload):
@@ -561,6 +562,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "opsional: cocokkan mandate_hash di payload dengan hash berkas mandate ini, "
             "supaya envelope yang sah atas aturan yang salah tidak lolos"
+        ),
+    )
+    verify_parser.add_argument(
+        "--network",
+        default=NETWORK_PRODUCTION,
+        choices=supported_networks(),
+        help=(
+            f"jaringan yang envelope-nya diperiksa (default: {NETWORK_PRODUCTION}). "
+            "Pakai 'devnet' untuk envelope dari devnet lokal (chain id 31337); "
+            "tanpa itu, envelope devnet ditolak karena chain_id-nya bukan 84532. "
+            "Lihat docs/devnet.md."
         ),
     )
     verify_parser.set_defaults(handler=_cmd_verify)

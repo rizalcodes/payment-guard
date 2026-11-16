@@ -37,11 +37,9 @@ from typing import Final
 
 from payment_guard.addresses import AddressError, normalize_address
 from payment_guard.chains import (
-    BASE_SEPOLIA,
     NETWORK_ENV_VAR,
     NETWORK_PRODUCTION,
     NetworkError,
-    chain_id_for,
     expected_chain_id_for_network,
     normalize_network,
 )
@@ -267,6 +265,11 @@ class GuardConfig:
     public_keys_path: Path
     heartbeat_seconds: int
     lock_timeout_ms: int
+    #: Jaringan yang dipilih konfigurasi. ``base-sepolia`` bila tidak disetel.
+    #:
+    #: Guard memakainya dua kali: saat memuat mandate (nama chain mana yang
+    #: sah) dan saat menandatangani (``chain_id`` mana yang masuk envelope).
+    network: str = NETWORK_PRODUCTION
 
 
 def load_guard_config(env_file: Path, *, repo_root: Path) -> GuardConfig:
@@ -330,6 +333,7 @@ def load_guard_config(env_file: Path, *, repo_root: Path) -> GuardConfig:
         public_keys_path=public_keys_path,
         heartbeat_seconds=heartbeat_seconds,
         lock_timeout_ms=lock_timeout_ms,
+        network=_load_network(from_file),
     )
 
 
@@ -363,6 +367,13 @@ class ApprovalsConfig:
     db_url: str
     signing_key_path: Path
     lock_timeout_ms: int
+    #: Jaringan yang dipilih konfigurasi. ``base-sepolia`` bila tidak disetel.
+    #:
+    #: Approvals CLI menandatangani envelope di jalur ``approved_by_human``,
+    #: jadi ia butuh jaringan yang sama dengan Guard: tanpa ini, persetujuan
+    #: manusia di devnet menghasilkan ``chain_id`` 84532 untuk transaksi yang
+    #: dikirim ke chain 31337, dan Executor menolaknya di cek 2.
+    network: str = NETWORK_PRODUCTION
 
 
 def load_approvals_config(env_file: Path, *, repo_root: Path) -> ApprovalsConfig:
@@ -407,6 +418,7 @@ def load_approvals_config(env_file: Path, *, repo_root: Path) -> ApprovalsConfig
         db_url=db_url,
         signing_key_path=signing_key_path,
         lock_timeout_ms=lock_timeout_ms,
+        network=_load_network(from_file),
     )
 
 
@@ -871,7 +883,8 @@ def load_reconciler_config(env_file: Path) -> ReconcilerConfig:
             f"`guard db bootstrap-roles` lebih dulu, atau isi di {env_file.name}."
         )
 
-    expected_chain_id = chain_id_for(BASE_SEPOLIA)
+    network = _load_network(from_file)
+    expected_chain_id = expected_chain_id_for_network(network)
     chain_id = _require_bounded_int(
         RECONCILER_ENV_VARS["chain_id"],
         value_of("chain_id"),
@@ -882,7 +895,7 @@ def load_reconciler_config(env_file: Path) -> ReconcilerConfig:
     if chain_id != expected_chain_id:
         raise GuardConfigError(
             f"{RECONCILER_ENV_VARS['chain_id']} harus {expected_chain_id} "
-            f"({BASE_SEPOLIA}), dapat {chain_id}"
+            f"untuk jaringan {network!r}, dapat {chain_id}"
         )
 
     return ReconcilerConfig(

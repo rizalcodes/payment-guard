@@ -76,6 +76,7 @@ from payment_guard.chain import (
     encode_transfer,
     load_wallet,
 )
+from payment_guard.chains import NETWORK_PRODUCTION, chain_for_network
 from payment_guard.config import ExecutorConfig
 from payment_guard.db import (
     connect,
@@ -405,6 +406,7 @@ def verify_and_plan(
     cur: psycopg.Cursor,
     expected_chain_id: int,
     registry: Mapping[str, PublicKeyEntry],
+    network: str = NETWORK_PRODUCTION,
 ) -> ExecutionPlan:
     """Jalankan cek 1 sampai 5. Hanya membaca; tidak ada efek samping.
 
@@ -431,7 +433,10 @@ def verify_and_plan(
         CheckRejected: pada cek pertama yang gagal.
     """
     payload = parse_and_verify(
-        envelope_json, registry=registry, expected_chain_id=expected_chain_id
+        envelope_json,
+        registry=registry,
+        expected_chain_id=expected_chain_id,
+        network=network,
     )
 
     # Cek 3b dan sesudahnya menyentuh database. Lock mandate lebih dulu.
@@ -465,6 +470,7 @@ def parse_and_verify(
     *,
     registry: Mapping[str, PublicKeyEntry],
     expected_chain_id: int,
+    network: str = NETWORK_PRODUCTION,
 ) -> Payload:
     """Cek 1, 2, dan 3. Tanpa database, tanpa jaringan, tanpa jam.
 
@@ -478,19 +484,25 @@ def parse_and_verify(
         raise CheckRejected(REASON_SIGNATURE_INVALID, f"envelope ditolak parser: {exc}") from None
 
     try:
-        payload = verify(envelope, registry)
+        payload = verify(envelope, registry, chain=chain_for_network(network), network=network)
     except (VerificationError, EnvelopeError) as exc:
         raise CheckRejected(_attribute_failure(envelope, expected_chain_id), str(exc)) from None
 
-    # ``verify`` membandingkan ``chain_id`` dengan chain bawaannya sendiri
-    # (:data:`payment_guard.chains.BASE_SEPOLIA`), bukan dengan nilai yang
-    # dipegang Executor. Hari ini keduanya selalu sama, karena
-    # ``load_executor_config`` menolak ``CHAIN_ID`` apa pun selain 84532.
+    # ``verify`` membandingkan ``chain_id`` dengan chain dari ``network`` yang
+    # diteruskan Executor, bukan dengan bawaan modulnya sendiri.
+    #
+    # Sebelum devnet ada, ia dipanggil tanpa argumen chain dan karena itu
+    # selalu membandingkan dengan 84532. Komentar di tempat ini dulu berbunyi
+    # "hari ini keduanya selalu sama, karena load_executor_config menolak
+    # CHAIN_ID apa pun selain 84532" — dan premis itu berhenti benar begitu
+    # jaringan devnet bisa dipilih. Tanpa perubahan di atas, setiap envelope
+    # devnet akan ditolak di sini sebagai chain_id 31337 bukan 84532, dan
+    # penolakannya datang dari bawaan modul, bukan dari konfigurasi.
+    #
     # Perbandingan di bawah tetap ada supaya ``expected_chain_id`` benar-benar
-    # menjadi penjaga dan bukan sekadar bahan pesan error: kalau kelak kedua
-    # sumber itu berbeda, yang menang harus konfigurasi Executor, dan
-    # perbedaannya harus muncul sebagai penolakan, bukan sebagai kecocokan
-    # yang kebetulan.
+    # menjadi penjaga dan bukan sekadar bahan pesan error: kalau kedua sumber
+    # itu berbeda, yang menang harus konfigurasi Executor, dan perbedaannya
+    # harus muncul sebagai penolakan, bukan sebagai kecocokan yang kebetulan.
     if payload.chain_id != expected_chain_id:
         raise CheckRejected(
             REASON_VERSION_OR_CHAIN_MISMATCH,
@@ -776,6 +788,7 @@ def _sign_write_ahead(
             cur=cur,
             expected_chain_id=runtime.config.chain_id,
             registry=runtime.registry,
+            network=runtime.config.network,
         )
 
         # Nonce ditentukan SETELAH lock executor: satu penulis nonce per

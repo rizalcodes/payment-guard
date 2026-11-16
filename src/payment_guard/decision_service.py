@@ -282,7 +282,7 @@ def validate_input(raw: CheckPaymentInput, session: GuardSession) -> ValidatedRe
     if not isinstance(raw.chain, str):
         raise InputError(f"chain harus string, bukan {type(raw.chain).__name__}")
     try:
-        chain_id = chain_id_for(raw.chain)
+        chain_id = chain_id_for(raw.chain, network=session.config.network)
     except ChainError as exc:
         raise InputError(f"chain: {exc}") from None
     if raw.chain != session.mandate.chain:
@@ -471,6 +471,7 @@ def _persist(
             valid_until=valid_until,
             mandate_hash=session.mandate_hash,
             chain=request.chain,
+            network=session.config.network,
         )
         envelope = sign(payload, session.identity.signer, session.identity.key_id).as_dict()
     elif decision.status is Status.NEEDS_HUMAN:

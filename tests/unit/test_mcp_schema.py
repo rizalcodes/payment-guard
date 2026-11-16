@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from payment_guard.chains import BASE_SEPOLIA
 from payment_guard.decision_service import (
     MAX_REASON_LENGTH,
     CheckPaymentInput,
@@ -61,6 +62,10 @@ def server():
 def fake_session():
     session = MagicMock()
     session.mandate = load_mandate(MANDATE_DOCUMENT)
+    # `validate_input` membaca jaringan dari config sesi untuk memetakan nama
+    # chain ke chain_id. Pada MagicMock, atribut itu mengembalikan MagicMock
+    # dan `normalize_network` menolaknya — jadi ia disetel eksplisit di sini.
+    session.config.network = BASE_SEPOLIA
     return session
 
 

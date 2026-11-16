@@ -48,7 +48,7 @@ from typing import Final
 
 from payment_guard.addresses import AddressError, normalize_allowlist
 from payment_guard.canonical import canonical_bytes
-from payment_guard.chains import is_supported_chain, supported_chains
+from payment_guard.chains import NETWORK_PRODUCTION, is_supported_chain, supported_chains
 from payment_guard.money import (
     BaseUnits,
     MoneyError,
@@ -137,7 +137,7 @@ class Mandate:
         return recipient in self.allowed_recipients
 
 
-def load_mandate(data: Mapping[str, object]) -> Mandate:
+def load_mandate(data: Mapping[str, object], *, network: str = NETWORK_PRODUCTION) -> Mandate:
     """Validasi dan normalisasi isi file mandate.
 
     Field yang tidak dikenal **ditolak**, bukan diabaikan. Field yang diabaikan
@@ -163,7 +163,7 @@ def load_mandate(data: Mapping[str, object]) -> Mandate:
 
     mandate_id = _require_mandate_id(data["mandate_id"])
     agent_id = _require_agent_id(data["agent_id"])
-    chain = _require_chain(data["chain"])
+    chain = _require_chain(data["chain"], network=network)
     allowed_recipients = _require_allowed_recipients(data["allowed_recipients"])
     amounts = {field: _require_money(field, data[field]) for field in MONEY_FIELDS}
     seconds = {field: _require_seconds(field, data[field]) for field in SECONDS_FIELDS}
@@ -312,16 +312,22 @@ def _require_agent_id(value: object) -> str:
     return text
 
 
-def _require_chain(value: object) -> str:
-    """PRD v2 bagian 6.2: ``chain`` hanya ``base-sepolia``.
+def _require_chain(value: object, *, network: str) -> str:
+    """PRD v2 bagian 6.2: ``chain`` hanya ``base-sepolia`` di produksi.
 
     Mandate menyimpan string ini apa adanya. Pemetaan ke ``chain_id`` EIP-155
     ada di :mod:`payment_guard.chains`, bukan di mandate.
+
+    Di jaringan devnet lokal yang berlaku adalah ``devnet-local``, dan
+    ``base-sepolia`` **ditolak** di sana — penolakan itu dua arah dengan
+    sengaja: mandate produksi yang dimuat di devnet akan menandatangani
+    ``chain_id`` 84532 untuk transaksi yang dikirim ke chain 31337.
     """
     text = _require_text("chain", value)
-    if not is_supported_chain(text):
+    if not is_supported_chain(text, network=network):
         raise MandateError(
-            f"chain {_quote(text)} tidak didukung; yang didukung: {', '.join(supported_chains())}"
+            f"chain {_quote(text)} tidak didukung di jaringan {network!r}; "
+            f"yang didukung: {', '.join(supported_chains(network=network))}"
         )
     return text
 

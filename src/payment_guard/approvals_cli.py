@@ -659,6 +659,7 @@ def _approve_row(
         valid_until=valid_until,
         mandate_hash=row.mandate_hash,
         chain=mandate.chain,
+        network=config.network,
     )
     envelope = sign(payload, identity.signer, identity.key_id).as_dict()
 

@@ -45,6 +45,7 @@ import psycopg
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from psycopg.types.json import Jsonb
 
+from payment_guard.chains import NETWORK_PRODUCTION
 from payment_guard.config import GuardConfig
 from payment_guard.db import (
     SET_STATEMENT_TIMEOUT,
@@ -186,8 +187,11 @@ def load_signing_identity(path: Path) -> SigningIdentity:
     return SigningIdentity(key_id=key_id, signer=signer)
 
 
-def load_mandate_file(path: Path) -> Mandate:
+def load_mandate_file(path: Path, *, network: str = NETWORK_PRODUCTION) -> Mandate:
     """Baca dan validasi berkas mandate.
+
+    ``network`` menentukan nama chain mana yang sah di mandate; bawaannya
+    produksi, jadi pemanggil lama tidak berubah perilakunya.
 
     Raises:
         GuardStartupError: bila berkasnya tidak terbaca atau mandate-nya tidak
@@ -205,7 +209,7 @@ def load_mandate_file(path: Path) -> Mandate:
     except json.JSONDecodeError as exc:
         raise GuardStartupError(f"berkas mandate bukan JSON yang sah ({path}): {exc.msg}") from None
     try:
-        return load_mandate(document)
+        return load_mandate(document, network=network)
     except MandateError as exc:
         raise GuardStartupError(f"mandate tidak sah ({path}): {exc}") from None
 
@@ -290,7 +294,7 @@ def start_guard(config: GuardConfig) -> GuardSession:
     Raises:
         GuardStartupError: bila mandate, kunci, tabel, atau lock sesi gagal.
     """
-    mandate = load_mandate_file(config.mandate_path)
+    mandate = load_mandate_file(config.mandate_path, network=config.network)
     mandate_hash = compute_mandate_hash(mandate)
     identity = load_signing_identity(config.signing_key_path)
 

@@ -33,6 +33,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from payment_guard.chains import NETWORK_PRODUCTION, NetworkError, chain_for_network
 from payment_guard.mandate import MandateError, compute_mandate_hash, load_mandate
 from payment_guard.signing import (
     EnvelopeError,
@@ -73,6 +74,8 @@ def verify_envelope_file(
     envelope_path: Path,
     public_keys_path: Path,
     mandate_path: Path | None = None,
+    *,
+    network: str = NETWORK_PRODUCTION,
 ) -> VerifyOutcome:
     """Periksa envelope di ``envelope_path`` terhadap registri kunci publik.
 
@@ -99,19 +102,23 @@ def verify_envelope_file(
         return VerifyOutcome(valid=False, reason=f"registri kunci publik tidak sah: {exc}")
 
     try:
-        payload = verify(envelope, registry)
+        payload = verify(envelope, registry, chain=chain_for_network(network), network=network)
     except (VerificationError, EnvelopeError) as exc:
+        return VerifyOutcome(valid=False, reason=str(exc))
+    except NetworkError as exc:
         return VerifyOutcome(valid=False, reason=str(exc))
 
     if mandate_path is not None:
-        mismatch = _check_mandate(payload, mandate_path)
+        mismatch = _check_mandate(payload, mandate_path, network=network)
         if mismatch is not None:
             return mismatch
 
     return VerifyOutcome(valid=True, payload=payload)
 
 
-def _check_mandate(payload: Payload, mandate_path: Path) -> VerifyOutcome | None:
+def _check_mandate(
+    payload: Payload, mandate_path: Path, *, network: str = NETWORK_PRODUCTION
+) -> VerifyOutcome | None:
     """Bandingkan ``mandate_hash`` di payload dengan berkas mandate.
 
     Mengembalikan ``None`` bila cocok.
@@ -126,7 +133,7 @@ def _check_mandate(payload: Payload, mandate_path: Path) -> VerifyOutcome | None
         return VerifyOutcome(valid=False, reason=f"berkas mandate bukan JSON yang sah: {exc.msg}")
 
     try:
-        expected = compute_mandate_hash(load_mandate(document))
+        expected = compute_mandate_hash(load_mandate(document, network=network))
     except (MandateError, ValueError) as exc:
         return VerifyOutcome(valid=False, reason=f"berkas mandate tidak sah: {exc}")
 
