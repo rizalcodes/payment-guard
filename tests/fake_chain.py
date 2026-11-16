@@ -31,11 +31,21 @@ from payment_guard.chain import ChainError, Fees, Receipt, TransferLog
 from payment_guard.hashing import keccak256
 from payment_guard.money import BaseUnits
 
-#: Seed uji publik: akun pertama Hardhat. Bukan dana nyata, bukan rahasia.
-TEST_WALLET_SEED: Final = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+#: Seed uji. Bukan dana nyata, bukan rahasia.
+#:
+#: Sebelumnya ini akun pertama Hardhat/Anvil
+#: (``0xac0974be…``/``0xf39fd6e5…``), dan itu harus diganti: Executor sekarang
+#: **menolak** akun default Anvil di luar devnet lokal, karena kuncinya publik
+#: (lihat ``payment_guard.chains.ANVIL_DEFAULT_ADDRESSES`` dan
+#: ``docs/devnet.md``). Fixture yang memakai kunci itu akan menguji jalur
+#: penolakan, bukan jalur yang dimaksudnya.
+#:
+#: Nilai sekarang sengaja berpola dan jelas-jelas buatan, supaya tidak bisa
+#: tertukar dengan kunci sungguhan maupun dengan kunci default perkakas lain.
+TEST_WALLET_SEED: Final = "0x4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b4b"
 
 #: Alamat yang diturunkan dari seed di atas, lowercase.
-TEST_WALLET_ADDRESS: Final = "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+TEST_WALLET_ADDRESS: Final = "0x504e4fbab7bc2962b361e3730b965e61f289d0cc"
 
 #: Saldo bawaan tiruan: 1 ETH, cukup supaya tidak ada peringatan gas.
 DEFAULT_BALANCE_WEI: Final = 10**18

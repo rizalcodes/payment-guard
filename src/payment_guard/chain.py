@@ -50,6 +50,12 @@ from web3.exceptions import BlockNotFound, TransactionNotFound, Web3Exception
 from web3.types import TxParams
 
 from payment_guard.addresses import AddressError, normalize_address, to_checksum_address
+from payment_guard.chains import (
+    NETWORK_ENV_VAR,
+    NETWORK_PRODUCTION,
+    is_anvil_default_address,
+    is_devnet_network,
+)
 from payment_guard.db import endpoint_host
 from payment_guard.hashing import keccak256
 from payment_guard.money import BaseUnits
@@ -272,7 +278,7 @@ class WalletIdentity:
         )
 
 
-def load_wallet(path: Path) -> WalletIdentity:
+def load_wallet(path: Path, *, network: str = NETWORK_PRODUCTION) -> WalletIdentity:
     """Muat kunci wallet Executor dari berkas JSON di luar repo.
 
     Bentuk berkas::
@@ -330,6 +336,24 @@ def load_wallet(path: Path) -> WalletIdentity:
         raise ChainError(
             f"address di berkas kunci wallet tidak cocok dengan kuncinya ({path}): "
             f"berkas menyebut {declared}, kuncinya menurunkan {derived}"
+        )
+
+    # Kunci default Anvil PUBLIK, dan itu membuatnya berbahaya di mana pun
+    # selain devnet lokal. Penolakan ini ada karena urutan kejadian yang paling
+    # mungkin bukan kejahatan melainkan kelalaian: operator menjalankan devnet,
+    # lalu menjalankan Executor tanpa `PAYMENT_GUARD_NETWORK=devnet` dan masih
+    # menunjuk ke berkas kunci devnet. Tanpa pemeriksaan ini, Executor akan
+    # menandatangani di chain sungguhan dengan kunci yang diketahui publik.
+    #
+    # Yang dibandingkan alamatnya, bukan kuncinya: pesan error tidak boleh
+    # pernah bisa mengutip bahan kunci, dan mengenali sudah cukup.
+    if not is_devnet_network(network) and is_anvil_default_address(derived):
+        raise ChainError(
+            f"berkas kunci wallet memakai akun default Anvil ({derived}) di jaringan "
+            f"{network!r}. Kunci itu PUBLIK — mnemonic-nya diterbitkan di dokumentasi "
+            f"Foundry — jadi ia hanya boleh dipakai di devnet lokal. Setel "
+            f"{NETWORK_ENV_VAR}=devnet bila ini memang devnet, atau pakai berkas kunci "
+            f"lain. Lihat docs/devnet.md ({path})"
         )
     return WalletIdentity(address=derived, signer=account)
 

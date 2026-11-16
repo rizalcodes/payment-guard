@@ -340,7 +340,7 @@ def open_runtime(config: ExecutorConfig, *, client: ChainClient | None = None) -
         ExecutorError: bila registri kunci publik tidak bisa dibaca.
         ChainError: bila berkas kunci wallet tidak sah.
     """
-    wallet = load_wallet(config.wallet_key_path)
+    wallet = load_wallet(config.wallet_key_path, network=config.network)
     try:
         raw = config.public_keys_path.read_text(encoding="utf-8")
     except OSError as exc:

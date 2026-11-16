@@ -30,12 +30,21 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Final
 
 from payment_guard.addresses import AddressError, normalize_address
-from payment_guard.chains import BASE_SEPOLIA, chain_id_for
+from payment_guard.chains import (
+    BASE_SEPOLIA,
+    NETWORK_ENV_VAR,
+    NETWORK_PRODUCTION,
+    NetworkError,
+    chain_id_for,
+    expected_chain_id_for_network,
+    normalize_network,
+)
 from payment_guard.db import MigrationError
 
 #: Nama file konfigurasi runtime, relatif terhadap akar repo.
@@ -477,6 +486,12 @@ class ExecutorConfig:
     chain_id: int
     usdc_address: str
     lock_timeout_ms: int
+    #: Jaringan yang dipilih konfigurasi. ``base-sepolia`` bila tidak disetel.
+    #:
+    #: Dibawa di config, bukan dibaca ulang dari environment di tempat lain:
+    #: dua pembacaan bisa berbeda, dan yang satu akan memutuskan sesuatu yang
+    #: tidak dilihat yang lain.
+    network: str = NETWORK_PRODUCTION
 
 
 def load_executor_config(env_file: Path, *, repo_root: Path) -> ExecutorConfig:
@@ -519,7 +534,8 @@ def load_executor_config(env_file: Path, *, repo_root: Path) -> ExecutorConfig:
             f"{', '.join(RPC_URL_SCHEMES)}"
         )
 
-    expected_chain_id = chain_id_for(BASE_SEPOLIA)
+    network = _load_network(from_file)
+    expected_chain_id = expected_chain_id_for_network(network)
     chain_id = _require_bounded_int(
         EXECUTOR_ENV_VARS["chain_id"],
         value_of("chain_id"),
@@ -530,8 +546,8 @@ def load_executor_config(env_file: Path, *, repo_root: Path) -> ExecutorConfig:
     if chain_id != expected_chain_id:
         raise GuardConfigError(
             f"{EXECUTOR_ENV_VARS['chain_id']} harus {expected_chain_id} "
-            f"({BASE_SEPOLIA}), dapat {chain_id}. v1 hanya mendukung satu chain; "
-            "lihat payment_guard.chains."
+            f"untuk jaringan {network!r}, dapat {chain_id}. Satu jaringan punya "
+            "tepat satu chain; lihat payment_guard.chains."
         )
 
     raw_usdc = value_of("usdc_address") or DEFAULT_USDC_ADDRESS
@@ -556,6 +572,7 @@ def load_executor_config(env_file: Path, *, repo_root: Path) -> ExecutorConfig:
         chain_id=chain_id,
         usdc_address=usdc_address,
         lock_timeout_ms=lock_timeout_ms,
+        network=network,
     )
 
 
@@ -746,7 +763,8 @@ def load_watcher_config(env_file: Path) -> WatcherConfig:
             f"{', '.join(RPC_URL_SCHEMES)}"
         )
 
-    expected_chain_id = chain_id_for(BASE_SEPOLIA)
+    network = _load_network(from_file)
+    expected_chain_id = expected_chain_id_for_network(network)
     chain_id = _require_bounded_int(
         WATCHER_ENV_VARS["chain_id"],
         value_of("chain_id"),
@@ -757,8 +775,8 @@ def load_watcher_config(env_file: Path) -> WatcherConfig:
     if chain_id != expected_chain_id:
         raise GuardConfigError(
             f"{WATCHER_ENV_VARS['chain_id']} harus {expected_chain_id} "
-            f"({BASE_SEPOLIA}), dapat {chain_id}. v1 hanya mendukung satu chain; "
-            "lihat payment_guard.chains."
+            f"untuk jaringan {network!r}, dapat {chain_id}. Satu jaringan punya "
+            "tepat satu chain; lihat payment_guard.chains."
         )
 
     usdc_address = _require_address(
@@ -970,6 +988,23 @@ def _require_outside_repo(var: str, path: Path, repo_root: Path) -> None:
             "kecelakaan. Pindahkan berkasnya, mis. ke direktori sendiri di luar "
             "pohon repo, lalu arahkan variabelnya ke sana."
         )
+
+
+def _load_network(from_file: Mapping[str, str]) -> str:
+    """Jaringan yang dipilih konfigurasi, dari environment lalu ``env_file``.
+
+    Tidak disetel berarti produksi, jadi konfigurasi lama berperilaku sama
+    persis seperti sebelum devnet ada. Nama yang tidak dikenal ditolak; lihat
+    :func:`payment_guard.chains.normalize_network` untuk alasannya.
+
+    Raises:
+        GuardConfigError: bila nama jaringannya tidak dikenal.
+    """
+    raw = (os.environ.get(NETWORK_ENV_VAR) or from_file.get(NETWORK_ENV_VAR) or "").strip()
+    try:
+        return normalize_network(raw) if raw else NETWORK_PRODUCTION
+    except NetworkError as exc:
+        raise GuardConfigError(f"{NETWORK_ENV_VAR}: {exc}") from None
 
 
 def _require_bounded_int(var: str, raw: str, *, default: int, minimum: int, maximum: int) -> int:
