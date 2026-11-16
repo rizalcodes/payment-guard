@@ -9,6 +9,111 @@ yang ditolak dan mengapa.
 
 ---
 
+## `network` diteruskan sebagai parameter, bukan dibaca dari environment
+
+Keputusan CoS, 16 Nov 2026. Diimplementasi di `c194405`.
+
+Pemilih jaringan di `6c71797` hanya mengatur `expected_chain_id` di Executor
+dan Watcher. Jalur mandate dan signing tidak ikut, jadi mandate devnet ditolak
+saat load dan envelope devnet tidak bisa ditandatangani — jalur bahagia devnet
+mati sebelum dimulai.
+
+### 1. Kenapa parameter, bukan environment
+
+`is_supported_chain`, `chain_id_for`, dan `supported_chains` menerima
+`*, network=NETWORK_PRODUCTION`. `chains.py` tetap murni: ia tidak membaca
+`os.environ`, dan satu-satunya pembaca `PAYMENT_GUARD_NETWORK` tetap
+`config.py::_load_network`.
+
+**Alternatif yang ditolak:** `chain_id_for` membaca `PAYMENT_GUARD_NETWORK`
+sendiri. Itu jauh lebih kecil — satu fungsi diubah dan semua pemanggil ikut
+tanpa disentuh, sembilan berkas menjadi satu.
+
+Ditolak karena ini jalur uang. `chain_id` yang dikembalikan fungsi itu **ikut
+ditandatangani ke envelope** dan menjadi `chainId` EIP-155 transaksi yang
+dikirim ke chain. Nilai sepenting itu harus bisa ditelusuri dari tempat
+pemanggilannya. Dengan pembacaan environment di dalam fungsi, pertanyaan
+"kenapa envelope ini memuat 31337" hanya bisa dijawab dengan mengetahui
+variabel lingkungan proses yang menandatanganinya pada saat itu — dan jejak
+itu tidak ada di envelope, tidak ada di database, dan tidak ada di log.
+
+Biayanya nyata dan dibayar: sembilan berkas disentuh, enam di antaranya di
+cakupan `mypy --strict`. Bawaan setiap parameter baru adalah produksi, jadi
+perilaku produksi tidak berubah; enam tes regresi menjaga sifat itu.
+
+### 2. Kenapa `--network` di `guard verify` adalah flag
+
+Tanpanya, `guard verify` menolak setiap envelope devnet sebagai
+"chain_id 31337 bukan 84532" — merusak satu item Definition of Done (PRD v2
+§15: "`guard verify` bekerja hanya dengan public key") justru di lingkungan
+yang sedang dibuktikan.
+
+Bawaannya `base-sepolia`, dan `choices` diambil dari `supported_networks()`
+sehingga nama yang salah ditolak argparse, bukan diam-diam berarti produksi.
+
+**Flag, bukan environment,** dan alasannya sifat perintah itu sendiri:
+`guard verify` dirancang bekerja tanpa database dan tanpa jaringan — itu yang
+membuatnya bisa dipakai pihak ketiga yang hanya punya envelope dan kunci
+publik. Perintah dengan sifat seperti itu tidak boleh mulai bergantung pada
+state tersembunyi di lingkungan pemanggilnya. Yang terlihat di baris perintah
+adalah seluruh masukannya.
+
+### 3. Konsekuensi bagi yang menambah chain ketiga kelak
+
+**`CHAIN_IDS` tidak boleh diisi chain devnet, dan tidak boleh diisi chain
+jaringan lain.** Ia memvalidasi string `chain` di mandate dan di argumen tool
+`check_payment`; menambahkan entri ke sana membuat setiap Guard produksi
+menerima mandate jaringan itu, dan satu salah ketik di mandate menjadi
+pembayaran di chain yang salah alih-alih error. Chain baru masuk ke peta
+jaringannya sendiri di `_NETWORK_CHAINS`.
+
+**Setiap pemanggil `chain_id_for`, `is_supported_chain`, dan
+`supported_chains` harus meneruskan `network`.** Bawaan produksi membuat
+pemanggil yang lupa tetap *aman*, tapi juga membuatnya **salah tanpa suara**
+di jaringan lain: ia akan memakai chain produksi di lingkungan yang bukan
+produksi. Tidak ada yang memaksa penerusan itu — bawaan adalah kenyamanan yang
+dibayar dengan hilangnya error saat lupa.
+
+Tempat yang harus ikut diubah, dari commit ini — sembilan berkas, bukan enam:
+
+| Berkas | Yang meneruskan |
+|---|---|
+| `mandate.py` | `_require_chain`, `load_mandate` |
+| `signing.py` | `build_payload`, `verify` |
+| `decision_service.py` | `chain_id_for` di `validate_input`, `build_payload` |
+| `guard_service.py` | `load_mandate_file` |
+| `executor.py` | `parse_and_verify`, `verify_and_plan` |
+| `approvals_cli.py` | `build_payload` (jalur `approved_by_human`) |
+| `verify_cli.py` | `verify_envelope_file`, `_check_mandate` |
+| `config.py` | field `network` di Guard, Approvals, Executor, Watcher, Reconciler |
+| `cli.py` | flag `--network` |
+
+Jaringan baru juga butuh entri di `_NETWORK_CHAINS` dan, bila ia punya kunci
+yang tidak boleh dipakai di tempat lain, daftar seperti
+`ANVIL_DEFAULT_ADDRESSES` beserta penolakannya di `load_wallet`.
+
+Satu sifat yang menolong: setiap jaringan punya **tepat satu** chain, dan
+`expected_chain_id_for_network` serta `chain_for_network` bersandar pada itu
+lewat unpacking satu elemen. Jaringan dengan dua chain akan menggagalkan
+keduanya dengan `ValueError`, bukan memilih salah satu secara diam-diam.
+
+### 4. Catatan tentang bukti suite integrasi
+
+Run integrasi pertama (574 lulus) memakai `chains.py` **sebelum** hook
+`mixed-line-ending` menormalkan akhir barisnya ke LF sesuai `.gitattributes`.
+Penyebab campurannya `Path.write_text` di Windows, yang menerjemahkan `\n`
+menjadi `\r\n` di berkas ber-LF.
+
+Karena itu suite dijalankan **ulang** atas byte yang benar-benar di-commit:
+**574 lulus, 0 gagal, 5 deselected, 0 skipped**. Supaya klaim itu bisa
+diperiksa dan bukan sekadar penalaran waktu, sha256 ketiga belas berkas
+dicatat sebelum run dan dibandingkan sesudahnya — identik.
+
+Angkanya kebetulan sama dengan run pertama. Itu disebut apa adanya di pesan
+commit `c194405`, bukan dikutip sebagai kalau run pertama yang membuktikannya.
+
+---
+
 ## Commit yang menyentuh `.env*` atau `tests/` wajib lewat suite integrasi
 
 Keputusan CoS, 16 Nov 2026, setelah `master` merah selama satu commit.
