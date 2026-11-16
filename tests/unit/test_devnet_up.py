@@ -19,6 +19,8 @@ pengaman ini fungsi murni, dan itu memang syaratnya.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from scripts.devnet_up import (
     DEVNET_CHAIN_ID,
@@ -239,3 +241,137 @@ class TestTheAnvilKeyIsDerivedNotHardcoded:
         # sengaja membacanya, bukan mendapatkannya dari repr.
         assert akun.private_key.startswith("0x")
         assert len(akun.private_key) == 66
+
+
+class TestBootstrapAndMigrateCommands:
+    """Flag diambil dari ``--help``; tes ini yang menjaganya tidak menyimpang.
+
+    Satu salah ketik flag di skrip orkestrasi tidak muncul sebagai error tipe
+    maupun lint — ia muncul sebagai subproses yang gagal di tengah jalan,
+    setelah database sudah disentuh. Fungsi pembangun argumen dibuat murni
+    supaya kesalahan itu tertangkap di sini.
+    """
+
+    def test_bootstrap_uses_the_documented_flags(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import bootstrap_command
+
+        argv = bootstrap_command(tmp_path / ".env.devnet", tmp_path / ".env.devnet.migrator")
+        assert argv[1:5] == ["-m", "payment_guard.cli", "db", "bootstrap-roles"]
+        assert "--env-file" in argv
+        assert "--migrator-env-file" in argv
+        assert "--no-prompt" in argv
+
+    def test_bootstrap_never_allows_a_remote_admin(self, tmp_path: Path) -> None:
+        """``--allow-remote-admin`` mematikan pengaman host; devnet tidak butuh."""
+        from scripts.devnet_up import bootstrap_command
+
+        argv = bootstrap_command(tmp_path / "a", tmp_path / "b")
+        assert "--allow-remote-admin" not in argv
+
+    def test_bootstrap_passes_both_env_paths(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import bootstrap_command
+
+        env = tmp_path / ".env.devnet"
+        migrator = tmp_path / ".env.devnet.migrator"
+        argv = bootstrap_command(env, migrator)
+        assert argv[argv.index("--env-file") + 1] == str(env)
+        assert argv[argv.index("--migrator-env-file") + 1] == str(migrator)
+
+    def test_the_runtime_and_migrator_files_are_different(self) -> None:
+        """URL pemilik objek tidak pernah ikut di berkas yang dibaca runtime."""
+        from scripts.devnet_up import DEVNET_ENV_FILENAME, DEVNET_MIGRATOR_ENV_FILENAME
+
+        assert DEVNET_ENV_FILENAME != DEVNET_MIGRATOR_ENV_FILENAME
+
+    def test_both_env_filenames_are_gitignored_by_the_env_pattern(self) -> None:
+        """Keduanya berawalan ``.env``, jadi pola ``.env.*`` menangkapnya."""
+        from scripts.devnet_up import DEVNET_ENV_FILENAME, DEVNET_MIGRATOR_ENV_FILENAME
+
+        assert DEVNET_ENV_FILENAME.startswith(".env")
+        assert DEVNET_MIGRATOR_ENV_FILENAME.startswith(".env")
+
+    def test_migrate_uses_the_documented_flag(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import migrate_command
+
+        argv = migrate_command(tmp_path / ".env.devnet.migrator")
+        assert argv[1:5] == ["-m", "payment_guard.cli", "db", "migrate"]
+        assert "--migrator-env-file" in argv
+
+    def test_migrate_omits_migrations_dir_by_default(self, tmp_path: Path) -> None:
+        """Devnet memakai migrasi yang sama dengan produksi.
+
+        Menunjuk ke direktori lain berarti menguji skema yang bukan skema
+        produk.
+        """
+        from scripts.devnet_up import migrate_command
+
+        assert "--migrations-dir" not in migrate_command(tmp_path / "m")
+
+    def test_migrate_includes_migrations_dir_when_given(self, tmp_path: Path) -> None:
+        from scripts.devnet_up import migrate_command
+
+        argv = migrate_command(tmp_path / "m", tmp_path / "migrations")
+        assert argv[argv.index("--migrations-dir") + 1] == str(tmp_path / "migrations")
+
+    def test_both_commands_use_the_running_interpreter(self, tmp_path: Path) -> None:
+        """``sys.executable``, bukan ``guard`` di PATH.
+
+        Skrip ini dijalankan lewat ``uv run``, dan console script belum tentu
+        ada di PATH subproses.
+        """
+        import sys
+
+        from scripts.devnet_up import bootstrap_command, migrate_command
+
+        assert bootstrap_command(tmp_path / "a", tmp_path / "b")[0] == sys.executable
+        assert migrate_command(tmp_path / "b")[0] == sys.executable
+
+
+class TestMaintenanceUrlStillGuardsTheCluster:
+    """URL pemeliharaan melewati pengaman nama database, jadi port wajib dicek.
+
+    ``maintenance_url_for`` menghasilkan URL ber-dbname ``postgres`` supaya
+    ``DROP DATABASE`` bisa dijalankan. Itu berarti ia melewati satu-satunya
+    pengaman yang menyebut ``payment_guard_devnet``. Yang tersisa yang masih
+    menjaga adalah port dan host, dan di situlah tes ini bekerja.
+    """
+
+    def test_it_points_at_the_maintenance_database(self) -> None:
+        from scripts.devnet_up import MAINTENANCE_DBNAME, maintenance_url_for
+
+        hasil = maintenance_url_for(url_devnet())
+        assert f"dbname={MAINTENANCE_DBNAME}" in hasil or f"/{MAINTENANCE_DBNAME}" in hasil
+
+    def test_it_keeps_the_devnet_port(self) -> None:
+        from scripts.devnet_up import maintenance_url_for
+
+        assert DEVNET_PORT in maintenance_url_for(url_devnet())
+
+    def test_the_operator_cluster_is_refused(self) -> None:
+        from scripts.devnet_up import maintenance_url_for
+
+        with pytest.raises(DevnetError) as info:
+            maintenance_url_for(url_devnet(port="5434"))
+        assert "operator" in str(info.value)
+
+    def test_the_test_cluster_is_refused(self) -> None:
+        from scripts.devnet_up import maintenance_url_for
+
+        with pytest.raises(DevnetError) as info:
+            maintenance_url_for(url_devnet(port="5435"))
+        assert "5435" in str(info.value)
+
+    @pytest.mark.parametrize("port", ["5432", "5433", "5437"])
+    def test_any_other_port_is_refused(self, port: str) -> None:
+        from scripts.devnet_up import maintenance_url_for
+
+        with pytest.raises(DevnetError):
+            maintenance_url_for(url_devnet(port=port))
+
+    @pytest.mark.parametrize("host", ["10.0.0.5", "db.example.com"])
+    def test_a_non_loopback_host_is_refused(self, host: str) -> None:
+        from scripts.devnet_up import maintenance_url_for
+
+        with pytest.raises(DevnetError) as info:
+            maintenance_url_for(url_devnet(host=host))
+        assert "loopback" in str(info.value)

@@ -38,6 +38,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Final
 
 from psycopg import conninfo
@@ -251,6 +252,143 @@ def akun_anvil(indeks: int) -> AkunDevnet:
 
 
 # --------------------------------------------------------------------------- #
+# Bootstrap dan migrasi
+# --------------------------------------------------------------------------- #
+#
+# Keduanya dijalankan lewat perintah `guard` yang sudah ada, bukan SQL tangan.
+# Alasannya bukan kerapian: `bootstrap-roles` yang menulis role dan kelima URL
+# runtime, dan `db migrate` yang menjaga `schema_migrations`. SQL tangan akan
+# menghasilkan devnet yang skemanya mirip tapi riwayat migrasinya tidak pernah
+# ada, dan itu devnet yang menguji hal lain.
+
+#: Nama berkas env runtime devnet, relatif terhadap akar repo.
+DEVNET_ENV_FILENAME: Final = ".env.devnet"
+
+#: Nama berkas URL migrator devnet. Terpisah dari env runtime, seperti di
+#: produksi: URL pemilik objek tidak pernah ikut di berkas yang dibaca lima
+#: proses runtime.
+DEVNET_MIGRATOR_ENV_FILENAME: Final = ".env.devnet.migrator"
+
+#: Database pemeliharaan untuk DROP/CREATE. Tidak bisa menghapus database yang
+#: sedang dipakai koneksinya sendiri.
+MAINTENANCE_DBNAME: Final = "postgres"
+
+
+def maintenance_url_for(admin_url: str) -> str:
+    """URL ke database pemeliharaan di cluster yang sama.
+
+    ``DROP DATABASE`` tidak bisa dijalankan dari koneksi ke database yang akan
+    dihapus, jadi ``--recreate`` butuh pintu masuk lain di cluster yang sama.
+
+    Pengamannya diperiksa **lagi** di sini, bukan dipercaya dari pemanggil:
+    fungsi ini menghasilkan URL yang nama databasenya **bukan**
+    ``payment_guard_devnet``, jadi ia melewati satu-satunya pengaman yang
+    menyebut nama itu. Yang tersisa yang masih menjaga adalah port dan host.
+
+    Raises:
+        DevnetError: bila port atau hostnya bukan cluster devnet.
+    """
+    bagian = conninfo.conninfo_to_dict(admin_url)
+    port = str(bagian.get("port") or "")
+    host = str(bagian.get("host") or "")
+    if port in PORT_TERLARANG:
+        raise DevnetError(
+            f"port {port} adalah {PORT_TERLARANG[port]}. Devnet memakai {DEVNET_PORT}."
+        )
+    if port != DEVNET_PORT:
+        raise DevnetError(f"port database {port!r} bukan {DEVNET_PORT} (cluster devnet)")
+    if host not in LOOPBACK:
+        raise DevnetError(f"host database {host!r} bukan loopback")
+    bagian["dbname"] = MAINTENANCE_DBNAME
+    return conninfo.make_conninfo(**{k: v for k, v in bagian.items() if v is not None})
+
+
+def bootstrap_command(env_file: Path, migrator_env_file: Path) -> list[str]:
+    """Argumen ``guard db bootstrap-roles`` untuk devnet.
+
+    Flagnya dari ``--help``, bukan ingatan: ``--env-file``,
+    ``--migrator-env-file``, ``--no-prompt``. ``--allow-remote-admin``
+    **tidak** dipakai — URL admin devnet selalu loopback, dan membiarkan flag
+    itu lewat berarti pengaman host hilang tanpa ada yang memintanya.
+
+    Fungsi ini murni supaya satu salah ketik flag tertangkap tes, bukan saat
+    skrip berjalan setengah jalan.
+    """
+    return [
+        sys.executable,
+        "-m",
+        "payment_guard.cli",
+        "db",
+        "bootstrap-roles",
+        "--env-file",
+        str(env_file),
+        "--migrator-env-file",
+        str(migrator_env_file),
+        "--no-prompt",
+    ]
+
+
+def migrate_command(migrator_env_file: Path, migrations_dir: Path | None = None) -> list[str]:
+    """Argumen ``guard db migrate`` untuk devnet.
+
+    ``--migrations-dir`` hanya ikut bila diberikan; bawaannya ``migrations/``
+    di akar repo, dan devnet memakai migrasi yang sama dengan produksi — kalau
+    tidak, ia menguji skema yang bukan skema produk.
+    """
+    argv = [
+        sys.executable,
+        "-m",
+        "payment_guard.cli",
+        "db",
+        "migrate",
+        "--migrator-env-file",
+        str(migrator_env_file),
+    ]
+    if migrations_dir is not None:
+        argv += ["--migrations-dir", str(migrations_dir)]
+    return argv
+
+
+def devnet_tables(admin_url: str) -> list[str]:
+    """Nama tabel di schema ``public`` database devnet.
+
+    Dipakai :func:`require_empty_devnet_db` untuk memutuskan menolak atau
+    jalan. Hanya SELECT.
+    """
+    import psycopg
+
+    require_devnet_admin_url(admin_url)
+    with psycopg.connect(admin_url) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'"
+        )
+        return sorted(str(baris[0]) for baris in cur.fetchall())
+
+
+def recreate_devnet_database(admin_url: str) -> None:
+    """Hapus lalu buat ulang database devnet. Hanya dipanggil dengan ``--recreate``.
+
+    Raises:
+        DevnetError: bila clusternya bukan devnet, atau DROP/CREATE gagal.
+    """
+    import psycopg
+    from psycopg import sql
+
+    require_devnet_admin_url(admin_url)
+    pemeliharaan = maintenance_url_for(admin_url)
+    try:
+        with psycopg.connect(pemeliharaan, autocommit=True) as conn, conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                    sql.Identifier(DEVNET_DBNAME)
+                )
+            )
+            cur.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(DEVNET_DBNAME)))
+    except Exception as exc:
+        raise DevnetError(f"gagal membangun ulang database devnet: {type(exc).__name__}") from None
+
+
+# --------------------------------------------------------------------------- #
 # Langkah-langkah
 # --------------------------------------------------------------------------- #
 
@@ -335,9 +473,44 @@ def main(argv: list[str] | None = None) -> int:
         print("praflight-only: berhenti di sini, tidak ada yang diubah.")
         return 0
 
+    akar = Path(__file__).resolve().parent.parent
+    env_file = akar / DEVNET_ENV_FILENAME
+    migrator_env = akar / DEVNET_MIGRATOR_ENV_FILENAME
+
+    try:
+        if args.recreate:
+            print("--recreate: menghapus dan membangun ulang database devnet")
+            recreate_devnet_database(admin_url)
+        require_empty_devnet_db(devnet_tables(admin_url), recreate=args.recreate)
+        print("praflight: database devnet kosong")
+
+        # URL admin masuk lewat environment SEMENTARA dan tidak pernah
+        # dicetak, sama seperti prosedur produksi di docs/runbook.md.
+        print(f"bootstrap-roles -> {env_file.name}, {migrator_env.name}")
+        keluaran = jalankan(
+            bootstrap_command(env_file, migrator_env),
+            env={"PAYMENT_GUARD_ADMIN_DB_URL": admin_url},
+            label="guard db bootstrap-roles",
+        )
+        for baris in keluaran.splitlines():
+            if baris.strip():
+                print(f"  {baris}")
+
+        print("db migrate")
+        keluaran = jalankan(
+            migrate_command(migrator_env),
+            label="guard db migrate",
+        )
+        for baris in keluaran.splitlines():
+            if baris.strip():
+                print(f"  {baris}")
+    except DevnetError as exc:
+        print(f"gagal: {exc}", file=sys.stderr)
+        return 1
+
     print(
-        "Langkah berikutnya (bootstrap, migrasi, deploy, pendanaan) belum "
-        "diimplementasi di revisi ini."
+        "\nLangkah berikutnya (keygen, wallet Executor, deploy token uji, "
+        "pendanaan, .env.devnet lengkap) belum diimplementasi di revisi ini."
     )
     return 0
 
