@@ -9,6 +9,100 @@ yang ditolak dan mengapa.
 
 ---
 
+## 2026-11-17 — skenario devnet (d) dan (b) hijau, (c) dipotong, dan satu koreksi
+
+Keputusan CoS, 17 Nov 2026. Tiga hal: hasil dua skenario, satu skenario yang
+dipotong beserta alasan sebenarnya, dan koreksi atas sesuatu yang pernah
+dinyatakan salah di laporan sesi ini.
+
+### (c) `mismatch` DIPOTONG — bukan karena waktu
+
+Alasannya bukan kekurangan waktu, dan penting agar tidak dicatat begitu:
+**kondisinya tidak bisa dibuat tanpa memalsukan database.** `mismatch` berarti
+settlement `final` punya execution yang penerima atau jumlahnya **berbeda**
+untuk transaksi yang sama. Di devnet yang jujur itu mustahil: baris
+`executions` ditulis dari `raw_tx` yang sudah ditandatangani, dan settlement
+dibaca dari log `Transfer` transaksi yang sama. Keduanya berasal dari satu byte
+transaksi, jadi mereka tidak bisa berbeda.
+
+Membuatnya butuh `UPDATE` tangan atas `executions` atau `settlements` sesudah
+fakta. Itu menguji SQL reconciler terhadap baris karangan, bukan menguji
+sistem — dan Executor **tidak akan pernah** menandatangani transaksi yang
+menghasilkan ketidakcocokan itu. Jadi (c) tidak dijalankan di devnet, dan
+status itu tetap dijaga oleh tes unit dan integrasi yang memang menyuntikkan
+baris tidak cocok dengan sengaja.
+
+Konsekuensinya harus ditulis apa adanya: untuk (c) **tidak ada bukti devnet**.
+Tes bukan bukti on-chain.
+
+### Hasil (d) reorg
+
+Keputusan `5c5a04d3-f773-44f6-a117-8a6871a71b5e`, hash commit yang diuji
+`f607f91`. Urutannya: tx di blok 57 → `anvil_mine` 12 → satu siklus watcher
+menyisipkan settlement `pending` → `anvil_reorg [13, []]` membuang blok 57
+sampai 69 → tx hilang dari chain dan dari mempool, nonce mundur 5 ke 4, saldo
+mundur → watcher menandai `reorged` (**bukan** alarm) dan memundurkan kursornya
+sendiri ke 56 → reconciler **tidak** menulis `matched` → `guard recover`
+menyiarkan ulang `raw_tx` yang sama sehingga hash dan nonce tidak berubah, tx
+mendarat di blok 70 → `restored` lalu `final` → `matched`.
+
+Dua hal yang ikut terbukti: tidak ada nonce ganda pada sapuan seluruh blok, dan
+saldo total tetap 500 tUSDC meski satu pembayaran pernah dibatalkan chain.
+
+Bentuk parameter `anvil_reorg` **diverifikasi, bukan ditebak**. Dokumentasi
+Anvil menyebut posisional `[depth, tx_block_pairs]`; crate Rust
+`alloy-provider` justru mengirim satu objek. Pada `anvil/v1.9.1` yang terpin,
+bentuk objek ditolak `-32602 invalid type: map, expected u64`, dan yang
+diterima adalah **posisional**.
+
+### Hasil (b) `unmatched_onchain`
+
+Transfer 5 tUSDC dari wallet Executor ke `0xf39fd6e5…b92266` (akun Anvil
+indeks 0, **bukan** penerima di allowlist), ditandatangani lewat `load_wallet`
+dengan `network=devnet` tapi **tanpa melewati Guard**: tidak ada keputusan,
+tidak ada envelope, tidak ada baris `executions`. Hash commit yang diuji
+`f607f91`, tx `0x1be23ac84c599ebd839fc827b828b3ba3a9f8372074ef9afc355bb80a003ef2f`
+di blok 83.
+
+Watcher melihatnya — itu memang guna penyaringan per **pengirim**, bukan per
+penerima — dan reconciler menulis satu `unmatched_onchain` dengan
+`decision_id` NULL. Lima `matched` yang lama tidak berubah. `guard reconcile`
+keluar dengan kode **1** pada mode baca maupun mode tulis.
+
+### KOREKSI — alarm reconciler tidak berupa event `alarm_*`
+
+**Yang sebelumnya dikatakan, dan salah.** Rencana verifikasi (b) menuntut
+"`audit_log` alarm: tepat 1", dengan asumsi alarm dihitung lewat
+`event LIKE 'alarm%'`. Asumsi itu keliru.
+
+**Yang benar.** Reconciler hanya pernah menulis **satu** nama kejadian,
+`reconciliation_state_changed`; keadaan alarmnya ada di
+`payload->>'state'`, dan daftar yang dianggap alarm adalah `ALARM_STATES` di
+`src/payment_guard/reconciler.py`. Komentar di berkas itu sudah menyatakannya:
+"State ada di payload `reconciliation_state_changed`, bukan di nama
+kejadiannya." Yang menulis kejadian bernama `alarm_*` **hanya Watcher**
+(`alarm_final_settlement_reorged`, `alarm_watcher_wallet_mismatch`).
+
+**Bukti.** Dari keluaran mentah `b-08-verifikasi.txt` di direktori scratchpad
+sesi ini:
+
+```
+  total event alarm : 0 (harap 1)
+  reconciliation_state_changed dengan state unmatched_onchain: 1
+```
+
+Jadi alarmnya memang tepat satu, lewat tiga jalur: kode keluar `1`, baris
+`ALARM (1): unmatched_onchain settlement 7` di keluaran, dan state di payload
+audit. Yang nol adalah kejadian **bernama** `alarm*` — dan itu benar.
+
+Akibat praktisnya dicatat di `docs/runbook.md`: pemantauan yang memakai
+`event LIKE 'alarm%'` akan **melewatkan setiap alarm reconciler**, yaitu
+`unmatched_onchain`, `mismatch`, dan `invalidated`. Kekeliruan ini hanya
+terlihat karena harapannya dituliskan sebagai angka lalu diperiksa; harapan
+yang ditulis sebagai kalimat akan lolos.
+
+---
+
 ## 2026-11-17 — pesan tag `m6` diganti, commit-nya tidak
 
 2026-11-17: Pesan anotasi tag `m6` diganti. Alasan: **pesan tag usang** — ia

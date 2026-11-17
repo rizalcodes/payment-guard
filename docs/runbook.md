@@ -597,3 +597,75 @@ Checklist ini tidak perlu diulang. Dua lapis mengambil alih:
 
 Lapis kedua itu melaporkan belakangan, bukan mencegah. Itu sebabnya checklist
 ini ada.
+
+---
+
+## 11. Dua hal yang mudah salah saat memantau
+
+Keduanya ditemukan saat skenario devnet (b) dan (d) dijalankan, dan keduanya
+akan diam-diam salah kalau tidak ditulis.
+
+### a. Alarm reconciler TIDAK bernama `alarm_*`
+
+Query ini **salah**, dan kesalahannya tidak terlihat karena ia tetap
+mengembalikan baris:
+
+```sql
+-- SALAH: melewatkan setiap alarm reconciler
+SELECT * FROM audit_log WHERE event LIKE 'alarm%';
+```
+
+Reconciler hanya pernah menulis satu nama kejadian,
+`reconciliation_state_changed`. Keadaan alarmnya ada di **payload**, bukan di
+nama kejadiannya — lihat komentar `RECONCILIATION_STATES` dan himpunan
+`ALARM_STATES` di `src/payment_guard/reconciler.py`. Jadi `LIKE 'alarm%'`
+melewatkan ketiga keadaan ini:
+
+| keadaan | arti |
+|---|---|
+| `unmatched_onchain` | ada transfer dari wallet Executor yang tidak punya execution — uang bergerak di luar Payment Guard |
+| `mismatch` | execution-nya ada, tapi tujuan atau jumlahnya berbeda |
+| `invalidated` | settlement yang pernah `final` lalu ter-reorg |
+
+Yang benar menyertakan keduanya:
+
+```sql
+SELECT ts, actor, event, payload->>'state' AS state, payload
+FROM audit_log
+WHERE event LIKE 'alarm%'
+   OR (event = 'reconciliation_state_changed'
+       AND payload->>'state' IN ('unmatched_onchain', 'mismatch', 'invalidated'))
+ORDER BY ts DESC;
+```
+
+Daftar di query itu **wajib sama** dengan `ALARM_STATES`. Kalau keadaan alarm
+baru ditambahkan di kode, query ini ikut diperbarui; tidak ada yang memaksanya
+otomatis.
+
+Jalur yang **tidak** bisa terlewat: `guard reconcile` keluar dengan kode `1`
+bila ada alarm, pada mode `--report` maupun mode tulis. Untuk pemantauan,
+kode keluar lebih dapat dipercaya daripada query audit yang ditulis tangan.
+
+Kejadian bernama `alarm_*` tetap ada, tapi semuanya milik **Watcher**:
+`alarm_final_settlement_reorged` dan `alarm_watcher_wallet_mismatch`.
+
+### b. `pending` hanya ada selebar satu siklus Watcher
+
+Settlement **tidak** disisipkan saat transfer pertama kali masuk blok. Ia
+disisipkan ketika bloknya sudah melewati `safe_head`, yaitu
+`latest - CONFIRMATIONS`. Dengan `CONFIRMATIONS=12`, pembayaran dengan 2
+konfirmasi belum terlihat Watcher sama sekali — bukan `pending`, melainkan
+**tidak ada barisnya**.
+
+Akibatnya:
+
+- Pembayaran normal butuh **dua** siklus Watcher: siklus pertama menyisipkan
+  (sudah ≥ 12 konfirmasi), siklus kedua memfinalkan. Satu siklus saja berhenti
+  di `pending`, dan itu bukan kegagalan.
+- Reorg yang bisa **teramati** sistem ini adalah reorg yang lebih dalam
+  daripada `CONFIRMATIONS`. Reorg dangkal terjadi di blok yang belum pernah
+  dipindai, jadi tidak ada baris yang perlu diubah — dan itu memang perilaku
+  yang diinginkan.
+- Karena itu `pending` di `settlements` adalah keadaan sekejap. Baris `pending`
+  yang bertahan lama berarti siklus Watcher **tidak berjalan**, bukan berarti
+  pembayarannya belum dalam.
