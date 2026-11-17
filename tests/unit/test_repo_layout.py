@@ -155,6 +155,9 @@ class TestCanonicalDocs:
     #: diketahui salah di tag yang sudah dibuat.
     HISTORICAL = ("decisions.md", "CHANGELOG.md")
 
+    #: Deskriptif: menggambarkan kode yang ada, jadi kode yang menang bila beda.
+    DESCRIPTIVE = ("arsitektur.md",)
+
     @pytest.mark.parametrize("name", CANONICAL)
     def test_canonical_document_exists(self, name: str) -> None:
         assert (ROOT / "docs" / name).is_file(), name
@@ -171,6 +174,10 @@ class TestCanonicalDocs:
     def test_historical_document_exists(self, name: str) -> None:
         assert (ROOT / "docs" / name).is_file(), name
 
+    @pytest.mark.parametrize("name", DESCRIPTIVE)
+    def test_descriptive_document_exists(self, name: str) -> None:
+        assert (ROOT / "docs" / name).is_file(), name
+
     def test_no_other_markdown_sneaks_into_docs(self) -> None:
         """Daftar isi ``docs/`` tertutup.
 
@@ -178,8 +185,44 @@ class TestCanonicalDocs:
         sementara tidak boleh terlihat sama di direktori yang sama.
         """
         ada = sorted(p.name for p in (ROOT / "docs").glob("*.md"))
-        harus = sorted([*self.CANONICAL, *self.DERIVED, *self.OPERATIONAL, *self.HISTORICAL])
+        harus = sorted(
+            [
+                *self.CANONICAL,
+                *self.DERIVED,
+                *self.OPERATIONAL,
+                *self.HISTORICAL,
+                *self.DESCRIPTIVE,
+            ]
+        )
         assert ada == harus, f"isi docs/ berubah: {ada}"
+
+    def test_descriptive_stays_one_document(self) -> None:
+        """``DESCRIPTIVE`` tidak boleh bertambah tanpa disengaja.
+
+        Pemeriksaan tertutup di atas menerima **apa pun** yang didaftarkan di
+        salah satu tuple, jadi menambah nama ke ``DESCRIPTIVE`` adalah cara
+        termudah membuat dokumen baru lolos tanpa dibahas. Kategori ini yang
+        paling longgar artinya — "menggambarkan kode" bisa dipakai untuk hampir
+        apa saja — jadi ia dijaga paling ketat: isinya harus tetap satu
+        dokumen, dan menambah yang kedua harus mengubah tes ini juga.
+        """
+        assert self.DESCRIPTIVE == ("arsitektur.md",)
+
+    def test_every_docs_category_is_disjoint(self) -> None:
+        """Satu dokumen hanya boleh ada di satu kategori.
+
+        Nama yang muncul di dua tuple membuat pemeriksaan tertutup tetap lolos
+        walau jumlahnya tidak lagi cocok dengan isi ``docs/``.
+        """
+        semua = [
+            *self.CANONICAL,
+            *self.DERIVED,
+            *self.OPERATIONAL,
+            *self.HISTORICAL,
+            *self.DESCRIPTIVE,
+        ]
+        ganda = sorted({n for n in semua if semua.count(n) > 1})
+        assert not ganda, f"nama dokumen ada di lebih dari satu kategori: {ganda}"
 
     def test_the_runbook_covers_the_stuck_transaction(self) -> None:
         """Keterbatasan yang disebut README harus punya prosedurnya."""
