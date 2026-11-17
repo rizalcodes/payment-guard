@@ -9,6 +9,67 @@ yang ditolak dan mengapa.
 
 ---
 
+## 2026-11-17 — run skenario devnet diulang karena keadaan git tidak terekam
+
+Keputusan CoS, 17 Nov 2026. Run skenario (a) dan (e) yang pertama dinyatakan
+hijau, dan hasilnya memang hijau — tapi **buktinya tidak memenuhi syaratnya
+sendiri**, jadi keduanya diulang.
+
+Yang kurang bukan hasilnya, melainkan rekamannya. Berkas keluaran run pertama
+memuat baris seperti `commit yang diuji: 56c6dc0` yang **diketik tangan lewat
+`echo`**, bukan keluaran `git rev-parse HEAD`. Label yang ditulis sendiri tidak
+membuktikan apa pun tentang commit yang dijalankan, dan tidak menyentuh
+pertanyaan kedua yang lebih penting: apakah working tree bersih saat run, atau
+ada perubahan tak ter-commit yang ikut dieksekusi. `git status --porcelain`
+tidak pernah dijalankan saat run dimulai.
+
+Dua hal lain muncul saat rekamannya diperiksa:
+
+| Temuan | Akibat |
+|---|---|
+| Berkas `execute-4728d138.txt` dan `recover-4728d138.txt` — langkah yang benar-benar memindahkan uang — tidak punya label commit sama sekali | langkah inti (a) run pertama tanpa penanda apa pun |
+| Label di dua berkas awal (a) menyebut `58314e7` dan `ec302da`, bukan `56c6dc0` | (a) run pertama **tidak pernah berjalan utuh di satu commit**: langkah 0–2 di dua commit lama, langkah 3 ke atas di `56c6dc0` |
+
+Yang kedua itu bukan salah tulis, melainkan sejarah yang sebenarnya: langkah
+0–2 dijalankan berjam-jam lebih awal, sebelum `d5108fc` dan `56c6dc0` ada.
+Laporan yang menyebut "(a) dijalankan di `56c6dc0`" karena itu terlalu rapi.
+
+**Run pengganti, keduanya di `56c6dc0`:**
+
+| Skenario | Run pertama (tetap ada) | Run ulang |
+|---|---|---|
+| (a) jalur bahagia | `4728d138-7dee-4bcc-8b8c-9330a849ceca` | `c851d003-bb26-4623-834d-b31891f300e7` |
+| (e) recovery | `06971b74-5bf8-454e-9f4e-c6423bb876fe` | `577f1cbf-ce89-4e49-a702-04508127b5b5` |
+
+Run pertama **tidak dihapus** dari database devnet. Ia tetap ada sebagai
+riwayat, dan tetap `matched` — yang dibatalkan hanya kedudukannya sebagai
+bukti. Run (e) pertama (`06971b74`) khususnya **tidak dipakai sebagai bukti
+tag `m6-devnet`**; yang dipakai adalah `577f1cbf`, di `56c6dc0`, dengan
+rekaman git otomatis.
+
+**Yang berubah dalam caranya, bukan hanya dalam hasilnya.** Setiap langkah run
+ulang dijalankan lewat pembungkus di scratchpad yang:
+
+* **menolak mulai** bila `git status --porcelain` tidak kosong, dan menolaknya
+  sebelum berkas keluaran dibuat, supaya tidak ada jejak setengah jadi;
+* membangun header dari keluaran `git rev-parse HEAD` dan
+  `git status --porcelain` yang sungguh dijalankan, ditambah waktu mulai ISO
+  dan sha256 `.env.devnet` serta skrip pembuat keputusan — isi `.env.devnet`
+  tidak pernah dibaca ke layar, hanya hash-nya;
+* menulis footer berisi exit code dan keadaan git **sesudah** perintah, dan
+  menyebut `BERUBAH` bila porcelain tidak lagi kosong.
+
+Pembungkusnya hidup di scratchpad, bukan di repo: ia alat verifikasi untuk satu
+rangkaian run, bukan bagian produk. Kalau pola ini dipakai lagi, tempatnya
+`scripts/`, dengan tes.
+
+Aturan yang berlaku sejak sekarang: **run skenario yang dipakai sebagai bukti
+wajib punya `git rev-parse HEAD` dan `git status --porcelain` tersimpan ke
+berkas, dibuat perintah, sebelum langkah pertama dan sesudah langkah
+terakhir.** Header `echo` tidak dihitung.
+
+---
+
 ## Footer `Co-Authored-By` menjadi netral: `Claude <noreply@anthropic.com>`
 
 Keputusan CoS dan pemilik repo, 17 Nov 2026. Titik ganti kebijakan yang
