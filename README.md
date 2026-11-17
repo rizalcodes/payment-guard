@@ -10,10 +10,12 @@ Dokumen yang mengikat: [docs/PRD_v2.1.md](docs/PRD_v2.1.md),
 [migrations/0001_init.sql](migrations/0001_init.sql) dan
 [migrations/0002_roles.sql](migrations/0002_roles.sql).
 
-Status: **M5**. Yang sudah ada: struktur repo, runner migrasi, role database,
+Status: **M6**. Yang sudah ada: struktur repo, runner migrasi, role database,
 aturan mandate, envelope bertanda tangan, Guard sebagai server MCP, Approvals
-CLI, agent demo, dan Executor dengan write-ahead serta recovery. Watcher dan
-Reconciler menyusul di M6 dan sesudahnya. README lengkap adalah pekerjaan M9.
+CLI, agent demo, Executor dengan write-ahead serta recovery, serta Watcher dan
+Reconciler. Bukti devnet lokal untuk keempat skenario yang dijalankan, beserta
+batas-batas bukti itu, ada di [Status Verifikasi](#status-verifikasi). README
+lengkap adalah pekerjaan M9.
 
 ## Prasyarat
 
@@ -445,9 +447,22 @@ tertinggal tidak bisa menyebabkan tabrakan. Yang tidak tertangani adalah
 transaksi dari wallet yang sama yang dikirim di luar Payment Guard dan belum
 terlihat node.
 
-**Belum ada Watcher dan Reconciler.** Pembayaran on-chain belum dicocokkan
-kembali ke keputusan yang mengizinkannya; `settlements` masih kosong. Itu M6
-dan sesudahnya.
+**Pencocokan kembali ada, tapi buktinya devnet lokal saja.** Watcher memindai
+log `Transfer` dari wallet Executor menjadi `settlements`, dan Reconciler
+mencocokkannya kembali ke keputusan yang mengizinkannya. Keduanya dijalankan
+terhadap devnet lokal (Anvil, chain id 31337, token uji yang bukan USDC) dan
+terhadap tes unit serta integrasi; **tidak ada bukti di testnet publik**. Yang
+sudah dan belum dijalankan di devnet ada di
+[Status Verifikasi](#status-verifikasi) — termasuk satu keadaan, `mismatch`,
+yang tidak diuji di sana. Bukti on-chain di Base Sepolia adalah item v1.1
+(`m6-onchain`).
+
+Dua batas operasional yang ikut dari situ, keduanya dijelaskan di
+[docs/runbook.md](docs/runbook.md) bagian 11: settlement baru masuk saat
+konfirmasinya mencapai `CONFIRMATIONS`, sehingga `pending` hanya ada selebar
+satu siklus Watcher; dan alarm Reconciler **tidak** berupa kejadian bernama
+`alarm_*`, sehingga pemantauan yang hanya mencari nama itu akan melewatkan
+`unmatched_onchain`, `mismatch`, dan `invalidated`.
 
 ## Security model
 
