@@ -11,8 +11,10 @@ akan gagal dengan error koneksi, bukan lulus diam-diam.
 
 from __future__ import annotations
 
+import inspect
 import io
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -23,6 +25,7 @@ from payment_guard.approvals_cli import (
     GUARD_RUNNING_TRUE,
     ApprovalError,
     DecisionRow,
+    _active_mandate,
     _payload,
     approve,
     confirm_with_token,
@@ -33,8 +36,15 @@ from payment_guard.approvals_cli import (
     require_uuid,
     write_reason,
 )
+from payment_guard.chains import (
+    BASE_SEPOLIA,
+    DEVNET_LOCAL,
+    NETWORK_DEVNET,
+    NETWORK_PRODUCTION,
+)
 from payment_guard.config import ApprovalsConfig
 from payment_guard.events import Event, require_safe_payload
+from payment_guard.mandate import MandateError, load_mandate, normalized_form
 from payment_guard.reasons import ReasonCode, Status
 
 DECISION_ID = "123e4567-e89b-42d3-a456-426614174000"
@@ -327,3 +337,109 @@ class TestReasonIsRenderedAsData:
         out = io.StringIO()
         write_reason(out, "satu\ndua\ntiga\nempat")
         assert len(out.getvalue().splitlines()) == 3
+
+
+class FakeCursor:
+    """Kursor tiruan yang hanya tahu satu hal: satu baris ``active_mandates``.
+
+    Sengaja tidak lebih dari itu. Yang diuji di kelas di bawah adalah
+    pembacaan isi mandate, bukan SQL-nya; SQL-nya diuji suite integrasi.
+    """
+
+    def __init__(self, row: tuple[str, dict[str, Any]] | None) -> None:
+        self._row = row
+        self.params: list[object] = []
+
+    def execute(self, sql: object, params: object = None) -> None:
+        self.params.append(params)
+
+    def fetchone(self) -> tuple[str, dict[str, Any]] | None:
+        return self._row
+
+
+#: Mandate devnet, dengan chain yang hanya ada di jaringan devnet.
+#:
+#: Alamatnya alamat contoh EIP-55, bukan alamat Anvil: tes ini tidak perlu
+#: devnet hidup, dan tidak boleh memancing orang menyalin alamat devnet.
+DEVNET_MANDATE: dict[str, Any] = {
+    "mandate_id": "devnet-m-001",
+    "agent_id": "devnet-agent",
+    "chain": DEVNET_LOCAL,
+    "allowed_recipients": ["0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"],
+    "max_per_tx": "25",
+    "max_per_day": "100",
+    "human_approval_above": "10",
+    "retry_cooldown_seconds": 3600,
+    "aggregation_window_seconds": 3600,
+    "decision_ttl_seconds": 900,
+    "human_wait_ttl_seconds": 900,
+}
+
+
+class TestActiveMandateHonoursTheNetwork:
+    """Bug 17 Nov 2026: jalur approve membaca mandate dengan bawaan produksi.
+
+    ``_commit_decision`` memanggil ``_active_mandate``, yang memanggil
+    ``load_normalized``. Versi pertama ``load_normalized`` tidak punya
+    parameter jaringan sama sekali, jadi ia selalu memakai bawaan produksi.
+    Akibatnya mandate ber-chain ``devnet-local`` ditolak dengan
+    ``chain 'devnet-local' tidak didukung di jaringan 'base-sepolia'`` — dan
+    penolakan itu datang **setelah** operator mengetik token konfirmasi, di
+    dalam transaksi yang lalu di-rollback seluruhnya.
+
+    Tidak ada satu pun tes yang menjalankan jalur approve di jaringan devnet;
+    itulah sebabnya bug ini lolos. Kelas ini yang menutupnya.
+    """
+
+    def kursor(self) -> FakeCursor:
+        """Satu baris seperti yang ditulis Guard: hash plus bentuk ternormalisasi."""
+        mandate = load_mandate(DEVNET_MANDATE, network=NETWORK_DEVNET)
+        return FakeCursor(("hash-devnet", normalized_form(mandate)))
+
+    def test_devnet_mandate_is_accepted_on_the_devnet_network(self) -> None:
+        mandate_hash, mandate = _active_mandate(
+            self.kursor(),  # type: ignore[arg-type]
+            "devnet-agent",
+            network=NETWORK_DEVNET,
+        )
+        assert mandate_hash == "hash-devnet"
+        assert mandate.chain == DEVNET_LOCAL
+
+    def test_devnet_mandate_is_refused_on_the_production_network(self) -> None:
+        """Inilah kegagalan yang sungguh terjadi di terminal operator."""
+        with pytest.raises(MandateError) as info:
+            _active_mandate(
+                self.kursor(),  # type: ignore[arg-type]
+                "devnet-agent",
+                network=NETWORK_PRODUCTION,
+            )
+        pesan = str(info.value)
+        assert DEVNET_LOCAL in pesan
+        assert BASE_SEPOLIA in pesan
+
+    def test_amounts_stay_in_usdc_decimals_on_devnet_too(self) -> None:
+        """Jaringan tidak boleh mengubah satuan: tetap desimal, bukan base units."""
+        _, mandate = _active_mandate(
+            self.kursor(),  # type: ignore[arg-type]
+            "devnet-agent",
+            network=NETWORK_DEVNET,
+        )
+        asli = load_mandate(DEVNET_MANDATE, network=NETWORK_DEVNET)
+        assert mandate.max_per_tx == asli.max_per_tx
+        assert mandate.max_per_day == asli.max_per_day
+        assert mandate.human_approval_above == asli.human_approval_above
+
+    def test_network_is_keyword_only_and_has_no_default(self) -> None:
+        """Tanpa bawaan, pemanggil baru gagal keras, bukan diam-diam produksi."""
+        param = inspect.signature(_active_mandate).parameters["network"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert param.default is inspect.Parameter.empty
+
+    def test_a_missing_mandate_is_still_an_approval_error(self) -> None:
+        """Jaringan tidak menggeser penanganan baris yang tidak ada."""
+        with pytest.raises(ApprovalError, match="tidak ada mandate aktif"):
+            _active_mandate(
+                FakeCursor(None),  # type: ignore[arg-type]
+                "devnet-agent",
+                network=NETWORK_DEVNET,
+            )

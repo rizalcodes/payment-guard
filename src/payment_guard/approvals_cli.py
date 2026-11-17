@@ -488,7 +488,7 @@ def _commit_decision(
             if now >= row.expires_at:
                 return _expire(cur, decision_id, row, guard_running=guard_running)
 
-            mandate_hash, mandate = _active_mandate(cur, row.agent_id)
+            mandate_hash, mandate = _active_mandate(cur, row.agent_id, network=config.network)
             if mandate_hash != row.mandate_hash:
                 return _refuse(
                     cur,
@@ -769,7 +769,7 @@ def _fetch_decision_row(cur: psycopg.Cursor, decision_id: str) -> DecisionRow:
     )
 
 
-def _active_mandate(cur: psycopg.Cursor, agent_id: str) -> tuple[str, Mandate]:
+def _active_mandate(cur: psycopg.Cursor, agent_id: str, *, network: str) -> tuple[str, Mandate]:
     """Hash dan isi mandate yang sedang aktif untuk ``agent_id``."""
     cur.execute(SELECT_ACTIVE_MANDATE, (agent_id,))
     row = cur.fetchone()
@@ -781,7 +781,10 @@ def _active_mandate(cur: psycopg.Cursor, agent_id: str) -> tuple[str, Mandate]:
     # Isi kolom ``content`` adalah bentuk ternormalisasi: jumlahnya base
     # units, bukan desimal USDC. ``load_mandate`` akan membacanya sejuta kali
     # lebih besar tanpa gagal sekali pun, dan setiap cek ulang batas lolos.
-    return row[0], load_normalized(row[1])
+    # ``network`` diteruskan, tidak diwarisi: mandate di ``mandates.content``
+    # bisa ber-chain ``devnet-local``, dan pembaca yang memakai bawaan produksi
+    # akan menolaknya SETELAH operator mengetik token konfirmasi.
+    return row[0], load_normalized(row[1], network=network)
 
 
 def _write_summary(

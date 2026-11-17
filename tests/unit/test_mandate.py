@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 from typing import Any, ClassVar
 
 import pytest
 
 from payment_guard.canonical import canonical_bytes
+from payment_guard.chains import DEVNET_LOCAL, NETWORK_DEVNET, NETWORK_PRODUCTION
 from payment_guard.mandate import (
     MANDATE_HASH_PREFIX,
     Mandate,
@@ -686,17 +688,17 @@ class TestNormalizedRoundTrip:
 
     def test_round_trip_returns_the_same_mandate(self) -> None:
         mandate = load_mandate(VALID)
-        assert load_normalized(normalized_form(mandate)) == mandate
+        assert load_normalized(normalized_form(mandate), network=NETWORK_PRODUCTION) == mandate
 
     def test_round_trip_keeps_the_hash(self) -> None:
         mandate = load_mandate(VALID)
-        kembali = load_normalized(normalized_form(mandate))
+        kembali = load_normalized(normalized_form(mandate), network=NETWORK_PRODUCTION)
         assert compute_mandate_hash(kembali) == compute_mandate_hash(mandate)
 
     @pytest.mark.parametrize("field", ["max_per_tx", "max_per_day", "human_approval_above"])
     def test_amounts_keep_their_unit(self, field: str) -> None:
         mandate = load_mandate(VALID)
-        kembali = load_normalized(normalized_form(mandate))
+        kembali = load_normalized(normalized_form(mandate), network=NETWORK_PRODUCTION)
         assert getattr(kembali, field) == getattr(mandate, field)
 
     def test_reading_the_normalized_form_with_load_mandate_is_wrong(self) -> None:
@@ -713,21 +715,73 @@ class TestNormalizedRoundTrip:
         bentuk = normalized_form(load_mandate(VALID))
         bentuk["max_per_tx"] = "50.000000"
         with pytest.raises(MandateError, match="base units"):
-            load_normalized(bentuk)
+            load_normalized(bentuk, network=NETWORK_PRODUCTION)
 
     def test_non_string_amount_is_refused(self) -> None:
         bentuk = normalized_form(load_mandate(VALID))
         bentuk["max_per_day"] = 50_000_000
         with pytest.raises(MandateError, match="base units"):
-            load_normalized(bentuk)
+            load_normalized(bentuk, network=NETWORK_PRODUCTION)
 
     def test_non_mapping_is_refused(self) -> None:
         with pytest.raises(MandateError, match="harus objek"):
-            load_normalized([])  # type: ignore[arg-type]
+            load_normalized([], network=NETWORK_PRODUCTION)  # type: ignore[arg-type]
 
     def test_the_rest_of_the_validation_still_applies(self) -> None:
         """Konversi satuan tidak boleh jadi pintu belakang untuk field asing."""
         bentuk = normalized_form(load_mandate(VALID))
         bentuk["field_asing"] = "x"
         with pytest.raises(MandateError):
-            load_normalized(bentuk)
+            load_normalized(bentuk, network=NETWORK_PRODUCTION)
+
+
+class TestLoadNormalizedRequiresTheNetwork:
+    """``load_normalized`` wajib diberi ``network``; tidak ada bawaan.
+
+    Bug 17 Nov 2026: fungsi ini tidak punya parameter jaringan sama sekali,
+    jadi ia selalu memanggil ``load_mandate`` dengan bawaan produksi. Jalur
+    ``guard approvals approve`` di devnet gagal karena itu — dan gagal
+    **setelah** operator mengetik token konfirmasi.
+
+    Bawaan produksi akan menyembunyikan kesalahan yang sama pada pemanggil
+    berikutnya, jadi penjaga di sini bukan "bawaannya produksi", melainkan
+    "tidak ada bawaan".
+    """
+
+    DEVNET: ClassVar[dict[str, Any]] = {
+        **VALID,
+        "mandate_id": "devnet-m-001",
+        "agent_id": "devnet-agent",
+        "chain": DEVNET_LOCAL,
+    }
+
+    def test_network_is_keyword_only(self) -> None:
+        param = inspect.signature(load_normalized).parameters["network"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+
+    def test_network_has_no_default(self) -> None:
+        param = inspect.signature(load_normalized).parameters["network"]
+        assert param.default is inspect.Parameter.empty
+
+    def test_calling_without_a_network_fails_loudly(self) -> None:
+        """Lupa meneruskan jaringan = TypeError, bukan produksi diam-diam."""
+        bentuk = normalized_form(load_mandate(VALID))
+        with pytest.raises(TypeError, match="network"):
+            load_normalized(bentuk)  # type: ignore[call-arg]
+
+    def test_a_devnet_chain_is_read_on_the_devnet_network(self) -> None:
+        asli = load_mandate(self.DEVNET, network=NETWORK_DEVNET)
+        kembali = load_normalized(normalized_form(asli), network=NETWORK_DEVNET)
+        assert kembali == asli
+        assert kembali.chain == DEVNET_LOCAL
+
+    def test_a_devnet_chain_is_refused_on_the_production_network(self) -> None:
+        bentuk = normalized_form(load_mandate(self.DEVNET, network=NETWORK_DEVNET))
+        with pytest.raises(MandateError, match="tidak didukung di jaringan"):
+            load_normalized(bentuk, network=NETWORK_PRODUCTION)
+
+    def test_a_production_chain_is_refused_on_the_devnet_network(self) -> None:
+        """Penjaga ini dua arah: devnet bukan superset produksi."""
+        bentuk = normalized_form(load_mandate(VALID))
+        with pytest.raises(MandateError, match="tidak didukung di jaringan"):
+            load_normalized(bentuk, network=NETWORK_DEVNET)

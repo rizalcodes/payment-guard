@@ -210,13 +210,29 @@ def normalized_form(mandate: Mandate) -> dict[str, object]:
     }
 
 
-def load_normalized(document: Mapping[str, object]) -> Mandate:
+def load_normalized(document: Mapping[str, object], *, network: str) -> Mandate:
     """Kebalikan dari :func:`normalized_form`.
 
     Dipakai pembaca yang mengambil mandate dari kolom ``mandates.content``,
     bukan dari berkas: Approvals CLI (M4) dan, nanti, Reconciler. Keduanya
     tidak punya berkas mandate, dan yang mengikat memang mandate yang sudah
     dimuat Guard, bukan yang ada di disk (Arsitektur v1.1 bagian 5.4).
+
+    ``network`` **wajib** dan tidak punya nilai bawaan, berbeda dari
+    :func:`load_mandate`. Itu disengaja, dan alasannya sebuah bug nyata: versi
+    pertama fungsi ini tidak punya parameter jaringan sama sekali, jadi ia
+    selalu memanggil ``load_mandate`` dengan bawaan produksi. Akibatnya
+    ``guard approvals approve`` di devnet gagal dengan
+    ``chain 'devnet-local' tidak didukung di jaringan 'base-sepolia'`` — dan
+    kegagalan itu baru muncul **setelah** operator mengetik token konfirmasi,
+    di dalam transaksi yang kemudian di-rollback.
+
+    Bawaan produksi akan menyembunyikan kesalahan yang sama pada pemanggil
+    berikutnya. Tanpa bawaan, pemanggil yang lupa **gagal dengan
+    ``TypeError``** saat pemanggilan, bukan diam-diam menilai mandate dengan
+    daftar chain yang salah. Reconciler — yang disebut docstring ini sebagai
+    pemakai berikutnya — karena itu tidak bisa mengulangi bug ini tanpa
+    menyadarinya.
 
     Perbedaannya hanya pada satuan uang, dan perbedaan itu halus justru karena
     kedua bentuk sama-sama string angka. ``normalized_form`` menulis **base
@@ -236,7 +252,7 @@ def load_normalized(document: Mapping[str, object]) -> Mandate:
         if field not in data:
             continue
         data[field] = _decimal_from_base_units(field, data[field])
-    return load_mandate(data)
+    return load_mandate(data, network=network)
 
 
 def _decimal_from_base_units(field: str, value: object) -> str:
