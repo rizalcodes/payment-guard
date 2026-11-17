@@ -158,6 +158,9 @@ class TestCanonicalDocs:
     #: Deskriptif: menggambarkan kode yang ada, jadi kode yang menang bila beda.
     DESCRIPTIVE = ("arsitektur.md",)
 
+    #: Referensi per perintah, dicari satu per satu; bukan deskripsi arsitektur.
+    REFERENCE = ("cli.md",)
+
     @pytest.mark.parametrize("name", CANONICAL)
     def test_canonical_document_exists(self, name: str) -> None:
         assert (ROOT / "docs" / name).is_file(), name
@@ -178,6 +181,10 @@ class TestCanonicalDocs:
     def test_descriptive_document_exists(self, name: str) -> None:
         assert (ROOT / "docs" / name).is_file(), name
 
+    @pytest.mark.parametrize("name", REFERENCE)
+    def test_reference_document_exists(self, name: str) -> None:
+        assert (ROOT / "docs" / name).is_file(), name
+
     def test_no_other_markdown_sneaks_into_docs(self) -> None:
         """Daftar isi ``docs/`` tertutup.
 
@@ -192,6 +199,7 @@ class TestCanonicalDocs:
                 *self.OPERATIONAL,
                 *self.HISTORICAL,
                 *self.DESCRIPTIVE,
+                *self.REFERENCE,
             ]
         )
         assert ada == harus, f"isi docs/ berubah: {ada}"
@@ -208,6 +216,15 @@ class TestCanonicalDocs:
         """
         assert self.DESCRIPTIVE == ("arsitektur.md",)
 
+    def test_reference_stays_one_document(self) -> None:
+        """``REFERENCE`` tidak boleh bertambah tanpa disengaja.
+
+        Alasannya sama dengan :meth:`test_descriptive_stays_one_document`:
+        "referensi" juga bisa dipakai untuk hampir apa saja, jadi dokumen
+        kedua di kategori ini harus mengubah tes ini dulu.
+        """
+        assert self.REFERENCE == ("cli.md",)
+
     def test_every_docs_category_is_disjoint(self) -> None:
         """Satu dokumen hanya boleh ada di satu kategori.
 
@@ -220,6 +237,7 @@ class TestCanonicalDocs:
             *self.OPERATIONAL,
             *self.HISTORICAL,
             *self.DESCRIPTIVE,
+            *self.REFERENCE,
         ]
         ganda = sorted({n for n in semua if semua.count(n) > 1})
         assert not ganda, f"nama dokumen ada di lebih dari satu kategori: {ganda}"
