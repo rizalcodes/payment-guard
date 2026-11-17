@@ -46,6 +46,7 @@ from typing import Any, Final
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from payment_guard.chains import NETWORK_PRODUCTION, chain_for_network, supported_networks
 from payment_guard.signing import (
     EnvelopeError,
     VerificationError,
@@ -113,6 +114,7 @@ def execute_payment(
     expected_mandate_hash: str,
     *,
     public_keys_path: Path,
+    network: str = NETWORK_PRODUCTION,
 ) -> ExecutionAttempt:
     """Stub Executor: verifikasi envelope dengan public key saja.
 
@@ -123,10 +125,18 @@ def execute_payment(
 
     Tidak ada kunci rahasia yang dibaca di sini, dan tidak ada jaringan.
 
+    ``network`` punya bawaan produksi, dan itu disengaja: tanpa flag, perilaku
+    tidak berubah sedikit pun. Sebelum parameter ini ada, :func:`verify`
+    dipanggil tanpa argumen jaringan sama sekali, jadi ia memakai bawaannya
+    sendiri — ``base-sepolia``. Akibatnya envelope devnet, yang ber-``chain_id``
+    31337, **selalu** ditolak dengan "chain_id 31337 bukan 84532", dan tidak
+    ada cara memberi tahu agent bahwa ia sedang di devnet.
+
     Args:
         signed_decision: envelope dari jawaban Guard, apa adanya.
         expected_mandate_hash: hash mandate yang agent yakini sedang berlaku.
         public_keys_path: registri kunci publik, mis. ``guard_public.json``.
+        network: jaringan yang envelope-nya diperiksa. Bawaannya produksi.
 
     Returns:
         Hasil verifikasi. Tidak pernah melempar untuk envelope yang buruk:
@@ -138,7 +148,9 @@ def execute_payment(
     registry = parse_public_keys(public_keys_path.read_text(encoding="utf-8"))
     try:
         envelope = parse_envelope(json.dumps(signed_decision))
-        payload = verify(envelope, registry)
+        # Pola yang sama dengan `guard verify` di verify_cli.py: nama chain
+        # diturunkan dari jaringannya, bukan diminta terpisah.
+        payload = verify(envelope, registry, chain=chain_for_network(network), network=network)
     except (EnvelopeError, VerificationError) as exc:
         return ExecutionAttempt(False, f"envelope ditolak: {exc}")
 
@@ -176,11 +188,17 @@ async def run_once(
     env_file: Path | None = None,
     public_keys_path: Path,
     expected_mandate_hash: str | None = None,
+    network: str = NETWORK_PRODUCTION,
 ) -> dict[str, Any]:
     """Jalankan satu putaran: minta izin, baca status, lalu coba eksekusi.
 
     Jalurnya tetap dan tidak bercabang pada isi ``reason``: teks itu data, dan
     agent ini tidak punya tempat untuk menafsirkannya.
+
+    ``chain`` dan ``network`` dua hal yang berbeda, dan keduanya perlu:
+    ``chain`` adalah nama chain yang **dikirim ke Guard** di ``check_payment``,
+    sedangkan ``network`` dipakai agent untuk **memeriksa** envelope yang
+    kembali. Keduanya bawaan produksi.
     """
     args = list(GUARD_COMMAND[1:])
     if env_file is not None:
@@ -217,6 +235,7 @@ async def run_once(
         status.get("signed_decision"),
         mandate_hash,
         public_keys_path=public_keys_path,
+        network=network,
     )
     return {
         "decision": decision,
@@ -243,6 +262,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--chain", default="base-sepolia")
     parser.add_argument("--env-file", type=Path, default=None)
     parser.add_argument("--public-keys-file", type=Path, default=Path("guard_public.json"))
+    parser.add_argument(
+        "--network",
+        default=NETWORK_PRODUCTION,
+        choices=supported_networks(),
+        help=(
+            f"jaringan yang envelope-nya diperiksa agent (default: {NETWORK_PRODUCTION}). "
+            "Pakai 'devnet' untuk envelope dari devnet lokal (chain id 31337); "
+            "tanpa itu, envelope devnet ditolak karena chain_id-nya bukan 84532. "
+            "Berbeda dari --chain, yang dikirim ke Guard di check_payment."
+        ),
+    )
     # ``None`` diteruskan apa adanya: argparse membacanya sebagai
     # ``sys.argv[1:]``. Versi pertama mengubahnya menjadi ``[]``, yang membuat
     # setiap argumen dari baris perintah diabaikan dan perintahnya selalu gagal
@@ -258,6 +288,7 @@ def main(argv: list[str] | None = None) -> int:
             chain=args.chain,
             env_file=args.env_file,
             public_keys_path=args.public_keys_file,
+            network=args.network,
         )
     )
     print(json.dumps(hasil, indent=2, ensure_ascii=False))

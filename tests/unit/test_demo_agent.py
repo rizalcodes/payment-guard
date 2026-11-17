@@ -16,6 +16,12 @@ from pathlib import Path
 
 import pytest
 
+from payment_guard.chains import (
+    BASE_SEPOLIA,
+    DEVNET_LOCAL,
+    NETWORK_DEVNET,
+    NETWORK_PRODUCTION,
+)
 from payment_guard.demo_agent import (
     GUARD_TOOL_NAMES,
     LOCAL_TOOL_NAMES,
@@ -49,8 +55,15 @@ def envelope_for(
     *,
     mandate_hash: str = MANDATE_HASH,
     amount_base: int = 10_000_000,
+    chain: str = BASE_SEPOLIA,
+    network: str = NETWORK_PRODUCTION,
 ) -> dict:
-    """Envelope sah yang ditandatangani kunci uji."""
+    """Envelope sah yang **benar-benar ditandatangani** kunci uji.
+
+    ``chain`` dan ``network`` bawaannya produksi, jadi pemanggil lama tidak
+    berubah. Keduanya ada supaya envelope devnet — yang ``chain_id``-nya
+    31337, bukan 84532 — bisa dibuat tanpa memalsukan tanda tangan.
+    """
     identity = load_signing_identity(keys["signing"])
     payload = build_payload(
         decision_id="123e4567-e89b-42d3-a456-426614174000",
@@ -61,6 +74,8 @@ def envelope_for(
         issued_at=1_800_000_000,
         valid_until=1_800_000_900,
         mandate_hash=mandate_hash,
+        chain=chain,
+        network=network,
     )
     return sign(payload, identity.signer, identity.key_id).as_dict()
 
@@ -297,3 +312,120 @@ class TestNoEscapeHatches:
         teks = MODULE.read_text(encoding="utf-8")
         assert "EXECUTOR_KEY_PATH" not in teks
         assert "load_signing_identity" not in teks
+
+
+class TestNetworkDiteruskanKeVerifikasi:
+    """Bug 17 Nov 2026: ``execute_payment`` memanggil ``verify`` tanpa jaringan.
+
+    Sebelum perbaikan, baris itu berbunyi ``verify(envelope, registry)``, jadi
+    ``verify`` memakai bawaannya sendiri — ``base-sepolia`` dan chain id 84532.
+    Envelope devnet ber-``chain_id`` 31337, jadi agent demo **selalu**
+    menolaknya, dan tidak ada flag untuk memberi tahu agent bahwa ia sedang di
+    devnet. Jalur MCP di devnet karena itu tidak pernah bisa selesai.
+
+    Envelope di kelas ini ditandatangani sungguhan dengan kunci uji; tidak ada
+    tanda tangan tiruan. Yang membedakan kedua kasus hanya argumen ``network``.
+    """
+
+    def test_envelope_devnet_diterima_saat_network_devnet(self, keys: dict[str, Path]) -> None:
+        envelope = envelope_for(keys, chain=DEVNET_LOCAL, network=NETWORK_DEVNET)
+        assert envelope["payload"]["chain_id"] == 31337
+
+        hasil = execute_payment(
+            envelope, MANDATE_HASH, public_keys_path=keys["public"], network=NETWORK_DEVNET
+        )
+        assert hasil.verified, hasil.detail
+
+    def test_envelope_devnet_ditolak_saat_bawaan(self, keys: dict[str, Path]) -> None:
+        """Penjaga bawaan: kalau ini lulus, bawaan produksi diam-diam berubah."""
+        envelope = envelope_for(keys, chain=DEVNET_LOCAL, network=NETWORK_DEVNET)
+
+        hasil = execute_payment(envelope, MANDATE_HASH, public_keys_path=keys["public"])
+        assert not hasil.verified
+        assert "31337" in hasil.detail
+        assert "84532" in hasil.detail
+
+    def test_envelope_produksi_ditolak_saat_network_devnet(self, keys: dict[str, Path]) -> None:
+        """Dua arah: jaringan bukan saklar yang melonggarkan, melainkan pilihan."""
+        envelope = envelope_for(keys)
+        assert envelope["payload"]["chain_id"] == 84532
+
+        hasil = execute_payment(
+            envelope, MANDATE_HASH, public_keys_path=keys["public"], network=NETWORK_DEVNET
+        )
+        assert not hasil.verified
+        assert "84532" in hasil.detail
+
+    @pytest.mark.parametrize(
+        ("network", "diterima"),
+        [(NETWORK_PRODUCTION, False), (NETWORK_DEVNET, True)],
+    )
+    def test_hasil_mengikuti_argumen_bukan_konstanta(
+        self, keys: dict[str, Path], network: str, diterima: bool
+    ) -> None:
+        """Satu envelope, dua jaringan, dua hasil.
+
+        Kalau jaringan tertanam sebagai konstanta di ``execute_payment``, kedua
+        baris parametrize ini akan memberi hasil yang sama dan salah satunya
+        gagal. Itulah yang membuktikan nilainya dibaca dari argumen.
+        """
+        envelope = envelope_for(keys, chain=DEVNET_LOCAL, network=NETWORK_DEVNET)
+        hasil = execute_payment(
+            envelope, MANDATE_HASH, public_keys_path=keys["public"], network=network
+        )
+        assert hasil.verified is diterima
+
+    def test_bawaan_execute_payment_tetap_produksi(self) -> None:
+        """Bawaan tertulis, bukan tersirat; perubahannya harus terlihat di diff."""
+        import inspect
+
+        param = inspect.signature(execute_payment).parameters["network"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert param.default == NETWORK_PRODUCTION
+
+    def test_bawaan_run_once_tetap_produksi(self) -> None:
+        import inspect
+
+        from payment_guard.demo_agent import run_once
+
+        param = inspect.signature(run_once).parameters["network"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert param.default == NETWORK_PRODUCTION
+
+
+class TestFlagNetworkDiBarisPerintah:
+    def test_network_tidak_dikenal_ditolak_argparse(self) -> None:
+        with pytest.raises(SystemExit) as info:
+            main([RECIPIENT, "1", "--network", "devnett"])
+        assert info.value.code == 2
+
+    def test_network_diteruskan_ke_run_once(self, monkeypatch) -> None:
+        """Flag yang tidak sampai ke pemanggilnya sama saja dengan tidak ada."""
+        dicatat: dict[str, object] = {}
+
+        async def tiruan(recipient, amount, reason, **kwargs):
+            dicatat.update(kwargs)
+            return {}
+
+        monkeypatch.setattr("payment_guard.demo_agent.run_once", tiruan)
+        main([RECIPIENT, "1", "--network", NETWORK_DEVNET])
+        assert dicatat["network"] == NETWORK_DEVNET
+
+    def test_tanpa_flag_network_tetap_produksi(self, monkeypatch) -> None:
+        dicatat: dict[str, object] = {}
+
+        async def tiruan(recipient, amount, reason, **kwargs):
+            dicatat.update(kwargs)
+            return {}
+
+        monkeypatch.setattr("payment_guard.demo_agent.run_once", tiruan)
+        main([RECIPIENT, "1"])
+        assert dicatat["network"] == NETWORK_PRODUCTION
+
+    def test_pilihan_network_diambil_dari_chains(self) -> None:
+        """Daftar pilihan tidak ditulis ulang di demo_agent."""
+        from payment_guard.chains import supported_networks
+
+        with pytest.raises(SystemExit):
+            main([RECIPIENT, "1", "--help"])
+        assert set(supported_networks()) == {NETWORK_PRODUCTION, NETWORK_DEVNET}
