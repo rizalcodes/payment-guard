@@ -9,6 +9,19 @@ yang ditolak dan mengapa.
 
 ---
 
+## 2026-11-17 — pesan tag `m6` diganti, commit-nya tidak
+
+2026-11-17: Pesan anotasi tag `m6` diganti. Alasan: **pesan tag usang** — ia
+memuat klaim "Devnet lokal BELUM ADA", yang sudah tidak benar sejak devnet
+lokal dibangun dan dua skenario dijalankan di atasnya. Commit yang ditunjuk
+**tidak berubah**: tetap `3184482`. Pesan baru menyebut angka suite dari
+checkout bersih (unit 2086, integrasi 539), menyatakan bukti on-chain testnet
+publik tetap tidak ada, menyatakan bukti devnet lokal tidak dicakup tag ini,
+dan menyebut bug approve devnet yang ditemukan sesudah tag lama dipasang dan
+diperbaiki di `d5108fc`.
+
+---
+
 ## 2026-11-17 — run skenario devnet diulang karena keadaan git tidak terekam
 
 Keputusan CoS, 17 Nov 2026. Run skenario (a) dan (e) yang pertama dinyatakan
