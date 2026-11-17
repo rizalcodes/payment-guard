@@ -303,7 +303,13 @@ def maintenance_url_for(admin_url: str) -> str:
     if host not in LOOPBACK:
         raise DevnetError(f"host database {host!r} bukan loopback")
     bagian["dbname"] = MAINTENANCE_DBNAME
-    return conninfo.make_conninfo(**{k: v for k, v in bagian.items() if v is not None})
+    # ``str(v)`` bukan konversi, hanya penyempitan tipe. ``conninfo_to_dict``
+    # mengembalikan ``dict[str, str | int]``, sedangkan parameter pertama
+    # ``make_conninfo`` bernama ``conninfo`` dan bertipe ``str``, jadi
+    # meneruskan dict itu dengan ``**`` ditolak ``mypy --strict``. Nilai yang
+    # keluar dari URL selalu string; untuk nilai string ``str(v)`` adalah
+    # identitas, jadi conninfo yang dihasilkan byte demi byte sama.
+    return conninfo.make_conninfo(**{k: str(v) for k, v in bagian.items() if v is not None})
 
 
 def bootstrap_command(env_file: Path, migrator_env_file: Path) -> list[str]:

@@ -25,14 +25,24 @@ repos:
   # Daftar modulnya eksplisit: hanya berkas yang memang sudah bersih di bawah
   # --strict yang dijaga, supaya hook ini menolak regresi alih-alih mengeluh
   # tentang hal yang belum pernah rapi.
+  #
+  # `scripts/devnet_up.py` masuk daftar, `scripts/generate_schema_doc.py`
+  # TIDAK. Alasannya aturan yang sama, bukan selera: yang pertama sudah bersih
+  # di bawah --strict, yang kedua memuat 10 error dari satu akar di baris 183
+  # (sebuah variabel `str` dipakai ulang untuk menampung `Table`). Merapikannya
+  # butuh pembacaan supaya keluaran `docs/schema.md` tidak berubah, dan itu
+  # utang yang terpisah. Memasukkannya sekarang akan membuat hook ini mengeluh
+  # tentang hal yang belum pernah rapi -- persis yang dihindari aturan di atas.
+  # Jangan tambahkan `scripts/` sebagai direktori; tambahkan berkas satu per
+  # satu setelah berkasnya benar-benar bersih.
   - repo: local
     hooks:
       - id: mypy-strict
-        name: mypy --strict (uang, aturan, jalur eksekusi, dan eval)
+        name: mypy --strict (uang, aturan, jalur eksekusi, eval, dan skrip devnet)
         entry: uv run --no-sync mypy --strict
         language: system
         pass_filenames: false
-        files: ^(src/payment_guard|evals)/.*\.py$
+        files: ^(src/payment_guard/.*\.py|evals/.*\.py|scripts/devnet_up\.py)$
         args:
           - src/payment_guard/money.py
           - src/payment_guard/addresses.py
@@ -44,6 +54,7 @@ repos:
           - src/payment_guard/watcher.py
           - src/payment_guard/reconciler.py
           - evals/
+          - scripts/devnet_up.py
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
