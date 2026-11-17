@@ -327,6 +327,85 @@ Forward-only, SQL murni di atas psycopg 3, tanpa Alembic maupun SQLAlchemy.
 gagal keras bila role grup belum ada. Hak tingkat schema dan `CREATE ROLE`
 adalah wewenang bootstrap, bukan migrator.
 
+## Status Verifikasi
+
+Semua bukti di bawah berasal dari **devnet lokal** (Anvil, chain id 31337,
+token uji 6 desimal yang **bukan** USDC, hidup dan mati di `127.0.0.1`).
+Devnet lokal bukan testnet.
+
+Approval di setiap run diketik pemilik repo di terminal sungguhan. Tidak ada
+`--yes`, tidak ada stdin palsu, dan tidak ada jalur yang melewati `isatty()`.
+
+| Skenario | Status | Keputusan / transaksi | Hash commit yang diuji | Berkas bukti (keluaran mentah `jejak.py`) |
+|---|---|---|---|---|
+| (a) jalur bahagia | hijau | keputusan `c851d003-bb26-4623-834d-b31891f300e7` (run ULANG) | `56c6dc0` | `skenario-a-ulang-00` … `-10` |
+| (e) recovery setelah write-ahead | hijau | keputusan `577f1cbf-ce89-4e49-a702-04508127b5b5` (run ULANG) | `56c6dc0` | `e-ulang-00` … `-13` |
+| (d) reorg | hijau | keputusan `5c5a04d3-f773-44f6-a117-8a6871a71b5e` | `f607f91` | `d-01` … `d-21` |
+| (b) `unmatched_onchain` | hijau | transfer `0x1be23ac84c599ebd839fc827b828b3ba3a9f8372074ef9afc355bb80a003ef2f` | `f607f91` | `b-01` … `b-08` |
+| (c) `mismatch` | **TIDAK diuji di devnet** | — | — | — |
+
+(a) ULANG direkam dengan header git manual (perintah `rev-parse` dan
+`porcelain` diketik lalu disimpan). (e) ULANG, (d), dan (b) direkam lewat
+pembungkus `jejak.py` yang otomatis menolak mulai bila worktree kotor.
+
+### Apa yang dibuktikan tiap skenario
+
+- **(a)** Keputusan di atas ambang approval → `needs_human` → approval manusia →
+  envelope ditandatangani → broadcast → receipt → settlement `final` →
+  rekonsiliasi `matched`.
+- **(e)** Proses dihentikan **setelah** write-ahead dikomit dan **sebelum**
+  broadcast. Baris `signed` ada di database sementara jaringan belum pernah
+  melihat transaksinya. `guard recover` menyiarkan ulang `raw_tx` yang sama,
+  sehingga hash dan nonce tidak berubah, dan tiga kali `recover` tetap
+  menghasilkan **satu** transaksi.
+- **(d)** Settlement `pending` dibuang reorg sedalam 13 blok: watcher menandai
+  `reorged` tanpa alarm dan memundurkan kursornya sendiri, reconciler menahan
+  `matched`, lalu setelah tx mendarat lagi di blok lain ia `restored` →
+  `final` → `matched`.
+- **(b)** Transfer dari wallet Executor ke alamat **di luar** allowlist, tanpa
+  melewati Guard: tidak ada keputusan, tidak ada envelope, tidak ada baris
+  `executions`. Reconciler menulis satu `unmatched_onchain` dengan
+  `decision_id` NULL dan `guard reconcile` keluar dengan kode `1`.
+
+### (c) `mismatch`
+
+**TIDAK diuji di devnet.** Kasusnya dicakup tes otomatis, bukan bukti
+on-chain:
+
+- Unit, `tests/unit/test_reconciler.py`:
+  `TestReportRendering::test_a_mismatch_says_which_fields_differ`,
+  `TestWhichStatesAreAlarms::test_the_rest_are_alarms[mismatch]`,
+  `TestReportRendering::test_every_alarm_state_reaches_the_action_list[mismatch]`.
+- Integrasi terhadap PostgreSQL sungguhan,
+  `tests/integration/test_watcher_flow.py::TestATransferThatDoesNotMatch`:
+  `test_a_different_amount_is_a_mismatch` dan
+  `test_a_different_recipient_is_a_mismatch`.
+- `pytest -k mismatch --collect-only` mengumpulkan **7** tes unit dan **3** tes
+  integrasi.
+
+Alasan (c) dipotong bukan kekurangan waktu: kondisinya tidak bisa dibuat tanpa
+memalsukan database, karena baris `executions` dan `settlements` berasal dari
+satu byte transaksi yang sama. Lihat `docs/decisions.md`.
+
+**Tes bukan bukti on-chain.**
+
+### Testnet publik
+
+**Base Sepolia: tidak ada bukti.** Itu item v1.1 (`m6-onchain`), bukan klaim
+v1.
+
+### Tag
+
+- `m6` → `3184482`: unit dan integrasi hijau pada checkout bersih. Tanpa bukti
+  devnet dan tanpa bukti testnet.
+- `m6-devnet` → `a4574e5`: bukti devnet lokal untuk (a) dan (e).
+
+Tag `m6-devnet` dibuat di `a4574e5` sebelum (d) dan (b) dijalankan; keduanya
+dicatat di commit `b40ccd3` dan di README ini. Pesan tag itu karena itu
+menyebut (d), (b), dan (c) belum diuji — dan pesan itu benar untuk commit yang
+ditunjuknya. Tidak ada tag yang dipindah atau dibuat ulang untuk menyesuaikan
+kronologi ini.
+
 ## Known limitations
 
 Yang berikut ini **tidak** ada di v1, dan tidak ada yang tersembunyi di balik
