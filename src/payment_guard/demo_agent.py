@@ -82,6 +82,14 @@ TOOL_ARGUMENTS: Final[dict[str, tuple[str, ...]]] = {
 #: Perintah untuk menjalankan server Guard sebagai subproses stdio.
 GUARD_COMMAND: Final[tuple[str, ...]] = ("guard", "serve")
 
+#: Registri kunci publik bawaan, **hanya** untuk jaringan produksi.
+#:
+#: Di devnet tidak ada bawaan sama sekali, dan itu disengaja. Berkas ini ada
+#: di akar repo, jadi memakainya di devnet tidak gagal karena berkasnya hilang
+#: melainkan karena ``key_id`` envelope devnet tidak ada di dalamnya —
+#: kegagalan yang menyesatkan, beberapa langkah jauh dari sebabnya.
+DEFAULT_PUBLIC_KEYS_FILE: Final = Path("guard_public.json")
+
 
 class DemoAgentError(RuntimeError):
     """Agent demo berhenti. Pesannya untuk operator yang menjalankan demo."""
@@ -259,9 +267,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("recipient")
     parser.add_argument("amount")
     parser.add_argument("--reason", default="demo M4")
-    parser.add_argument("--chain", default="base-sepolia")
+    parser.add_argument(
+        "--chain",
+        default=None,
+        help=(
+            "nama chain yang dikirim ke Guard di check_payment. Tanpa flag ini, "
+            "nilainya diturunkan dari --network: 'base-sepolia' di produksi, "
+            "'devnet-local' di devnet. Nilai yang diberikan eksplisit tidak "
+            "pernah ditulis ulang, termasuk yang akan ditolak Guard."
+        ),
+    )
     parser.add_argument("--env-file", type=Path, default=None)
-    parser.add_argument("--public-keys-file", type=Path, default=Path("guard_public.json"))
+    parser.add_argument(
+        "--public-keys-file",
+        type=Path,
+        default=None,
+        help=(
+            f"registri kunci publik. Bawaannya {DEFAULT_PUBLIC_KEYS_FILE} **hanya** "
+            "di jaringan produksi; di devnet flag ini wajib, karena registri "
+            "produksi akan menolak envelope devnet dengan alasan yang menyesatkan."
+        ),
+    )
     parser.add_argument(
         "--network",
         default=NETWORK_PRODUCTION,
@@ -280,14 +306,32 @@ def main(argv: list[str] | None = None) -> int:
     # jadi tidak ada yang menangkapnya.
     args = parser.parse_args(argv)
 
+    # Bawaan diturunkan dari jaringan, bukan dari konstanta produksi. Keduanya
+    # hanya berlaku kalau flagnya TIDAK diberikan; yang eksplisit lewat apa
+    # adanya, termasuk kombinasi yang akan ditolak Guard.
+    chain = args.chain if args.chain is not None else chain_for_network(args.network)
+
+    public_keys_path = args.public_keys_file
+    if public_keys_path is None:
+        if args.network != NETWORK_PRODUCTION:
+            parser.error(
+                f"--public-keys-file wajib di jaringan {args.network!r}. "
+                f"Bawaan {DEFAULT_PUBLIC_KEYS_FILE} adalah registri produksi, dan "
+                "envelope devnet akan ditolak karena key_id-nya tidak ada di sana. "
+                "Agent ini tidak membaca berkas env, jadi pathnya harus diberikan "
+                "lewat flag ini; nilainya bisa dilihat di GUARD_PUBLIC_KEYS_PATH "
+                "pada berkas env devnet Anda."
+            )
+        public_keys_path = DEFAULT_PUBLIC_KEYS_FILE
+
     hasil = asyncio.run(
         run_once(
             args.recipient,
             args.amount,
             args.reason,
-            chain=args.chain,
+            chain=chain,
             env_file=args.env_file,
-            public_keys_path=args.public_keys_file,
+            public_keys_path=public_keys_path,
             network=args.network,
         )
     )

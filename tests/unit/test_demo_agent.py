@@ -399,16 +399,25 @@ class TestFlagNetworkDiBarisPerintah:
             main([RECIPIENT, "1", "--network", "devnett"])
         assert info.value.code == 2
 
-    def test_network_diteruskan_ke_run_once(self, monkeypatch) -> None:
-        """Flag yang tidak sampai ke pemanggilnya sama saja dengan tidak ada."""
+    def test_network_diteruskan_ke_run_once(self, monkeypatch, tmp_path: Path) -> None:
+        """Flag yang tidak sampai ke pemanggilnya sama saja dengan tidak ada.
+
+        ``--public-keys-file`` ikut diberikan karena di devnet ia wajib; lihat
+        :class:`TestBawaanMengikutiNetwork`. Versi pertama tes ini tidak
+        memberikannya, dan itu lolos hanya selama devnet masih diam-diam
+        memakai registri produksi.
+        """
         dicatat: dict[str, object] = {}
 
         async def tiruan(recipient, amount, reason, **kwargs):
             dicatat.update(kwargs)
             return {}
 
+        pub = tmp_path / "pub.json"
+        pub.write_text("{}", encoding="utf-8")
+
         monkeypatch.setattr("payment_guard.demo_agent.run_once", tiruan)
-        main([RECIPIENT, "1", "--network", NETWORK_DEVNET])
+        main([RECIPIENT, "1", "--network", NETWORK_DEVNET, "--public-keys-file", str(pub)])
         assert dicatat["network"] == NETWORK_DEVNET
 
     def test_tanpa_flag_network_tetap_produksi(self, monkeypatch) -> None:
@@ -429,3 +438,114 @@ class TestFlagNetworkDiBarisPerintah:
         with pytest.raises(SystemExit):
             main([RECIPIENT, "1", "--help"])
         assert set(supported_networks()) == {NETWORK_PRODUCTION, NETWORK_DEVNET}
+
+
+class TestBawaanMengikutiNetwork:
+    """Bawaan ``--public-keys-file`` dan ``--chain`` harus ikut ``--network``.
+
+    Dua bawaan lama keduanya produksi dan keduanya salah untuk devnet:
+
+    * ``--public-keys-file`` bawaannya ``guard_public.json`` di akar repo —
+      registri **produksi**. Dipakai di devnet, ia tidak gagal karena berkasnya
+      hilang (berkas itu ada), melainkan karena ``key_id``-nya tidak dikenal.
+      Kegagalan yang menyesatkan lebih buruk daripada yang jelas, jadi di
+      devnet tidak ada bawaan sama sekali: flag itu wajib.
+    * ``--chain`` bawaannya ``base-sepolia``, yang **tidak sah** di jaringan
+      devnet; ``check_payment`` menolaknya dua kali, di ``chain_id_for`` dan
+      di pembandingan dengan chain mandate.
+
+    Argumen yang diberikan eksplisit tidak pernah ditulis ulang, termasuk
+    kombinasi yang akan ditolak Guard. Menebak maksud operator di sini berarti
+    menyembunyikan kesalahannya.
+    """
+
+    @pytest.fixture
+    def dicatat(self, monkeypatch) -> dict[str, object]:
+        hasil: dict[str, object] = {}
+
+        async def tiruan(recipient, amount, reason, **kwargs):
+            hasil.update(kwargs)
+            return {}
+
+        monkeypatch.setattr("payment_guard.demo_agent.run_once", tiruan)
+        return hasil
+
+    def test_devnet_tanpa_flag_kunci_gagal_dengan_pesan_jelas(
+        self, dicatat: dict[str, object], capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with pytest.raises(SystemExit) as info:
+            main([RECIPIENT, "10", "--network", NETWORK_DEVNET])
+        assert info.value.code != 0
+
+        pesan = capsys.readouterr().err
+        assert "--public-keys-file" in pesan
+        assert NETWORK_DEVNET in pesan
+        assert dicatat == {}, "run_once tidak boleh dipanggil kalau argumennya ditolak"
+
+        # Pesannya tidak boleh menyiratkan bahwa agent membaca berkas env:
+        # ia tidak membacanya sama sekali. `--env-file` hanya diteruskan
+        # sebagai argumen ke subproses `guard serve`, dan servernyalah yang
+        # membacanya. Versi pertama pesan ini berbunyi "Tunjuk
+        # GUARD_PUBLIC_KEYS_PATH dari berkas env devnet Anda", yang bisa
+        # dibaca sebagai janji bahwa nilainya diambil otomatis.
+        assert "tidak membaca berkas env" in pesan
+
+    def test_agent_tidak_membaca_env_sama_sekali(self) -> None:
+        """Dasar klaim di pesan error itu, diperiksa di sumbernya."""
+        sumber = MODULE.read_text(encoding="utf-8")
+        for terlarang in ("read_env_file", "os.environ", "getenv", "dotenv"):
+            assert terlarang not in sumber, terlarang
+
+    def test_devnet_memakai_chain_devnet_local(
+        self, dicatat: dict[str, object], tmp_path: Path
+    ) -> None:
+        pub = tmp_path / "guard_public_devnet.json"
+        pub.write_text("{}", encoding="utf-8")
+
+        assert (
+            main([RECIPIENT, "10", "--network", NETWORK_DEVNET, "--public-keys-file", str(pub)])
+            == 0
+        )
+        assert dicatat["chain"] == DEVNET_LOCAL
+        assert dicatat["network"] == NETWORK_DEVNET
+        assert dicatat["public_keys_path"] == pub
+
+    def test_produksi_tanpa_flag_tetap_seperti_dulu(self, dicatat: dict[str, object]) -> None:
+        """Penjaga regresi: perilaku produksi tidak boleh bergeser sedikit pun."""
+        assert main([RECIPIENT, "10"]) == 0
+        assert dicatat["chain"] == BASE_SEPOLIA
+        assert dicatat["network"] == NETWORK_PRODUCTION
+        assert dicatat["public_keys_path"] == Path("guard_public.json")
+
+    def test_chain_eksplisit_tidak_ditulis_ulang(
+        self, dicatat: dict[str, object], tmp_path: Path
+    ) -> None:
+        """Kombinasi yang akan ditolak Guard tetap diteruskan apa adanya."""
+        pub = tmp_path / "pub.json"
+        pub.write_text("{}", encoding="utf-8")
+
+        assert (
+            main(
+                [
+                    RECIPIENT,
+                    "10",
+                    "--network",
+                    NETWORK_DEVNET,
+                    "--chain",
+                    BASE_SEPOLIA,
+                    "--public-keys-file",
+                    str(pub),
+                ]
+            )
+            == 0
+        )
+        assert dicatat["chain"] == BASE_SEPOLIA
+
+    def test_kunci_eksplisit_dipakai_di_produksi(
+        self, dicatat: dict[str, object], tmp_path: Path
+    ) -> None:
+        pub = tmp_path / "lain.json"
+        pub.write_text("{}", encoding="utf-8")
+
+        assert main([RECIPIENT, "10", "--public-keys-file", str(pub)]) == 0
+        assert dicatat["public_keys_path"] == pub
