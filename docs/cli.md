@@ -171,9 +171,20 @@ Kode keluar: diteruskan dari `serve` di `mcp_server.py` baris 156 —
 `_cmd_serve` di `cli.py` baris 106 memakai `return serve(...)` baris 114.
 `serve` mengembalikan `1` pada dua jalur kegagalan start (baris 172 dan 178).
 
-Pernah dijalankan di devnet: **belum**. Keputusan devnet dibuat dengan
-memanggil `decision_service.check_payment` langsung lewat skrip, bukan lewat
-server MCP.
+Pernah dijalankan di devnet: **ya**, lewat agent demo yang menjalankannya
+sebagai subproses stdio (`demo_agent.py` `GUARD_COMMAND`). Dua keputusan masuk
+lewat jalur MCP ini, bukan lewat skrip yang memanggil `check_payment`
+langsung: `34770f00-bd91-4cc7-9eb5-44714b4c9d93` (10 tUSDC, `approved`
+otomatis) dan `75184603-eeaf-4baa-912f-fcb70dc9eb06` (40 tUSDC,
+`needs_human`, lalu disetujui pemilik repo lewat `guard approvals approve`).
+Kedua tool Guard terpanggil — server mencatat satu `ListToolsRequest` dan dua
+`CallToolRequest` per putaran — dan `audit_log` sudah diperiksa: `decision_made`
+beraktor `guard`, `approval_approved` beraktor `human`, tanpa kejadian lain.
+
+Satu batas yang perlu disebut bersamanya: Anvil **tidak** dijalankan saat demo
+itu, jadi yang terbukti adalah jalur MCP sampai verifikasi envelope, bukan
+sampai broadcast ke chain. Guard sendiri tidak pernah menyentuh chain, jadi
+batas itu tidak mengurangi apa pun untuk perintah ini.
 
 ## `guard approvals list`
 
