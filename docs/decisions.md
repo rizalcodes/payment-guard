@@ -9,6 +9,86 @@ yang ditolak dan mengapa.
 
 ---
 
+## 2026-11-19 — migrasi `0003` opsi B (tabel versi khusus) ditunda ke v1.1
+
+Keputusan CoS, 19 Nov 2026. Opsi B **ditunda ke v1.1**, tidak diterapkan di v1.
+Ia ditandai "ditinjau di M9" di dua tempat: `docs/Architecture_v1.1.md:151` dan
+`docs/Security_v1.1.md:293`. Peninjauannya dilakukan; hasilnya penundaan.
+
+Yang dimaksud opsi B: tabel atau view versi khusus yang boleh dibaca
+`guard_app`, lewat migrasi `0003`. Perlu dicatat bahwa nomor itu sudah terpakai
+oleh hal lain — `migrations/0003_watcher_from_addr.sql`, yang memberi Watcher
+satu hak kolom-tunggal — jadi opsi B, kalau nanti dikerjakan, akan memakai
+nomor berikutnya. Di kode sekarang opsi B **tidak ada**: tidak satu pun berkas
+di `migrations/` memuat kata `version`, dan `schema_migrations` dibuat oleh
+runner migrasi (`src/payment_guard/migrate.py`), bukan oleh berkas migrasi,
+sehingga `guard_app` memang tidak punya hak kepadanya.
+
+### Alasan
+
+RR-12 sudah **diterima untuk v1** di `Security_v1.1.md:293`, dengan mitigasi
+berupa langkah operator di README: `guard db status` harus "0 tertunda" sebelum
+`guard serve`. Mitigasi itu tidak ditulis ulang di sini.
+
+Opsi B mengubah skema **dan** hak akses, sedangkan v1 sudah mengunci matriks
+hak di `migrations/0002_roles.sql`. Mengubah keduanya di akhir M9 melanggar
+prinsip "jangan ubah skema di polish".
+
+Satu alasan tambahan yang baru muncul hari ini: `Architecture_v1.1.md:151`
+menggandengkan opsi B dengan perubahan `CHECK` nama event di `audit_log`,
+"supaya dua perubahan skema jadi satu". Perubahan `CHECK` itu sudah diputuskan
+**tidak dilakukan** (entri 2026-11-19 di bawah). Jadi tidak ada lagi perubahan
+skema kedua untuk digandeng, dan alasan menggabungkannya hilang dengan
+sendirinya.
+
+### Yang masih berlaku, dan harus disebut
+
+**Database yang dimigrasi setengah jalan masih bisa lolos start Guard.** Itu
+diterima, bukan terlewat — `Architecture_v1.1.md` sudah menyebutnya sebagai
+batas yang diterima, dan penundaan ini membiarkannya tetap begitu. Yang
+menahannya hanyalah satu langkah operator, dan langkah operator bisa dilewati.
+
+### Kondisi untuk membuka lagi
+
+Keputusan ini ditinjau ulang di v1.1 dengan PRD revisi, bukan di sini. Dokumen
+`Architecture_v1.1.md` dan `Security_v1.1.md` sengaja **tidak disunting** oleh
+commit ini: keduanya dokumen mengikat, dan revisinya lewat PRD.
+
+---
+
+## 2026-11-19 — `--rotate-passwords` ditunda ke v1.1; prosedur manual tetap berlaku
+
+Keputusan CoS, 19 Nov 2026. `guard db bootstrap-roles --rotate-passwords`
+**ditunda ke v1.1**. Ia ditandai "ditinjau di M9" di
+`docs/Security_v1.1.md:199`; peninjauannya dilakukan, hasilnya penundaan.
+
+Perintahnya memang belum ada, dan itu diperiksa, bukan diingat: kata `rotate`
+tidak muncul sama sekali di `src/`. Subperintah `guard db bootstrap-roles`
+sendiri ada (`src/payment_guard/cli.py:316`); yang tidak ada adalah flag
+`--rotate-passwords`.
+
+### Alasan
+
+`Security_v1.1.md:199` sudah menutup jalurnya sendiri: **"Jangan menjalankan
+perintah yang belum ada."** Merotasi kredensial lewat perintah yang belum
+pernah diuji lebih berisiko daripada prosedur manual yang sudah tertulis di
+dokumen itu — kegagalan di tengah rotasi meninggalkan role yang password-nya
+sudah berganti tapi berkas env-nya belum, dan itu memutus proses yang sedang
+berjalan.
+
+### Yang berlaku sekarang
+
+Prosedur manual di `Security_v1.1.md` bagian 8.5. Prosedur itu **tidak diubah**
+oleh commit ini, dan tidak diringkas ulang di sini supaya tidak ada dua versi
+yang bisa menyimpang.
+
+### Kondisi untuk membuka lagi
+
+v1.1, dengan tes untuk perintahnya. Perintah rotasi kredensial tanpa tes tidak
+dipasang.
+
+---
+
 ## 2026-11-19 — `CHECK event` di database tidak ditambahkan; nama event tetap dijaga di kode
 
 Keputusan CoS, 19 Nov 2026. Berkas migrasi menandai `CHECK` untuk nama `event`
