@@ -54,15 +54,21 @@ penyuntingan kedua daftar; itu sudah terjadi dua kali berturut-turut,
 `DESCRIPTIVE` lalu `REFERENCE` (`d69ef97`). Satu helper yang mengembalikan
 semua kategori akan menutupnya.
 
-### `CHECK event` di database masih menunggu keputusan
+### `CHECK event` di database — DITUTUP dengan keputusan
 
-`migrations/0001_init.sql:218` mencatat bahwa `CHECK` untuk nama `event`
-menunggu M9; kolomnya sekarang hanya dibatasi panjang
-(`char_length(event) BETWEEN 1 AND 64`), bukan daftar tertutup. Nama eventnya
-dijaga di `src/payment_guard/events.py`. Belum ada keputusan tertulis di
-`docs/decisions.md`. Dua opsi yang terbuka: menambah migrasi `0004` dengan
-daftar tertutup, atau tetap menjaganya di kode. Entri ini tidak memilih salah
-satu.
+**Ditutup dengan keputusan, bukan dengan migrasi.** Disetujui CoS 19 Nov 2026
+dan dicatat di `docs/decisions.md`, entri **2026-11-19** (commit `1a5d63a`).
+
+Nama event tetap dijaga di kode, `src/payment_guard/events.py`. Tidak ada
+migrasi `0004` dan tidak ada `CHECK` daftar tertutup di database; kolom `event`
+tetap dibatasi panjangnya saja (`char_length(event) BETWEEN 1 AND 64`).
+Alasannya, berikut konsekuensinya bagi pengaman di sisi database, ada di entri
+itu dan tidak diulang di sini.
+
+Komentar "menunggu M9" di `migrations/0001_init.sql:218` **dibiarkan apa
+adanya**: checksum berkas migrasi dihitung atas seluruh isi berkas, jadi
+menyunting komentarnya pun akan membuat `guard db migrate` menolak berkas itu
+di setiap database yang sudah dimigrasi.
 
 ### Diagram Mermaid belum pernah divalidasi lewat render
 
