@@ -9,6 +9,51 @@ yang ditolak dan mengapa.
 
 ---
 
+## 2026-11-19 — `CHECK event` di database tidak ditambahkan; nama event tetap dijaga di kode
+
+Keputusan CoS, 19 Nov 2026. Berkas migrasi menandai `CHECK` untuk nama `event`
+sebagai sesuatu yang menunggu M9. Jawabannya: **tidak ditambahkan**. Daftar nama
+event tetap dijaga di kode, `src/payment_guard/events.py`. Tidak ada migrasi
+`0004`, dan tidak ada `CHECK` daftar tertutup di database. Kolom `event` tetap
+dibatasi panjangnya saja, `CHECK (char_length(event) BETWEEN 1 AND 64)`.
+
+### Alasan
+
+Daftarnya sudah dijaga di satu tempat. `events.py` memuat enum `Event`, dan
+`audit()` — satu-satunya jalur tulis ke `audit_log`, menurut docstring-nya
+sendiri — menerima anggota enum itu, bukan string bebas, lalu memanggil
+`require_valid_event`. Di samping itu `tests/unit/test_events_doc.py` memastikan
+`docs/events.md` tidak menyimpang dari enum tersebut. `CHECK` daftar tertutup
+akan menaruh daftar yang sama di tempat kedua; dua daftar yang harus disunting
+bersamaan akan menyimpang pada perubahan berikutnya.
+
+Migrasi baru juga memaksa migrasi atas database yang sudah ada tanpa manfaat
+yang jelas untuk v1, karena satu-satunya penulis tabel itu adalah kode Guard.
+
+### Konsekuensi, ditulis apa adanya
+
+**Pengaman di sisi database berkurang.** Kalau kode lain atau operator menulis
+langsung ke `audit_log` dengan nama event yang tidak dikenal, tidak ada `CHECK`
+daftar tertutup yang menolaknya — yang menolak hanya batas panjang 1 sampai 64
+karakter. Jadi jaminan "nama event selalu sah" berlaku untuk tulisan yang lewat
+`events.audit()`, bukan untuk tabelnya. Itu diterima dengan sadar, bukan
+terlewat.
+
+### Komentar di berkas migrasi dibiarkan apa adanya
+
+`migrations/0001_init.sql:218` masih berbunyi "CHECK event di database menunggu
+M9". Kalimat itu **tidak diubah**, dan bukan karena lupa: checksum berkas
+migrasi adalah SHA-256 atas seluruh isi berkas setelah normalisasi baris
+(`sqltext.checksum`), jadi menyunting satu komentar pun mengubahnya, dan
+`migrate.py` menolak berkas yang checksum-nya berubah sesudah diterapkan
+(`src/payment_guard/migrate.py:203`). Menyentuh komentar itu akan membuat
+`guard db migrate` gagal pada setiap database yang sudah dimigrasi.
+
+Yang berlaku adalah entri ini. Komentar di berkas migrasi adalah catatan pada
+saat berkas itu ditulis, dan harus dibaca begitu.
+
+---
+
 ## 2026-11-17 — skenario devnet (d) dan (b) hijau, (c) dipotong, dan satu koreksi
 
 Keputusan CoS, 17 Nov 2026. Tiga hal: hasil dua skenario, satu skenario yang

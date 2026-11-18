@@ -9,6 +9,10 @@
 > menggantikan bukti testnet publik, dan tidak boleh dilaporkan sebagai bukti
 > testnet.
 
+Hasil run skenario devnet dan demo jalur MCP tidak dicatat di sini, melainkan di
+[demo-mcp-devnet.md](demo-mcp-devnet.md) dan [decisions.md](decisions.md);
+dokumen ini hanya prosedur, versi, dan peringatan.
+
 ## Peringatan keamanan, dibaca lebih dulu
 
 **Kunci default Anvil adalah PUBLIK.** Mnemonic bawaannya
