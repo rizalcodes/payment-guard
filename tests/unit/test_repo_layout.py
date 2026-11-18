@@ -153,7 +153,7 @@ class TestCanonicalDocs:
     #: Dipisah dari CANONICAL karena keduanya tidak mengikat perilaku kode —
     #: keduanya menjelaskan mengapa perilaku itu begitu, dan apa yang sudah
     #: diketahui salah di tag yang sudah dibuat.
-    HISTORICAL = ("decisions.md", "CHANGELOG.md")
+    HISTORICAL = ("decisions.md", "CHANGELOG.md", "demo-mcp-devnet.md")
 
     #: Deskriptif: menggambarkan kode yang ada, jadi kode yang menang bila beda.
     DESCRIPTIVE = ("arsitektur.md",)
