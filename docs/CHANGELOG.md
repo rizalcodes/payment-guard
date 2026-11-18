@@ -37,6 +37,151 @@ Tidak ditutup dengan kode karena satu-satunya sumber lain untuk alamat itu
 adalah berkas kunci Executor, dan Watcher tidak boleh membacanya (Arsitektur
 bagian 2). Lihat `docs/decisions.md`.
 
+### `demo_agent.py` di luar cakupan `mypy --strict`
+
+Dua bug ditemukan di berkas itu dalam dua hari (`fd8b44a`, `75935c0`), dan
+keduanya berupa argumen yang tidak diteruskan — kelas kesalahan yang
+`--strict` tangkap secara statis. Daftar modul di `.pre-commit-config.yaml`
+tidak memuatnya. Sengaja belum ditambahkan: itu keputusan tersendiri, dan
+commit `75935c0` menyatakannya.
+
+### Dua daftar kategori dokumen yang harus disunting bersamaan
+
+`tests/unit/test_repo_layout.py` menyebut kelima kategori secara eksplisit di
+dua tempat, `test_no_other_markdown_sneaks_into_docs` dan
+`test_every_docs_category_is_disjoint`. Setiap kategori baru menuntut
+penyuntingan kedua daftar; itu sudah terjadi dua kali berturut-turut,
+`DESCRIPTIVE` lalu `REFERENCE` (`d69ef97`). Satu helper yang mengembalikan
+semua kategori akan menutupnya.
+
+### `CHECK event` di database masih menunggu keputusan
+
+`migrations/0001_init.sql:218` mencatat bahwa `CHECK` untuk nama `event`
+menunggu M9; kolomnya sekarang hanya dibatasi panjang
+(`char_length(event) BETWEEN 1 AND 64`), bukan daftar tertutup. Nama eventnya
+dijaga di `src/payment_guard/events.py`. Belum ada keputusan tertulis di
+`docs/decisions.md`. Dua opsi yang terbuka: menambah migrasi `0004` dengan
+daftar tertutup, atau tetap menjaganya di kode. Entri ini tidak memilih salah
+satu.
+
+### Diagram Mermaid belum pernah divalidasi lewat render
+
+`docs/arsitektur.md` masuk tanpa render (`70fa9d3`). `mmdc` tidak terpasang
+dan image resmi `ghcr.io/mermaid-js/mermaid-cli` menolak dengan "denied", jadi
+yang dijalankan hanya pemeriksaan struktural. Pesan commit itu menyatakannya,
+dan menyebut tampilan GitHub sebagai gantinya.
+
+---
+
+## Belum ditag — M9 Polish: dokumen, dan dua perbaikan agent demo
+
+Sepuluh commit di atas `a4574e5`, 17–18 Nov 2026. Belum ditag.
+
+**Dokumen baru.** `docs/arsitektur.md` (`70fa9d3`): dua diagram Mermaid, alur
+pembayaran dan tabel database. `docs/cli.md` (`d69ef97`): referensi 17 perintah
+dan 25 flag, diambil dari keluaran `--help`. `docs/demo-mcp-devnet.md`
+(`5689890`): catatan demo jalur MCP di devnet. Ketiganya didaftarkan di
+`tests/unit/test_repo_layout.py`, masing-masing di kategori `DESCRIPTIVE`,
+`REFERENCE` (kategori baru di `d69ef97`), dan `HISTORICAL`.
+
+**README.** `f35e19a` menambahkan bagian "Status Verifikasi". `c241ce7`
+memperbaiki dua kalimat yang sudah tidak benar: status `M5` → `M6`, dan butir
+"Belum ada Watcher dan Reconciler" yang bertentangan dengan tabel di bagian
+baru itu.
+
+**`docs/cli.md` diperbarui** (`fc653ec`): baris status devnet untuk
+`guard serve` berubah dari "belum" menjadi sudah dijalankan. Pesan commit itu
+di-`amend` sebelum di-push karena satu kuantor terlalu luas — "two
+CallToolRequest per round" benar untuk dua putaran agent demo tapi tidak untuk
+sesi ketiga yang hanya satu panggilan tool.
+
+**Dua perbaikan di `src/payment_guard/demo_agent.py`.** `fd8b44a`: `--network`
+tidak pernah diteruskan ke `verify`, sehingga envelope devnet (`chain_id`
+31337) selalu ditolak dengan "bukan 84532". `75935c0`: bawaan `--chain` dan
+`--public-keys-file` keduanya produksi — `--chain` kini diturunkan dari
+`--network`, dan `--public-keys-file` wajib di luar jaringan produksi.
+Keduanya menyentuh `tests/unit/test_demo_agent.py`.
+
+**`docs/decisions.md` dan `docs/runbook.md`** (`b40ccd3`): hasil skenario (d)
+dan (b), alasan (c) dipotong, dan koreksi tentang alarm reconciler. Runbook
+mendapat bagian 11. Alasannya ada di `docs/decisions.md`; tidak diulang di
+sini.
+
+**`f607f91`** mencatat penggantian pesan tag `m6` di `docs/decisions.md`.
+
+---
+
+## m6-devnet — bukti devnet lokal, bukan testnet
+
+Tag anotasi `31dc419` di commit `a4574e5`, 17 Nov 2026. Mencakup 20 commit
+dari `771c211` sampai `a4574e5`, termasuk keduanya.
+
+Isi pesan tagnya yang perlu diketahui peninjau:
+
+- unit 2559 lulus di checkout bersih, 1 dilewati karena `contracts/out` tidak
+  dibangun di klon; integrasi 574 lulus, 5 dilewati karena tes live;
+- skenario (a) jalur bahagia, keputusan `c851d003`, dan (e) recovery,
+  keputusan `577f1cbf`, keduanya dijalankan di `56c6dc0` dengan rekaman
+  keadaan git tersimpan;
+- run awal `4728d138` dan `06971b74` **tetap ada** di database devnet tapi
+  **tidak dipakai sebagai bukti**, karena keadaan git saat run itu tidak
+  terekam;
+- empat pembayaran `final` dan `matched`, nol alarm, saldo seimbang 500 tUSDC.
+
+**Yang BELUM ada di dalam tag ini**, menurut pesan tagnya sendiri: skenario
+(d) reorg, (b) `unmatched_onchain`, dan (c) `mismatch`. Dua yang pertama
+dijalankan **sesudah** tag dibuat dan dicatat di `b40ccd3`; (c) dipotong
+dengan alasan yang ada di `docs/decisions.md`. Urutan waktunya diperiksa,
+bukan diasumsikan: tag dibuat 1794895298, sedangkan `decisions.created_at`
+keputusan (d) `5c5a04d3` adalah 1794896094 dan `settlements.first_seen_at`
+transfer (b) adalah 1794897252 — keduanya sesudahnya, selisih terkecil 796
+detik. Jadi pesan tag itu benar untuk
+commit yang ditunjuknya dan lebih konservatif daripada keadaan sekarang.
+
+Tidak ada bukti testnet publik. Itu item v1.1 (`m6-onchain`).
+
+Dua puluh commit itu membangun devnet lokal: profile Docker dan Anvil terpin
+(`772012f`), pemilih jaringan opt-in (`6c71797`), kontrak token uji
+(`94d2fa6`), penerusan `network` ke jalur mandate dan signing (`c194405`),
+`scripts/devnet_up.py` bertahap (`7233c75`, `775bd79`, `3e9dc84`, `98e75d6`,
+`e744b50`, `01e88b9`, `ec302da`), dan perbaikan bug approve devnet
+(`d5108fc`). `783233c` memperbaiki master yang merah sejak `772012f` karena
+`.env.devnet.example` tidak didaftarkan di `test_gitignore`.
+
+---
+
+## m6 — pesan tag diganti, commit yang ditunjuk tidak
+
+Tag `m6` **tidak pernah berpindah commit**: ia menunjuk `3184482` sebelum dan
+sesudah. Yang diganti adalah objek tagnya, karena pesannya usang.
+
+| | objek tag | tanggal tagger | commit |
+|---|---|---|---|
+| lama | `1956307` | 2026-11-16 | `3184482` |
+| sekarang | `c8a41ba` | 2026-11-17 | `3184482` |
+
+Pesan lama berbunyi:
+
+```
+M6 terverifikasi pada tes unit dan integrasi (PostgreSQL 16, chain tiruan).
+Bukti on-chain testnet BELUM ADA. Devnet lokal BELUM ADA.
+```
+
+Kalimat terakhirnya sudah tidak benar begitu devnet lokal dibangun. Pesan
+sekarang menyebut angka suite dari checkout bersih (unit 2086, integrasi 539),
+tetap menyatakan tidak ada bukti on-chain testnet publik, menyatakan bukti
+devnet lokal **tidak** dicakup tag ini, dan menyebut bug approve devnet yang
+ditemukan **sesudah** tag lama dipasang lalu diperbaiki di `d5108fc`.
+
+Alasan penggantiannya ada di `docs/decisions.md`; commit yang mencatatnya
+`f607f91`.
+
+**Catatan jejak.** Objek tag lama `1956307` masih ada di object database
+sebagai objek menggantung saat entri ini ditulis, jadi pesan lamanya masih
+bisa dibaca dengan `git cat-file -p 1956307`. Itu akan hilang pada `git gc`.
+Catatan yang tahan lama adalah pesan commit `f607f91`, yang mengutip pesan tag
+lama di dalam body-nya, dan entri di `docs/decisions.md`.
+
 ---
 
 ## M8 Fase 2 — eval
