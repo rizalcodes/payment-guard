@@ -1,0 +1,47 @@
+# Konfigurasi gitleaks untuk Payment Guard.
+#
+# Aturan deteksi diwarisi utuh dari konfigurasi bawaan gitleaks lewat
+# `[extend] useDefault = true`; berkas ini tidak menambah, mengubah, atau
+# menonaktifkan satu aturan pun. Selain itu isinya hanya blok `[allowlist]`,
+# dan blok itu SENGAJA KOSONG.
+#
+# `[extend]` BUKAN basa-basi. Tanpa baris itu, konfigurasi ini MENGGANTIKAN
+# aturan bawaan alih-alih menambahnya, sehingga gitleaks berjalan tanpa satu
+# aturan pun dan selalu melaporkan "no leaks found" — hijau karena buta, bukan
+# karena bersih. Itu diuji, bukan diasumsikan: berkas umpan berisi contoh
+# kunci AWS dan blok RSA PRIVATE KEY tertangkap oleh aturan bawaan, lalu
+# TERLEWAT begitu konfigurasi tanpa `[extend]` dipakai. Jangan hapus blok itu.
+#
+# Kenapa kosong: pemindaian seluruh riwayat pada 19 November 2026
+# (`gitleaks detect --source . --log-opts="--all"`, 74 commit) menghasilkan
+# NOL temuan, dan pemindaian HEAD juga nol. Tidak ada satu pun nilai yang
+# perlu dikecualikan, jadi tidak ada entri yang dibenarkan.
+#
+# Aturan untuk siapa pun yang menambah entri nanti:
+#
+#   1. Setiap entri wajib menyertakan ALASAN dalam komentar di atasnya —
+#      mengapa nilai itu bukan rahasia, bukan sekadar bahwa ia mengganggu.
+#   2. Setiap entri wajib menyertakan HASH COMMIT tempat nilai itu muncul,
+#      supaya peninjau berikutnya bisa melihat sendiri apa yang dikecualikan.
+#   3. Entri yang mengecualikan seluruh berkas atau seluruh direktori butuh
+#      alasan yang lebih kuat daripada entri yang mengecualikan satu nilai.
+#
+# Alasannya sederhana: allowlist tanpa alasan adalah cara termudah mematikan
+# pemindai ini tanpa ada yang menyadarinya. Satu baris yang ditambahkan
+# diam-diam akan membuat setiap pemindaian berikutnya hijau karena
+# pengecualiannya, bukan karena repo-nya bersih.
+#
+# Catatan yang sudah diketahui dan TIDAK dikecualikan di sini: kunci privat
+# akun #0 bawaan Anvil ada di riwayat commit lama (lihat SECURITY.md). Ia
+# publik, bukan rahasia, dan gitleaks tidak menandainya di riwayat terjangkau.
+# Kalau suatu saat aturan yang lebih ketat mulai menandainya, keputusannya
+# dibuat saat itu — bukan dicegah lebih dulu dengan pengecualian buta.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Kosong dengan sengaja. Lihat komentar di atas sebelum menambah entri."
+paths = []
+regexes = []
+commits = []
