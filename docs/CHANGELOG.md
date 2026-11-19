@@ -72,10 +72,17 @@ di setiap database yang sudah dimigrasi.
 
 ### Diagram Mermaid belum pernah divalidasi lewat render
 
-`docs/arsitektur.md` masuk tanpa render (`70fa9d3`). `mmdc` tidak terpasang
-dan image resmi `ghcr.io/mermaid-js/mermaid-cli` menolak dengan "denied", jadi
-yang dijalankan hanya pemeriksaan struktural. Pesan commit itu menyatakannya,
-dan menyebut tampilan GitHub sebagai gantinya.
+`docs/arsitektur.md` (`70fa9d3`): **belum divalidasi dengan render;
+pemeriksaan lokal dengan `mmdc` tidak bisa karena image-nya ditolak.** `mmdc`
+tidak terpasang dan image resmi `ghcr.io/mermaid-js/mermaid-cli` menolak
+dengan "denied", jadi yang dijalankan hanya pemeriksaan struktural.
+
+Pesan commit `70fa9d3` menyebut tampilan GitHub sebagai gantinya dan menutup
+bagian itu dengan "Tampilan di GitHub diperiksa setelah push". Kalimat itu
+adalah rencana yang ditulis sebelum push, bukan catatan hasil: tidak ada
+commit atau dokumen di repo ini yang mencatat bahwa pemeriksaan itu benar-benar
+dilakukan, dan `70fa9d3` adalah satu-satunya commit yang pernah menyentuh
+berkas itu. Karena itu status di atas tetap "belum divalidasi".
 
 ---
 
