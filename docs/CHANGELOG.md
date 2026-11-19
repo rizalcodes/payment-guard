@@ -96,9 +96,10 @@ berkas itu. Karena itu status di atas tetap "belum divalidasi".
 
 ---
 
-## Belum ditag — M9 Polish: dokumen, dan dua perbaikan agent demo
+## m9 — Polish: dokumen, dan dua perbaikan agent demo
 
-Delapan belas commit di atas `a4574e5`, 17–18 Nov 2026. Belum ditag.
+Delapan belas commit di atas `a4574e5`, ditambah commit penutup ini,
+17–19 Nov 2026. Ditag `m9`.
 
 **Dokumen baru.** `docs/arsitektur.md` (`70fa9d3`): dua diagram Mermaid, alur
 pembayaran dan tabel database. `docs/cli.md` (`d69ef97`): referensi 17 perintah
