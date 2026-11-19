@@ -38,7 +38,7 @@ repos:
   - repo: local
     hooks:
       - id: mypy-strict
-        name: mypy --strict (uang, aturan, jalur eksekusi, eval, dan skrip devnet)
+        name: mypy --strict (uang, aturan, jalur eksekusi, agent demo, eval, dan skrip devnet)
         entry: uv run --no-sync mypy --strict
         language: system
         pass_filenames: false
@@ -53,6 +53,7 @@ repos:
           - src/payment_guard/approvals_cli.py
           - src/payment_guard/watcher.py
           - src/payment_guard/reconciler.py
+          - src/payment_guard/demo_agent.py
           - evals/
           - scripts/devnet_up.py
 

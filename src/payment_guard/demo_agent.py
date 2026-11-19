@@ -41,7 +41,7 @@ import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -184,7 +184,11 @@ def _text_of(result: Any) -> dict[str, Any]:
     blocks = list(result.content)
     if len(blocks) != 1:
         raise DemoAgentError(f"jawaban tool tidak berbentuk satu blok: {len(blocks)} blok")
-    return json.loads(blocks[0].text)
+    # `json.loads` mengembalikan `Any`; bentuknya sudah dijamin skema tool
+    # Guard, dan memeriksanya ulang di sini akan menambah jalur error baru.
+    # `cast` menyatakan yang sudah berlaku tanpa mengubah perilaku runtime,
+    # pola yang sama dengan `chain.py` baris 266.
+    return cast("dict[str, Any]", json.loads(blocks[0].text))
 
 
 async def run_once(
