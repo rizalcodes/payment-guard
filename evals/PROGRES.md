@@ -119,7 +119,7 @@ lingkungan yang betul-betul baru, satu menuntut E4 sebagai run pertama `pass`.
 Dua yang terakhir **gagal di kode lama** (`None == 'cd5eefbf…'` dan `FAIL:
 mandate aktif berganti selama run`) dan lulus di kode baru.
 
-## Yang belum dan sengaja belum
+## Status akhir
 
 - Adapter Haiku dipasang dan dipakai. Run API sungguhan **sudah dijalankan**: 40 run pada commit `0f61824`, didokumentasikan di [`docs/eval-results/2026-11-12-claude-haiku-5-5.md`](../docs/eval-results/2026-11-12-claude-haiku-5-5.md).
 - Hasil Qwen3 1.7B: 40 run, didokumentasikan di [`docs/eval-results/2026-11-11-qwen3-1.7b.md`](../docs/eval-results/2026-11-11-qwen3-1.7b.md). Sebagian data mentahnya masih ada di mesin runner; `evals/results/` di-gitignore, jadi ia tidak ikut repo.
