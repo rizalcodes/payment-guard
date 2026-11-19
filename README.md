@@ -210,7 +210,7 @@ Sepolia sungguhan; lihat [docs/CHANGELOG.md](docs/CHANGELOG.md) bagian M6.
 `guard --version` ada di tingkat atas.
 
 Rotasi password otomatis **belum diimplementasi**. Rencananya
-`guard db bootstrap-roles --rotate-passwords`, ditinjau di M9 bersama perubahan
+`guard db bootstrap-roles --rotate-passwords`, ditinjau di revisi PRD v1.1 bersama perubahan
 skema lain. Sampai itu, rotasi dilakukan manual; lihat Runbook 8.5 pada
 [docs/Security_v1.1.md](docs/Security_v1.1.md).
 
