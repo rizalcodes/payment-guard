@@ -96,6 +96,36 @@ berkas itu. Karena itu status di atas tetap "belum divalidasi".
 
 ---
 
+## Belum ditag — pasca-`m9`
+
+Commit di atas tag `m9` (`c4fcf2c`). Bagian ini **belum lengkap**: per entri
+di bawah, sepuluh commit sudah ada di atas `m9` dan hanya satu yang dicatat di
+sini. Sisanya menunggu entri tersendiri.
+
+### docs: render Mermaid diverifikasi di GitHub
+
+19 Nov 2026. Kesembilan blok Mermaid di repo dibuka di GitHub
+(`rizalcodes/payment-guard`, branch `master`) dan **9 dari 9 tampil sebagai
+diagram**:
+
+| Berkas | Blok | Hasil |
+|---|---|---|
+| `README.md` | 1 | tampil sebagai diagram |
+| `docs/arsitektur.md` | 2 (flowchart dan diagram ER tabel) | tampil sebagai diagram |
+| `docs/Architecture_v1.1.md` | 7 | tampil sebagai diagram |
+
+**Pengecekannya manual, oleh pemilik repo, bukan lewat CI.** Tidak ada
+otomatisasi yang menjaganya: `mmdc` tetap tidak terpasang dan image resminya
+tetap ditolak, jadi diagram yang rusak masih bisa masuk master tanpa ada yang
+menahannya. Tangkapan layarnya tidak disimpan di repo, sehingga bukti yang
+tersisa adalah catatan ini.
+
+Butir "Known limitations" di `README.md` diperbarui mengikuti keadaan itu.
+Item di "Utang terbuka" yang ditulis `13beaa9` **dibiarkan apa adanya**
+sebagai catatan sejarah; ia menggambarkan keadaan sebelum pengecekan ini.
+
+---
+
 ## m9 — Polish: dokumen, dan dua perbaikan agent demo
 
 Delapan belas commit di atas `a4574e5`, ditambah commit penutup ini,

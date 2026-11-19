@@ -221,8 +221,10 @@ The manual procedure for each is in [docs/runbook.md](docs/runbook.md).
   local devnet and against mocks, not against a public chain.
 - **Single agent, single operator.** There is no multi-agent production
   deployment, no rate limiting per agent, and no horizontal scaling story.
-- **One Mermaid diagram has never been validated by rendering.** `mmdc` is not
-  installed and the official image was denied, so only a structural check ran.
+- **Mermaid rendering is checked by hand, not by CI.** All 9 blocks were
+  opened on GitHub on 19 Nov 2026 and all 9 rendered as diagrams, but `mmdc`
+  is not installed and the official image was denied, so nothing verifies
+  this automatically and a broken diagram would reach master unnoticed.
 - **Two document-category lists must be edited together** in
   `tests/unit/test_repo_layout.py`; a helper returning all categories would
   close that.
