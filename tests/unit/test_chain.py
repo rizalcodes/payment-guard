@@ -192,7 +192,7 @@ class TestLoadWallet:
     @pytest.mark.parametrize(
         "bahan",
         [
-            "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",  # tanpa 0x
+            "4b" * 32,  # tanpa 0x
             "0xac0974",  # terlalu pendek
             "0x" + "a" * 65,  # terlalu panjang
             "0x" + "z" * 64,  # bukan hex
