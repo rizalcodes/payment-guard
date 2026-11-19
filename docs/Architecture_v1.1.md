@@ -148,7 +148,7 @@ bukan bahwa skemanya versi terakhir.
   diterima, bukan bug: menutupnya butuh hak baru atau tabel baru, dan keduanya
   lebih mahal daripada satu langkah operator.
 - Opsi B — tabel atau view versi khusus yang boleh dibaca `guard_app`, lewat
-  migrasi `0003` — **ditinjau di M9**, bersama perubahan CHECK nama event di
+  migrasi `0003` — **ditinjau di revisi PRD v1.1**, bersama perubahan CHECK nama event di
   `audit_log`, supaya dua perubahan skema jadi satu.
 
 Tercatat sebagai RR-12 di Security v1.1 bagian 10. Langkah operatornya ada di

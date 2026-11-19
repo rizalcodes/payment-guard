@@ -196,7 +196,7 @@ Hentikan Executor. Periksa transaksi di block explorer. Bandingkan dengan `execu
 
 **8.5 Password role DB bocor**
 
-> **Rotasi otomatis belum diimplementasi.** Rencana: `guard db bootstrap-roles --rotate-passwords`, ditinjau di M9 bersama perubahan skema lain. Sampai perintah itu ada, pakai prosedur manual di bawah. Jangan menjalankan perintah yang belum ada.
+> **Rotasi otomatis belum diimplementasi.** Rencana: `guard db bootstrap-roles --rotate-passwords`, ditinjau di revisi PRD v1.1 bersama perubahan skema lain. Sampai perintah itu ada, pakai prosedur manual di bawah. Jangan menjalankan perintah yang belum ada.
 
 Prosedur manual:
 1. Hentikan proses yang memakai role itu.
@@ -290,7 +290,7 @@ Tambahan atas bagian 13 PRD v2.1. Semua otomatis kecuali ditandai *review*.
 | RR-9 | Operator tertipu isi kutipan `reason` meski layar sudah dirancang (anti-injeksi tampilan, bukan jaminan) | **Diterima**. Token konfirmasi anti-refleks, bukan kontrol keamanan. Ditulis di README. Sejak 4 Nov 2026 token **acak** per prompt, bukan turunan `decision_id`: nilai turunan bisa dihitung agent karena `decision_id` dikembalikan ke agent, sehingga agent bisa menyelipkan token yang benar ke dalam `reason`. Itu menutup satu jalur bujukan, tapi **tidak** mengubah sifat dasarnya — agent yang bisa menjalankan perintah di mesin operator bisa membaca layarnya (asumsi 2, RR-1) |
 | RR-10 | Envelope yang sudah beredar tidak bisa dibatalkan sampai `valid_until` | **Diterima**. `decision_ttl` pendek |
 | RR-11 | Execution `signed`/`broadcast` tidak dibatalkan saat mandate berganti | **Diterima** (by design, komitmen) |
-| RR-12 | Versi migrasi tidak bisa diverifikasi oleh Guard (`guard_app` tanpa hak ke `schema_migrations`). Database yang dimigrasi setengah jalan lolos start | **Diterima v1**. Mitigasi: langkah operator di README (`guard db status` harus "0 tertunda" sebelum `guard serve`). Perbaikan opsi B — tabel versi khusus lewat migrasi `0003` — ditinjau di M9 |
+| RR-12 | Versi migrasi tidak bisa diverifikasi oleh Guard (`guard_app` tanpa hak ke `schema_migrations`). Database yang dimigrasi setengah jalan lolos start | **Diterima v1**. Mitigasi: langkah operator di README (`guard db status` harus "0 tertunda" sebelum `guard serve`). Perbaikan opsi B — tabel versi khusus lewat migrasi `0003` — ditinjau di revisi PRD v1.1 |
 
 ---
 
