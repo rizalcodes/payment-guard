@@ -338,6 +338,23 @@ Devnet lokal bukan testnet.
 Approval di setiap run diketik pemilik repo di terminal sungguhan. Tidak ada
 `--yes`, tidak ada stdin palsu, dan tidak ada jalur yang melewati `isatty()`.
 
+![Rekaman dua perintah baca-saja Guard di devnet lokal: guard verify dan guard db status. Tidak ada broadcast ke chain dan tidak ada keputusan baru yang dibuat. VALID berarti tanda tangannya sah dan nilai v, chain_id, serta status-nya benar; masa berlaku tidak diperiksa di sini, melainkan saat eksekusi.](docs/media/payment-guard-demo.gif)
+
+Rekaman di atas berisi **dua perintah baca-saja** yang benar-benar dijalankan:
+`guard verify` (tanpa database, tanpa jaringan) dan `guard db status`. Tidak
+ada keputusan baru yang dibuat, tidak ada persetujuan, dan **tidak ada
+broadcast ke chain** — Anvil mati selama perekaman.
+
+Cara membaca `VALID`: ia berarti kunci ditemukan, tanda tangannya cocok dengan
+payload, dan nilai `v`, `chain_id`, serta `status` sudah benar
+(`signing.py:496-509`). Ia **tidak** berarti envelope-nya masih berlaku:
+`guard verify` sengaja tidak memanggil `check_not_expired` (`signing.py:513`)
+karena ia bekerja tanpa database, sedangkan satu-satunya jam yang dipercaya
+adalah jam database. Masa berlaku diperiksa Executor di cek 3b
+(`executor.py:446`). `mandate_hash` di layar hanya **ditampilkan**, bukan
+dibandingkan: perbandingan itu baru terjadi bila `--mandate` diberikan, dan
+rekaman ini tidak memberikannya.
+
 | Skenario | Status | Keputusan / transaksi | Hash commit yang diuji | Berkas bukti (keluaran mentah `jejak.py`) |
 |---|---|---|---|---|
 | (a) jalur bahagia | hijau | keputusan `c851d003-bb26-4623-834d-b31891f300e7` (run ULANG) | `56c6dc0` | `skenario-a-ulang-00` … `-10` |
