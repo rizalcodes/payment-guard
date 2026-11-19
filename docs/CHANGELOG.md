@@ -37,13 +37,23 @@ Tidak ditutup dengan kode karena satu-satunya sumber lain untuk alamat itu
 adalah berkas kunci Executor, dan Watcher tidak boleh membacanya (Arsitektur
 bagian 2). Lihat `docs/decisions.md`.
 
-### `demo_agent.py` di luar cakupan `mypy --strict`
+### `demo_agent.py` di luar cakupan `mypy --strict` — DITUTUP (`7b32003`)
 
-Dua bug ditemukan di berkas itu dalam dua hari (`fd8b44a`, `75935c0`), dan
-keduanya berupa argumen yang tidak diteruskan — kelas kesalahan yang
-`--strict` tangkap secara statis. Daftar modul di `.pre-commit-config.yaml`
-tidak memuatnya. Sengaja belum ditambahkan: itu keputusan tersendiri, dan
-commit `75935c0` menyatakannya.
+**Ditutup dengan kode, bukan dengan keputusan.** Berkas itu kini ada di daftar
+`mypy --strict`.
+
+Yang membuatnya terbuka: dua bug ditemukan di berkas itu dalam dua hari
+(`fd8b44a`, `75935c0`), dan keduanya berupa argumen yang tidak diteruskan —
+kelas kesalahan yang `--strict` tangkap secara statis — sementara daftar modul
+di `.pre-commit-config.yaml` tidak memuatnya.
+
+`7b32003` menutupnya. `mypy --strict` melaporkan **satu** error di berkas itu,
+`no-any-return` atas nilai `json.loads`, dan itu diperbaiki dengan `cast` —
+idiom yang sudah dipakai di `chain.py:266` — sehingga tidak ada perilaku yang
+berubah. Berkasnya ditambahkan ke **dua** daftar sekaligus,
+`.pre-commit-config.yaml` dan `.github/workflows/ci.yml`: menambahkan ke satu
+daftar saja menggagalkan `test_ci_and_pre_commit_check_the_same_modules`, yang
+memang ada untuk menangkap persis itu.
 
 ### Dua daftar kategori dokumen yang harus disunting bersamaan
 
@@ -88,7 +98,7 @@ berkas itu. Karena itu status di atas tetap "belum divalidasi".
 
 ## Belum ditag — M9 Polish: dokumen, dan dua perbaikan agent demo
 
-Sepuluh commit di atas `a4574e5`, 17–18 Nov 2026. Belum ditag.
+Delapan belas commit di atas `a4574e5`, 17–18 Nov 2026. Belum ditag.
 
 **Dokumen baru.** `docs/arsitektur.md` (`70fa9d3`): dua diagram Mermaid, alur
 pembayaran dan tabel database. `docs/cli.md` (`d69ef97`): referensi 17 perintah
