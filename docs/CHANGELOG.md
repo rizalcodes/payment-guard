@@ -95,6 +95,11 @@ memperbaiki dua kalimat yang sudah tidak benar: status `M5` → `M6`, dan butir
 "Belum ada Watcher dan Reconciler" yang bertentangan dengan tabel di bagian
 baru itu.
 
+**Rekaman GIF baca-saja di README** (`417e227`): dua perintah yang benar-benar
+dijalankan, `guard verify` dan `guard db status`, di devnet lokal — tanpa
+keputusan baru dan **tanpa broadcast ke chain**. Berkasnya
+`docs/media/payment-guard-demo.gif`.
+
 **`docs/cli.md` diperbarui** (`fc653ec`): baris status devnet untuk
 `guard serve` berubah dari "belum" menjadi sudah dijalankan. Pesan commit itu
 di-`amend` sebelum di-push karena satu kuantor terlalu luas — "two
