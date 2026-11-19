@@ -80,7 +80,10 @@ adanya**: checksum berkas migrasi dihitung atas seluruh isi berkas, jadi
 menyunting komentarnya pun akan membuat `guard db migrate` menolak berkas itu
 di setiap database yang sudah dimigrasi.
 
-### Diagram Mermaid belum pernah divalidasi lewat render
+### Diagram Mermaid belum pernah divalidasi lewat render — DITUTUP 19 Nov 2026
+
+Ditutup oleh entri pasca-`m9` "docs: render Mermaid diverifikasi di GitHub".
+Isi di bawah dibiarkan sebagai catatan keadaan sebelum penutupan.
 
 `docs/arsitektur.md` (`70fa9d3`): **belum divalidasi dengan render;
 pemeriksaan lokal dengan `mmdc` tidak bisa karena image-nya ditolak.** `mmdc`
