@@ -99,33 +99,32 @@ berkas itu. Karena itu status di atas tetap "belum divalidasi".
 
 ---
 
-## Belum ditag — pasca-`m9`
+## v1.0.0 — rilis pertama (20 Nov 2026)
 
-Commit di atas tag `m9` (`c4fcf2c`). Bagian ini **belum lengkap**: per entri
-di bawah, sepuluh commit sudah ada di atas `m9` dan hanya satu yang dicatat di
-sini. Sisanya menunggu entri tersendiri.
+Tag `v1.0.0` dibuat setelah CI hijau di master. Hash commit pastinya ada di tag itu.
 
-### docs: render Mermaid diverifikasi di GitHub
+Ringkasan pasca-`m9` (sepuluh commit, tanpa menulis ulang riwayat):
 
-19 Nov 2026. Kesembilan blok Mermaid di repo dibuka di GitHub
-(`rizalcodes/payment-guard`, branch `master`) dan **9 dari 9 tampil sebagai
-diagram**:
+- Repo di-rename ke `payment-guard`, dibuka ke publik (19 Nov).
+- README Inggris (`3d8cccc`) dan README Indonesia pindah ke `README.id.md`
+  (`101e31e`).
+- Status verifikasi dan ringkasan eval ditulis jujur, dengan angka mentah
+  (`3d8cccc`).
+- Lisensi MIT (`bb31b2d`) dan `SECURITY.md` dengan Private Vulnerability
+  Reporting (`4bf0d4c`).
+- Konfigurasi gitleaks dengan allowlist kosong dan `[extend] useDefault = true`
+  (`4718db7`).
+- Kunci default Anvil akun #0 diganti boneka sintetis di tes (`9302a59`).
+  Literal di riwayat lama tidak ditulis ulang.
+- Koreksi "ditinjau di M9" menjadi "ditinjau di revisi PRD v1.1" (`05efd76`,
+  `9789b5f`).
+- Koreksi status `PROGRES.md` (`0ca0be5`, `118d27d`).
+- Render Mermaid 9 dari 9 diperiksa manual di GitHub (`906651f`).
+- Item utang Mermaid ditutup (`9deb350`).
 
-| Berkas | Blok | Hasil |
-|---|---|---|
-| `README.md` | 1 | tampil sebagai diagram |
-| `docs/arsitektur.md` | 2 (flowchart dan diagram ER tabel) | tampil sebagai diagram |
-| `docs/Architecture_v1.1.md` | 7 | tampil sebagai diagram |
-
-**Pengecekannya manual, oleh pemilik repo, bukan lewat CI.** Tidak ada
-otomatisasi yang menjaganya: `mmdc` tetap tidak terpasang dan image resminya
-tetap ditolak, jadi diagram yang rusak masih bisa masuk master tanpa ada yang
-menahannya. Tangkapan layarnya tidak disimpan di repo, sehingga bukti yang
-tersisa adalah catatan ini.
-
-Butir "Known limitations" di `README.md` diperbarui mengikuti keadaan itu.
-Item di "Utang terbuka" yang ditulis `13beaa9` **dibiarkan apa adanya**
-sebagai catatan sejarah; ia menggambarkan keadaan sebelum pengecekan ini.
+Batasan yang tetap berlaku (lihat README): tidak ada bukti di Base Sepolia,
+settlement devnet lama belum diperiksa, skenario (c) `mismatch` tidak diuji di
+devnet, render Mermaid tidak diotomatisasi.
 
 ---
 
