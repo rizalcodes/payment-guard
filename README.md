@@ -225,7 +225,7 @@ Sources: [docs/eval-results/2026-11-11-qwen3-1.7b.md](docs/eval-results/2026-11-
 
 ---
 
-## ⚠️ Known Limitations
+## Known limitations
 
 None of the following exists in v1, and none of it is hidden behind a flag.
 
@@ -239,6 +239,17 @@ None of the following exists in v1, and none of it is hidden behind a flag.
 - **Two document-category lists must be edited together** in `tests/unit/test_repo_layout.py`.
 
 The current list, with what has been closed and when, is the "Utang terbuka" section of [docs/CHANGELOG.md](docs/CHANGELOG.md).
+
+---
+
+## Releasing
+
+Run the full suite on a clean checkout (`checkout bersih`): a fresh clone into a
+scratch folder outside the repo, or `git stash -u` in the original. Do not judge
+the suite in a working tree that has untracked files.
+`test_only_example_env_files_are_tracked` reads the git index, so an untracked
+`.env*` file is invisible to it. The full procedure is
+[docs/runbook.md](docs/runbook.md) section 7.
 
 ---
 
